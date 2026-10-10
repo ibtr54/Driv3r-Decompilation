@@ -273,6 +273,10 @@ struct App
     float EffectsGain() const { return vol.effects * vol.overall / 10000.0f; }
     float MusicGain() const { return vol.music * vol.overall / 10000.0f; }
 
+    // On/off settings by key ("<key>_toggle" / "stat_<key>"); unknown keys read as on.
+    std::map<std::string, bool> toggles;
+    bool Toggle(const std::string& k) const { auto it = toggles.find(k); return it == toggles.end() || it->second; }
+
     // "TERR:" / "LANG:" prefixes as used by the game's file layer (0x8ac230 vtbl+0x10).
     std::string Resolve(const std::string& p) const
     {
@@ -545,6 +549,122 @@ private:
     Layer layers_[2];
 };
 static FrontEndMusic g_music;
+
+// ============================================================ profile ======
+// Settings are saved per player in Saves\D3P_<name>\ProfileData: a raw dump
+// of the settings object 0x8ac58c from +0x8 (0x324 dwords). 0x548300 copies
+// the live block (+0x8) to the saved one (+0xC98) on settings_accept, which
+// then autosaves the profile (0x8ac5a0 vtbl+0x18); 0x548840 copies it back
+// on settings_restore. Offsets below are object offsets (file offset + 8).
+class Profile
+{
+public:
+    static const int kSize = 0x324 * 4;
+
+    Profile() : data_(kSize) {}
+
+    // The name screen (GUI\NAME) that creates profiles is not implemented, so
+    // use the most recently saved existing profile. Without one the block is
+    // kept in memory only (accept / restore still work, nothing is written).
+    bool Load(const std::string& gameDir)
+    {
+        std::string saves = gameDir + "\\Saves\\";
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA((saves + "D3P_*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        FILETIME newest = {};
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            std::string p = saves + fd.cFileName + "\\ProfileData";
+            WIN32_FILE_ATTRIBUTE_DATA a;
+            if (!GetFileAttributesExA(p.c_str(), GetFileExInfoStandard, &a) || a.nFileSizeLow != kSize) continue;
+            if (path_.empty() || CompareFileTime(&a.ftLastWriteTime, &newest) > 0) {
+                path_ = p;
+                newest = a.ftLastWriteTime;
+            }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+        if (path_.empty()) return false;
+
+        FILE* f = fopen(path_.c_str(), "rb");
+        if (!f) { path_.clear(); return false; }
+        std::vector<uint8_t> d(kSize);
+        bool ok = fread(d.data(), 1, kSize, f) == size_t(kSize);
+        fclose(f);
+        if (ok) data_.swap(d);
+        else path_.clear();
+        return ok;
+    }
+
+    // Keeps a copy of the original file next to it before the first write.
+    bool Save()
+    {
+        if (path_.empty()) return false;
+        std::string bak = path_ + ".bak", tmp = path_ + ".tmp";
+        if (!FileExists(bak)) CopyFileA(path_.c_str(), bak.c_str(), TRUE);
+        FILE* f = fopen(tmp.c_str(), "wb");
+        if (!f) return false;
+        bool ok = fwrite(data_.data(), 1, kSize, f) == size_t(kSize);
+        ok = fclose(f) == 0 && ok;
+        return ok && MoveFileExA(tmp.c_str(), path_.c_str(), MOVEFILE_REPLACE_EXISTING);
+    }
+
+    bool HasFile() const { return !path_.empty(); }
+    const std::string& Path() const { return path_; }
+    int32_t Int(int off) const { int32_t v; memcpy(&v, &data_[off - 8], 4); return v; }
+    void SetInt(int off, int32_t v) { memcpy(&data_[off - 8], &v, 4); }
+    bool Flag(int off) const { return data_[off - 8] != 0; }
+    // Some flags hold fill bytes (e.g. 0xA1); only rewrite on a real change.
+    void SetFlag(int off, bool v) { if (Flag(off) != v) data_[off - 8] = v ? 1 : 0; }
+
+private:
+    std::string path_;
+    std::vector<uint8_t> data_;
+};
+static Profile g_profile;
+
+// On/off settings: "<key>_toggle" (settings handler 0x548860) flips the byte,
+// "stat_<key>" shows row 0 when it is non-zero (e.g. 0x5553af).
+struct SettingFlag { const char* key; int off; };
+static const SettingFlag kSettingFlags[] = {
+    { "tc_pressure_slomo", 0x14 }, { "eax", 0x154 },           { "vib", 0x170 },
+    { "sub", 0x171 },              { "mph", 0x174 },           { "inv", 0x175 },
+    { "brake", 0x176 },            { "weapon", 0x177 },        { "autoaim", 0x178 },
+    { "allmissions", 0x19f },      { "weapons", 0x1a1 },       { "ammo", 0x1a3 },
+    { "invincibility", 0x1a5 },    { "immunity", 0x1a7 },      { "tommy", 0x1a9 },
+    { "vehicle", 0x1ab },          { "fulljointphysics", 0x204 }, { "shadows", 0xc8c },
+    { "synceveryframe", 0xc8d },   { "particle", 0xc8e },      { "advshaders", 0xc94 },
+    { "antialias", 0xc95 },
+};
+
+// Saved block -> live settings (startup, and 0x548840 on settings_restore).
+static void ApplyProfile()
+{
+    g.vol.overall = std::max(0, std::min(100, int(g_profile.Int(0x34))));
+    g.vol.effects = std::max(0, std::min(100, int(g_profile.Int(0x38))));
+    g.vol.music = std::max(0, std::min(100, int(g_profile.Int(0x3c))));
+    for (const SettingFlag& f : kSettingFlags) g.toggles[f.key] = g_profile.Flag(f.off);
+    // +0x2c text language, +0x28 audio language (handlers 0x548a92..0x548b3c);
+    // here one language drives both.
+    for (int i = 0; i < kLanguageCount; ++i)
+        if (kLanguages[i].id == uint32_t(g_profile.Int(0x2c)) && i != g.lang) g.SetLanguage(i);
+}
+
+// Live settings -> saved block (0x548300), then the profile file (autosave)
+// when there is one.
+static void SaveProfile(bool toFile = true)
+{
+    g_profile.SetInt(0x34, g.vol.overall);
+    g_profile.SetInt(0x38, g.vol.effects);
+    g_profile.SetInt(0x3c, g.vol.music);
+    for (const SettingFlag& f : kSettingFlags) g_profile.SetFlag(f.off, g.Toggle(f.key));
+    g_profile.SetInt(0x28, kLanguages[g.lang].id);
+    g_profile.SetInt(0x2c, kLanguages[g.lang].id);
+    if (!toFile) return;
+    if (!g_profile.HasFile()) { Log("Settings: no profile in Saves\\, not written"); return; }
+    bool ok = g_profile.Save();
+    Log("Settings: %s %s", ok ? "saved to" : "FAILED to save", g_profile.Path().c_str());
+}
 
 // ============================================================ MEC menus ====
 // Runtime for one .MEC file: screen stack, focus, navigation and drawing.
@@ -886,7 +1006,6 @@ public:
             if (fn == "val_music") { v = g.vol.music; return true; }
             return false;
         };
-        committed_ = g.vol;
         menu_.Reset(0);  // "Main"
         g_music.Load();  // SOUNDS\FEMUSIC.DAT (FUN_00552480), started at 0x551ca0
         g_music.Play();
@@ -962,9 +1081,9 @@ private:
         // (strncmp 15/16 at 0x549584/0x5495d4), so "settings_restore_no_dropback"
         // (the screens' exit action) also reverts. Accept commits (0x548300) and
         // the front end then goes back one screen (0x554da8).
-        if (StartsWithI(a, "settings_accept")) { committed_ = g.vol; menu_.Pop(); return; }
+        if (StartsWithI(a, "settings_accept")) { SaveProfile(); menu_.Pop(); return; }
         if (StartsWithI(a, "settings_restore")) {
-            g.vol = committed_;  // 0x548840
+            ApplyProfile();  // 0x548840
             g_music.UpdateVolume();
             if (a == "settings_restore") menu_.Pop();
             return;
@@ -1005,7 +1124,7 @@ private:
         // Generic on/off settings: "<x>_toggle" <-> "stat_<x>" / "<x>_onoff".
         if (a.size() > 7 && a.compare(a.size() - 7, 7, "_toggle") == 0) {
             std::string key = a.substr(0, a.size() - 7);
-            toggles_[key] = !Toggle(key);
+            g.toggles[key] = !g.Toggle(key);
             Changed();
         }
     }
@@ -1039,11 +1158,11 @@ private:
         }
         if (StartsWithI(s, "stat_")) {
             std::string key = s.substr(5);
-            if (toggles_.count(key)) return Toggle(key) ? 0 : 1;
+            if (g.toggles.count(key)) return g.Toggle(key) ? 0 : 1;
         }
         if (s.size() > 6 && s.compare(s.size() - 6, 6, "_onoff") == 0) {
             std::string key = s.substr(0, s.size() - 6);
-            if (toggles_.count(key)) return Toggle(key) ? 0 : 1;
+            if (g.toggles.count(key)) return g.Toggle(key) ? 0 : 1;
         }
         return st;
     }
@@ -1065,7 +1184,6 @@ private:
         g_music.UpdateVolume();
         Changed();
     }
-    bool Toggle(const std::string& k) { auto it = toggles_.find(k); return it == toggles_.end() || it->second; }
 
     void PlayBackground(const std::string& file)
     {
@@ -1129,9 +1247,7 @@ private:
     int city_ = 0, time_ = 1, weather_ = 0, vehicle_ = 0;
     bool cops_ = true;
     int dg_ = 0, dgCity_ = 0, subgame_ = 0;
-    App::Volumes committed_;  // last accepted sound settings
     int restorePage_ = 0;     // page for the restore-defaults popup
-    std::map<std::string, bool> toggles_;
 };
 
 // ============================================================ window ========
@@ -1264,6 +1380,13 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
 
     g.onLanguageChanged.push_back([] { g_sounds.Load(); });  // AUDIO: follows the language
     g.SetLanguage(0);
+    if (g_profile.Load(g.gameDir)) {
+        Log("Settings: loaded %s", g_profile.Path().c_str());
+        ApplyProfile();
+    } else {
+        Log("Settings: no profile in Saves\\, using defaults");
+        SaveProfile(false);  // defaults become the saved block for settings_restore
+    }
 
     BootSequencer seq;
     LanguageScreen language;
