@@ -311,6 +311,61 @@ static App g;
 
 static bool IsSkipKey(WPARAM vk) { return vk == VK_RETURN || vk == VK_ESCAPE || vk == VK_SPACE; }
 
+// ============================================================ SOUND.GSD ====
+// AUDIO:SOUNDS\SOUND.GSD: "01KB", u32 bankCount, u32 bankOffset[bankCount].
+// Bank: u32 count, u32 dataOffset, u32 dataSize, then count x 20-byte records
+// {u32 offset; u32 size; u16 rate; u8 flags; u8; i32 loop; u8; u8; u16} and
+// raw 16-bit PCM. Short samples (menu sounds) have flags bit 7 clear, mono
+// data at bank + dataOffset + offset and loop = -1. The front-end music
+// (bank 59) has flags 0x81, loop 0 and offset == dataOffset: its data is
+// interleaved stereo at bank + offset (inferred from the data itself).
+struct GsdSample
+{
+    std::vector<uint8_t> pcm;
+    uint32_t rate = 0;
+    int channels = 1;
+    bool loop = false;
+};
+
+static bool LoadGsdSample(int bank, int sample, GsdSample& out)
+{
+    std::string gsd = g.Resolve("AUDIO:SOUNDS\\SOUND.GSD");
+    FILE* f = fopen(gsd.c_str(), "rb");
+    if (!f) { Log("Sound: cannot open %s", gsd.c_str()); return false; }
+    char magic[4] = {};
+    uint32_t banks = 0, bankOff = 0, count = 0, dataOff = 0, dataSize = 0;
+    uint8_t rec[20];
+    bool ok = fread(magic, 1, 4, f) == 4 && memcmp(magic, "01KB", 4) == 0 &&
+              fread(&banks, 4, 1, f) == 1 && bank >= 0 && uint32_t(bank) < banks &&
+              fseek(f, 8 + bank * 4, SEEK_SET) == 0 && fread(&bankOff, 4, 1, f) == 1 &&
+              fseek(f, long(bankOff), SEEK_SET) == 0 && fread(&count, 4, 1, f) == 1 &&
+              fread(&dataOff, 4, 1, f) == 1 && fread(&dataSize, 4, 1, f) == 1 &&
+              sample >= 0 && uint32_t(sample) < count &&
+              fseek(f, long(bankOff + 12 + sample * 20), SEEK_SET) == 0 && fread(rec, 1, 20, f) == 20;
+    if (ok) {
+        uint32_t off, size;
+        uint16_t rate;
+        int32_t loop;
+        memcpy(&off, rec, 4);
+        memcpy(&size, rec + 4, 4);
+        memcpy(&rate, rec + 8, 2);
+        memcpy(&loop, rec + 12, 4);
+        bool stereo = (rec[10] & 0x80) != 0;
+        uint32_t start = stereo ? off : dataOff + off;  // relative to the bank
+        ok = size != 0 && start >= dataOff && start + size <= dataOff + dataSize;
+        if (ok) {
+            out.pcm.resize(size);
+            ok = fseek(f, long(bankOff + start), SEEK_SET) == 0 && fread(out.pcm.data(), 1, size, f) == size;
+            out.rate = rate;
+            out.channels = stereo ? 2 : 1;
+            out.loop = loop >= 0;
+        }
+    }
+    fclose(f);
+    if (!ok) out.pcm.clear();
+    return ok;
+}
+
 // ========================================================== menu sounds ====
 // Menu sound object (global 0x8ac3b8, vtbl 0x781f60, created by 0x46a6c0).
 // Load (0x46a4f0 / 0x46a580): SOUNDS\MENU.DAT = "01SM", u8 bank, u8 sample[3].
@@ -318,11 +373,6 @@ static bool IsSkipKey(WPARAM vk) { return vk == VK_RETURN || vk == VK_ESCAPE || 
 // volume 1.0, pitch 1.0. The GUI plays id 0 when the focus moves
 // (FUN_0046a170), 1 on select (FUN_00469d20 input 6) and 2 on back (input 7);
 // the front-end handlers play id 0 when a value changes.
-//
-// SOUND.GSD: "01KB", u32 bankCount, u32 bankOffset[bankCount]. Bank:
-// u32 count, u32 dataOffset, u32 dataSize, then count x 20-byte records
-// {u32 offset; u32 size; u16 rate; u8; u8; i32 loop; u8; u8; u16} and raw
-// 16-bit mono PCM at bank + dataOffset + offset.
 class MenuSounds
 {
 public:
@@ -340,34 +390,14 @@ public:
         if (n < 8 || memcmp(dat, "01SM", 4) != 0) { Log("Sound: SOUNDS\\MENU.DAT missing or invalid"); return; }
         int bank = int8_t(dat[4]);
 
-        std::string gsd = g.Resolve("AUDIO:SOUNDS\\SOUND.GSD");
-        f = fopen(gsd.c_str(), "rb");
-        if (!f) { Log("Sound: cannot open %s", gsd.c_str()); return; }
-        char magic[4] = {};
-        uint32_t banks = 0, bankOff = 0, count = 0, dataOff = 0, dataSize = 0;
-        bool ok = fread(magic, 1, 4, f) == 4 && memcmp(magic, "01KB", 4) == 0 &&
-                  fread(&banks, 4, 1, f) == 1 && bank >= 0 && uint32_t(bank) < banks &&
-                  fseek(f, 8 + bank * 4, SEEK_SET) == 0 && fread(&bankOff, 4, 1, f) == 1 &&
-                  fseek(f, long(bankOff), SEEK_SET) == 0 && fread(&count, 4, 1, f) == 1 &&
-                  fread(&dataOff, 4, 1, f) == 1 && fread(&dataSize, 4, 1, f) == 1;
-        for (int id = 0; ok && id < 3; ++id) {
+        for (int id = 0; id < 3; ++id) {
             int s = int8_t(dat[5 + id]);
-            if (s < 0 || uint32_t(s) >= count) continue;
-            uint8_t rec[20];
-            if (fseek(f, long(bankOff + 12 + s * 20), SEEK_SET) || fread(rec, 1, 20, f) != 20) continue;
-            uint32_t off, size;
-            uint16_t rate;
-            memcpy(&off, rec, 4);
-            memcpy(&size, rec + 4, 4);
-            memcpy(&rate, rec + 8, 2);
-            if (size == 0 || off + size > dataSize) continue;
-            std::vector<uint8_t> pcm(size);
-            if (fseek(f, long(bankOff + dataOff + off), SEEK_SET) || fread(pcm.data(), 1, size, f) != size) continue;
-            wav_[id] = MakeWav(pcm, rate);
-            Log("Sound: menu id %d = bank %d sample %d (%u Hz, %u ms)", id, bank, s, rate,
-                unsigned(size / 2 * 1000 / (rate ? rate : 1)));
+            GsdSample smp;
+            if (s < 0 || !LoadGsdSample(bank, s, smp)) continue;
+            wav_[id] = MakeWav(smp.pcm, smp.rate);
+            Log("Sound: menu id %d = bank %d sample %d (%u Hz, %u ms)", id, bank, s, smp.rate,
+                unsigned(smp.pcm.size() / 2 * 1000 / (smp.rate ? smp.rate : 1)));
         }
-        fclose(f);
     }
 
     void Play(int id)
@@ -402,6 +432,93 @@ private:
     std::vector<uint8_t> wav_[3];
 };
 static MenuSounds g_sounds;
+
+// ====================================================== front-end music ====
+// Music object (vtbl 0x789b0c, loaded by 0x54b860 from FUN_00552480, global
+// 0x8ac594). Load callback (0x54b8f0): SOUNDS\FEMUSIC.DAT = "01MM", u8 bank[2],
+// u8 sample[2]; the file holds 3b 3c 00 00, i.e. bank 59 sample 0 and bank 60
+// sample 0. Both banks are reserved (0x54ba00) and both layers are started
+// together at volume 1.0, pitch 1.0 (0x551ca0 on front-end start, 0x54b9a0
+// restarts them if they stopped). The front-end exit (0x552c6c) releases the
+// object, which stops them. Bank 60 is empty in every shipped SOUND.GSD, so
+// only bank 59 (~63 s, 44.1 kHz stereo, looping) is heard.
+// PlaySound plays one sound at a time (the menu sounds use it), so the
+// music goes through waveOut instead.
+class FrontEndMusic
+{
+public:
+    ~FrontEndMusic() { Stop(); }
+
+    void Load()
+    {
+        Stop();
+        for (auto& l : layers_) l.smp = GsdSample();
+        uint8_t dat[8] = {};
+        FILE* f = fopen("SOUNDS\\FEMUSIC.DAT", "rb");
+        size_t n = f ? fread(dat, 1, sizeof(dat), f) : 0;
+        if (f) fclose(f);
+        if (n < 8 || memcmp(dat, "01MM", 4) != 0) { Log("Music: SOUNDS\\FEMUSIC.DAT missing or invalid"); return; }
+        int bank[2] = { int8_t(dat[4]), int8_t(dat[5]) };
+        if (bank[0] < 0 || bank[1] < 0) return;  // 0x54b9a0 needs both
+        for (int i = 0; i < 2; ++i) {
+            int s = int8_t(dat[6 + i]);
+            Layer& l = layers_[i];
+            if (!LoadGsdSample(bank[i], s, l.smp)) { Log("Music: bank %d sample %d empty", bank[i], s); continue; }
+            Log("Music: layer %d = bank %d sample %d (%u Hz, %d ch, %u s%s)", i, bank[i], s, l.smp.rate,
+                l.smp.channels, unsigned(l.smp.pcm.size() / (2 * l.smp.channels) / (l.smp.rate ? l.smp.rate : 1)),
+                l.smp.loop ? ", loop" : "");
+        }
+    }
+
+    void Play()  // starts the layers that are not already playing
+    {
+        for (Layer& l : layers_) {
+            if (l.out || l.smp.pcm.empty()) continue;
+            WAVEFORMATEX wf = {};
+            wf.wFormatTag = WAVE_FORMAT_PCM;
+            wf.nChannels = WORD(l.smp.channels);
+            wf.nSamplesPerSec = l.smp.rate;
+            wf.wBitsPerSample = 16;
+            wf.nBlockAlign = WORD(wf.nChannels * 2);
+            wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
+            if (waveOutOpen(&l.out, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
+                Log("Music: waveOutOpen failed");
+                l.out = nullptr;
+                continue;
+            }
+            l.hdr = WAVEHDR();
+            l.hdr.lpData = reinterpret_cast<LPSTR>(l.smp.pcm.data());
+            l.hdr.dwBufferLength = DWORD(l.smp.pcm.size() / wf.nBlockAlign * wf.nBlockAlign);
+            waveOutPrepareHeader(l.out, &l.hdr, sizeof(l.hdr));
+            if (l.smp.loop) {
+                l.hdr.dwFlags |= WHDR_BEGINLOOP | WHDR_ENDLOOP;
+                l.hdr.dwLoops = 0xffffffffu;
+            }
+            waveOutWrite(l.out, &l.hdr, sizeof(l.hdr));
+        }
+    }
+
+    void Stop()
+    {
+        for (Layer& l : layers_) {
+            if (!l.out) continue;
+            waveOutReset(l.out);
+            waveOutUnprepareHeader(l.out, &l.hdr, sizeof(l.hdr));
+            waveOutClose(l.out);
+            l.out = nullptr;
+        }
+    }
+
+private:
+    struct Layer
+    {
+        GsdSample smp;
+        HWAVEOUT out = nullptr;
+        WAVEHDR hdr = {};
+    };
+    Layer layers_[2];
+};
+static FrontEndMusic g_music;
 
 // ============================================================ MEC menus ====
 // Runtime for one .MEC file: screen stack, focus, navigation and drawing.
@@ -731,9 +848,12 @@ public:
             return false;
         };
         menu_.Reset(0);  // "Main"
+        g_music.Load();  // SOUNDS\FEMUSIC.DAT (FUN_00552480), started at 0x551ca0
+        g_music.Play();
     }
     void Leave() override
     {
+        g_music.Stop();  // 0x552c6c releases the music object
         bg_.Close();
         pane_.Close();
         extra_.Close();
@@ -898,11 +1018,13 @@ private:
     {
         bg_.Close();
         pane_.Close();
+        g_music.Stop();  // assumption: not traced, but the extras have their own soundtrack
         if (!extra_.Open(g.Resolve(file), g.AudioTrack(), false)) EndExtra();
     }
     void EndExtra()
     {
         extra_.Close();
+        g_music.Play();  // like 0x54b9a0: restart the music if it is not playing
         // Re-run the screen's enter action to restore its background video.
         if (MecScreen* s = menu_.Top()) Action(s->onEnter.empty() ? "Movie=FMV\\FRONTEND.XMV" : s->onEnter);
         if (!bg_.IsOpen()) PlayBackground("FMV\\FRONTEND.XMV");
@@ -1003,8 +1125,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
 
     g.inst = inst;
 
-    g.gameDir = FindGameDir("D:\\l\\gta-vc\\DRIV3R");
-    //g.gameDir = FindGameDir(cmdLine);
+    //g.gameDir = FindGameDir("D:\\l\\gta-vc\\DRIV3R");
+    g.gameDir = FindGameDir(cmdLine);
     if (g.gameDir.empty()) {
         MessageBoxA(nullptr,
                     "Driv3r game folder not found.\n\nPut Driv3rMenu.exe in the DRIV3R folder or pass "
