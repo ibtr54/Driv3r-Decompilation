@@ -144,6 +144,7 @@ bool ParseElement(Reader& r, const uint32_t* sizes, int type, Element& e)
         memcpy(&e.align, x + 8, 4);
         e.sx = F32(x, 3);
         e.sy = F32(x, 4);
+        e.colourFn = FixedString(x + 20, 32);
         e.textFn = FixedString(x + 52, 32);
         return true;
     }

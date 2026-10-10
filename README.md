@@ -3,7 +3,7 @@
 Reverse engineering and decompilation of *Driver 3 (Driv3r)*, focused on analyzing its internal structure and reconstructing its code.
 
 To run this, you need the game files.
-Inside the Main function you can provide the game path.
+Provide the game path. On Visual Studio go to Project-><Project Name> Properties. Then click on the debug tab. Fill in the arguments in the textbox labeled Command line arguments.
 
 ## Documentation
 
@@ -18,3 +18,4 @@ Soon a LaTeX document will be included in the repository, providing a detailed e
 ## Disclaimer
 
 This project is intended for educational and research purposes. All intellectual property remains with its respective owners.
+

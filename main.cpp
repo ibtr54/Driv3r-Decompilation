@@ -267,6 +267,12 @@ struct App
     Screen* cur = nullptr;
     std::vector<std::function<void()>> onLanguageChanged;
 
+    // Sound settings (settings object 0x8ac58c: +0x34 overall, +0x38 effects,
+    // +0x3c music; 0..100, defaults from 0x5498e0).
+    struct Volumes { int overall = 100, effects = 100, music = 60; } vol;
+    float EffectsGain() const { return vol.effects * vol.overall / 10000.0f; }
+    float MusicGain() const { return vol.music * vol.overall / 10000.0f; }
+
     // "TERR:" / "LANG:" prefixes as used by the game's file layer (0x8ac230 vtbl+0x10).
     std::string Resolve(const std::string& p) const
     {
@@ -382,6 +388,7 @@ public:
     {
         PlaySoundA(nullptr, nullptr, 0);  // stop before freeing the buffers
         for (auto& w : wav_) w.clear();
+        for (auto& p : pcm_) p.clear();
 
         uint8_t dat[8] = {};
         FILE* f = fopen("SOUNDS\\MENU.DAT", "rb");
@@ -395,15 +402,23 @@ public:
             GsdSample smp;
             if (s < 0 || !LoadGsdSample(bank, s, smp)) continue;
             wav_[id] = MakeWav(smp.pcm, smp.rate);
+            pcm_[id] = std::move(smp.pcm);
             Log("Sound: menu id %d = bank %d sample %d (%u Hz, %u ms)", id, bank, s, smp.rate,
-                unsigned(smp.pcm.size() / 2 * 1000 / (smp.rate ? smp.rate : 1)));
+                unsigned(pcm_[id].size() / 2 * 1000 / (smp.rate ? smp.rate : 1)));
         }
     }
 
+    // PlaySound has no volume control, so the effects volume is applied to
+    // the samples (the original sets sound-manager categories 0/1 and 3).
     void Play(int id)
     {
-        if (id >= 0 && id < 3 && !wav_[id].empty() &&
-            !PlaySoundA(reinterpret_cast<LPCSTR>(wav_[id].data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT))
+        if (id < 0 || id >= 3 || wav_[id].empty()) return;
+        PlaySoundA(nullptr, nullptr, 0);  // the buffer is rewritten below
+        float gain = g.EffectsGain();
+        const int16_t* src = reinterpret_cast<const int16_t*>(pcm_[id].data());
+        int16_t* dst = reinterpret_cast<int16_t*>(wav_[id].data() + 44);
+        for (size_t i = 0; i < pcm_[id].size() / 2; ++i) dst[i] = int16_t(src[i] * gain);
+        if (!PlaySoundA(reinterpret_cast<LPCSTR>(wav_[id].data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT))
             Log("Sound: PlaySound failed for menu id %d", id);
     }
 
@@ -429,7 +444,8 @@ private:
         return w;
     }
 
-    std::vector<uint8_t> wav_[3];
+    std::vector<uint8_t> wav_[3];  // WAV images played by PlaySound
+    std::vector<uint8_t> pcm_[3];  // original samples, at full volume
 };
 static MenuSounds g_sounds;
 
@@ -496,6 +512,16 @@ public:
             }
             waveOutWrite(l.out, &l.hdr, sizeof(l.hdr));
         }
+        UpdateVolume();
+    }
+
+    // Music volume = sound-manager category 2 (and 0x8ac48c+0x40), scaled by
+    // the overall volume (category 3).
+    void UpdateVolume()
+    {
+        DWORD v = DWORD(std::min(1.0f, std::max(0.0f, g.MusicGain())) * 0xffff);
+        for (Layer& l : layers_)
+            if (l.out) waveOutSetVolume(l.out, v | (v << 16));
     }
 
     void Stop()
@@ -536,6 +562,7 @@ public:
     std::function<int(const std::string&, int)> onStatus;  // returns new state
     std::function<void(HDC, int, int, int, int)> drawFmv;
     std::function<bool(const std::string&, std::wstring&)> dynamicText;  // TEXT textFn
+    std::function<bool(const std::string&, int&)> valueText;  // "val_*" -> number for "%d"
 
     bool Load(const std::string& name)  // e.g. "GUI\\FRONT" -> TERR:%s.MEC + LANG:%s.TXT
     {
@@ -652,6 +679,10 @@ private:
                 if (it == text.end()) break;
                 s = it->second;
             }
+            int value;
+            size_t pct = s.find(L"%d");
+            if (pct != std::wstring::npos && !e.colourFn.empty() && valueText && valueText(e.colourFn, value))
+                s.replace(pct, 2, std::to_wstring(value));
             if (s.empty() || !g.font.Loaded()) break;
             s = ExpandIcons(s);
             float tw = g.font.Width(s, e.sx);
@@ -847,6 +878,15 @@ public:
             if (fn == "reqvehicletext") { out.clear(); return true; }
             return false;
         };
+        // The original answers only val_overallvol (0x5551c4, +0x34); it has no
+        // handler for val_volume / val_music, so their values are an assumption.
+        menu_.valueText = [](const std::string& fn, int& v) {
+            if (fn == "val_overallvol") { v = g.vol.overall; return true; }
+            if (fn == "val_volume") { v = g.vol.effects; return true; }
+            if (fn == "val_music") { v = g.vol.music; return true; }
+            return false;
+        };
+        committed_ = g.vol;
         menu_.Reset(0);  // "Main"
         g_music.Load();  // SOUNDS\FEMUSIC.DAT (FUN_00552480), started at 0x551ca0
         g_music.Play();
@@ -913,6 +953,39 @@ private:
         if (a == "dg_nextcity" || a == "dg_prevcity") { Changed(); Step(dgCity_, 3, a[3] == 'n'); return PreviewDg(); }
         if (a == "nextsubgame" || a == "prevsubgame") { Changed(); Step(subgame_, 3, a[0] == 'n'); return; }
 
+        // Options: Sound (settings handler 0x548b77..0x5492fb)
+        if (a == "volup" || a == "voldown") return StepVolume(g.vol.effects, a == "volup");
+        if (a == "musicup" || a == "musicdown") return StepVolume(g.vol.music, a == "musicup");
+        if (a == "overallvol_up" || a == "overallvol_down") return StepVolume(g.vol.overall, a == "overallvol_up");
+
+        // Settings screens. The settings handler compares only the prefix
+        // (strncmp 15/16 at 0x549584/0x5495d4), so "settings_restore_no_dropback"
+        // (the screens' exit action) also reverts. Accept commits (0x548300) and
+        // the front end then goes back one screen (0x554da8).
+        if (StartsWithI(a, "settings_accept")) { committed_ = g.vol; menu_.Pop(); return; }
+        if (StartsWithI(a, "settings_restore")) {
+            g.vol = committed_;  // 0x548840
+            g_music.UpdateVolume();
+            if (a == "settings_restore") menu_.Pop();
+            return;
+        }
+        // Restore-defaults popup (screen 'Restore'): restore_enter_* selects the
+        // page (0x5555xx, this+0xac8), restore_accept runs its defaults routine
+        // (jump table at 0x5558fc) and goes back.
+        static const char* kRestorePages[] = { "restore_enter_game", "restore_enter_cheats", "restore_enter_controls",
+                                               "restore_enter_controller", "restore_enter_sound", "restore_enter_scard",
+                                               "restore_enter_appearance", "restore_enter_vcard" };
+        for (int i = 0; i < 8; ++i)
+            if (a == kRestorePages[i]) { restorePage_ = i; return; }
+        if (a == "restore_accept") {
+            if (restorePage_ == 4) {  // 0x5498e0: overall 100, effects 100, music 60
+                g.vol = App::Volumes();
+                g_music.UpdateVolume();
+            }
+            menu_.Pop();
+            return;
+        }
+
         // Options: language
         if (a == "nextlangtext" || a == "nextlangaudio") { Changed(); return g.SetLanguage(g.lang + 1); }
         if (a == "prevlangtext" || a == "prevlangaudio") { Changed(); return g.SetLanguage(g.lang - 1); }
@@ -950,6 +1023,12 @@ private:
         if (s == "stat_night") return time_ == 3 ? 0 : 1;
         if (s == "stat_cops") return cops_ ? 0 : 1;
         if (s == "stat_subgame") return subgame_;
+        // stat_restoretitle1..4 (0x55581f..): title n shows row 0 for page
+        // 2(n-1), row 1 for page 2(n-1)+1, and nothing (empty row 2) otherwise.
+        if (StartsWithI(s, "stat_restoretitle") && s.size() == 18) {
+            int first = (s[17] - '1') * 2;
+            return restorePage_ == first ? 0 : restorePage_ == first + 1 ? 1 : 2;
+        }
         static const char* kDg[] = { "stat_dg chase", "stat_dg getaway", "stat_dg trail",
                                      "stat_dg survival", "stat_dg check", "stat_dg gate" };
         for (int i = 0; i < 6; ++i)
@@ -978,6 +1057,14 @@ private:
     // Value changed: the front-end handlers play menu sound 0 (e.g. 0x552ef3).
     static void Changed() { g_sounds.Play(MenuSounds::MOVE); }
     static void Step(int& v, int n, bool next) { v = (v + (next ? 1 : n - 1)) % n; }
+    // Steps of 5 clamped to 0..100; the handler applies the new volume and
+    // then plays menu sound 0 (0x548be6), so the click uses the new level.
+    static void StepVolume(int& v, bool up)
+    {
+        v = std::max(0, std::min(100, v + (up ? 5 : -5)));
+        g_music.UpdateVolume();
+        Changed();
+    }
     bool Toggle(const std::string& k) { auto it = toggles_.find(k); return it == toggles_.end() || it->second; }
 
     void PlayBackground(const std::string& file)
@@ -1042,6 +1129,8 @@ private:
     int city_ = 0, time_ = 1, weather_ = 0, vehicle_ = 0;
     bool cops_ = true;
     int dg_ = 0, dgCity_ = 0, subgame_ = 0;
+    App::Volumes committed_;  // last accepted sound settings
+    int restorePage_ = 0;     // page for the restore-defaults popup
     std::map<std::string, bool> toggles_;
 };
 

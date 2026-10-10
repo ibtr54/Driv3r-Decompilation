@@ -82,6 +82,7 @@ struct Element
     // text
     int textId = 0, align = 0;
     float sx = 1, sy = 1;
+    std::string colourFn;  // also used for "val_*" number queries (Sound screen)
     std::string textFn;
     // button
     std::vector<std::vector<Element>> rows;
