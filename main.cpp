@@ -225,6 +225,140 @@ static bool StartsWithI(const std::string& s, const char* prefix)
     return _strnicmp(s.c_str(), prefix, strlen(prefix)) == 0;
 }
 
+// ============================================================ key map =======
+// Driv3r keeps the key map in one global table (0x7a4e50: 50 records of 0x34
+// bytes, used through the map object 0x8ac590, vtbl 0x789a20). The settings
+// object keeps a copy at +0x208 ("keymap_changed", 0x5495f5), so it is saved
+// in ProfileData. The defaults are the table at 0x7a4218, filled by the static
+// initialiser 0x6dc680 and copied back by "keymap_reset" (0x54a321).
+struct KeyBind  // one direction of an action
+{
+    int32_t key;      // keyboard: DirectInput code (DIK_*), 0x4000 = none
+    int32_t altAxis;  // 1: "alt" is a joystick axis index (dir = sign)
+    int32_t alt;      // 0x1000.. joystick POV / button, 0x2000.. mouse button, 0x4000 none
+    uint8_t dir, pad[3];  // pad keeps the game's bytes as they are
+};
+struct KeyRecord
+{
+    int32_t group;  // 0 misc, 1 camera, 2 vehicle, 3 character (keymap_start1..4)
+    int32_t id;     // game control id (not used by the menu)
+    int32_t axis;   // 1: two rows, one per direction (bind[0], bind[1])
+    KeyBind bind[2];
+    int32_t text[2];  // row names in Text\controls.txt (-1: no second row)
+};
+static_assert(sizeof(KeyRecord) == 0x34, "key map record size");
+static const int kKeyRecords = 50;
+static const KeyRecord kDefaultKeyMap[kKeyRecords] = {
+    { 0, 0x21, 0, { { 0x39, 0, 0x4000, 0 }, { 0x39, 0, 0x4000, 0 } }, { 0, -1 } },
+    { 0, 0x20, 0, { { 0x52, 0, 0x1008, 0 }, { 0x52, 0, 0x1008, 0 } }, { 0x41, -1 } },
+    { 0, 0x14, 0, { { 0x2e, 0, 0x4000, 0 }, { 0x2e, 0, 0x4000, 0 } }, { 0x27, -1 } },
+    { 0, 0xa, 0, { { 0x47, 1, 3, 0 }, { 0x47, 1, 3, 0 } }, { 2, -1 } },
+    { 0, 0xb, 0, { { 0x4f, 1, 3, 1 }, { 0x4f, 1, 3, 1 } }, { 3, -1 } },
+    { 0, 0xc, 0, { { 0x4b, 1, 0, 0 }, { 0x4b, 1, 0, 0 } }, { 4, -1 } },
+    { 0, 0xd, 0, { { 0x4d, 1, 0, 1 }, { 0x4d, 1, 0, 1 } }, { 5, -1 } },
+    { 0, 0xe, 0, { { 0x48, 1, 1, 1 }, { 0x48, 1, 1, 1 } }, { 6, -1 } },
+    { 0, 0xf, 0, { { 0x50, 1, 1, 0 }, { 0x50, 1, 1, 0 } }, { 7, -1 } },
+    { 0, 0x10, 0, { { 0x49, 1, 2, 0 }, { 0x49, 1, 2, 0 } }, { 8, -1 } },
+    { 0, 0x11, 0, { { 0x51, 1, 2, 1 }, { 0x51, 1, 2, 1 } }, { 9, -1 } },
+    { 0, 9, 0, { { 0x52, 0, 0x1006, 0 }, { 0x52, 0, 0x1006, 0 } }, { 0xa, -1 } },
+    { 0, 0x12, 0, { { 0x4c, 0, 0x1007, 0 }, { 0x4c, 0, 0x1007, 0 } }, { 0xb, -1 } },
+    { 1, 0x19, 1, { { 0x1f, 1, 1, 0 }, { 0x11, 1, 1, 1 } }, { 0xc, 0xd } },
+    { 1, 0x1a, 1, { { 0x1e, 1, 0, 0 }, { 0x20, 1, 0, 1 } }, { 0xe, 0xf } },
+    { 1, 0x1b, 1, { { 0xc9, 1, 5, 0 }, { 0xd1, 1, 5, 1 } }, { 0x10, 0x11 } },
+    { 1, 0x1c, 1, { { 0x4b, 1, 2, 0 }, { 0x4d, 1, 2, 1 } }, { 0x12, 0x13 } },
+    { 1, 0x1d, 1, { { 0x48, 1, 4, 0 }, { 0x50, 1, 4, 1 } }, { 0x14, 0x15 } },
+    { 1, 0x18, 0, { { 0x1d, 0, 0x4000, 0 }, { 0x1d, 0, 0x4000, 0 } }, { 0x16, -1 } },
+    { 2, 0x1e, 1, { { 0x4000, 1, 0, 0 }, { 0x4000, 1, 0, 1 } }, { 0x19, 0x1a } },
+    { 2, 0x3c, 0, { { 0x2c, 0, 0x1002, 0 }, { 0x2c, 0, 0x1002, 0 } }, { 0x1b, -1 } },
+    { 2, 0x3d, 0, { { 0x2d, 0, 0x1003, 0 }, { 0x2d, 0, 0x1003, 0 } }, { 0x1c, -1 } },
+    { 2, 0x1f, 1, { { 0x4000, 1, 1, 0 }, { 0x4000, 1, 1, 1 } }, { 0x1d, 0x1e } },
+    { 2, 0x3e, 0, { { 0x21, 0, 0x1000, 0 }, { 0x21, 0, 0x1000, 0 } }, { 0x1f, -1 } },
+    { 2, 0x3f, 0, { { 0x2f, 0, 0x1001, 0 }, { 0x2f, 0, 0x1001, 0 } }, { 0x20, -1 } },
+    { 2, 0x22, 0, { { 0x28, 0, 0x1004, 0 }, { 0x28, 0, 0x1004, 0 } }, { 0x21, -1 } },
+    { 2, 0x23, 0, { { 0x2b, 0, 0x1006, 0 }, { 0x2b, 0, 0x1006, 0 } }, { 0x22, -1 } },
+    { 2, 0x24, 0, { { 0x39, 0, 0x1007, 0 }, { 0x39, 0, 0x1007, 0 } }, { 0x23, -1 } },
+    { 2, 0x25, 0, { { 0x35, 0, 0x1005, 0 }, { 0x35, 0, 0x1005, 0 } }, { 0x24, -1 } },
+    { 2, 0x26, 0, { { 0x12, 0, 0x1009, 0 }, { 0x12, 0, 0x1009, 0 } }, { 0x25, -1 } },
+    { 2, 0x27, 0, { { 0x23, 0, 0x100a, 0 }, { 0x23, 0, 0x100a, 0 } }, { 0x26, -1 } },
+    { 2, 0x15, 0, { { 0x14, 0, 0x4000, 0 }, { 0x14, 0, 0x4000, 0 } }, { 0x28, -1 } },
+    { 2, 0x16, 1, { { 0x1e, 1, 2, 0 }, { 0x20, 1, 2, 1 } }, { 0x29, 0x2a } },
+    { 2, 0x17, 1, { { 0x11, 1, 3, 0 }, { 0x1f, 1, 3, 1 } }, { 0x2c, 0x2b } },
+    { 2, 0x37, 0, { { 0xc8, 1, 1, 1 }, { 0xc8, 1, 1, 1 } }, { 0x2d, -1 } },
+    { 2, 0x38, 0, { { 0xd0, 1, 1, 0 }, { 0xd0, 1, 1, 0 } }, { 0x2e, -1 } },
+    { 2, 0x39, 0, { { 0xcb, 1, 0, 0 }, { 0xcb, 1, 0, 0 } }, { 0x2f, -1 } },
+    { 2, 0x3a, 0, { { 0xcd, 1, 0, 1 }, { 0xcd, 1, 0, 1 } }, { 0x30, -1 } },
+    { 2, 0x3b, 0, { { 0x1c, 0, 0x1004, 1 }, { 0x1c, 0, 0x1004, 1 } }, { 0x31, -1 } },
+    { 3, 0x29, 1, { { 0x1f, 1, 1, 0 }, { 0x11, 1, 1, 1 } }, { 0x33, 0x32 } },
+    { 3, 0x2a, 1, { { 0x1e, 1, 0, 0 }, { 0x20, 1, 0, 1 } }, { 0x34, 0x35 } },
+    { 3, 0x2b, 0, { { 0x12, 0, 0x1009, 0 }, { 0x12, 0, 0x1009, 0 } }, { 0x36, -1 } },
+    { 3, 0x2c, 1, { { 0x4b, 1, 2, 0 }, { 0x4d, 1, 2, 1 } }, { 0x37, 0x38 } },
+    { 3, 0x2d, 1, { { 0x48, 1, 5, 0 }, { 0x50, 1, 5, 1 } }, { 0x39, 0x3a } },
+    { 3, 0x30, 0, { { 0xf, 0, 0x100a, 0 }, { 0xf, 0, 0x100a, 0 } }, { 0x3b, -1 } },
+    { 3, 0x31, 0, { { 0x4c, 0, 0x100b, 0 }, { 0x4c, 0, 0x100b, 0 } }, { 0x3c, -1 } },
+    { 3, 0x32, 0, { { 0x10, 0, 0x100c, 0 }, { 0x10, 0, 0x100c, 0 } }, { 0x3d, -1 } },
+    { 3, 0x33, 0, { { 0x13, 0, 0x100d, 0 }, { 0x13, 0, 0x100d, 0 } }, { 0x3e, -1 } },
+    { 3, 0x34, 0, { { 0x39, 0, 0x100e, 0 }, { 0x39, 0, 0x100e, 0 } }, { 0x3f, -1 } },
+    { 3, 0x36, 0, { { 0x1d, 0, 0x100f, 0 }, { 0x1d, 0, 0x100f, 0 } }, { 0x40, -1 } },
+};
+
+// Rows of a group (map vtbl+0x40, 0x54af20): an axis record gives two rows.
+static int KeyRowCount(const KeyRecord* map, int group)
+{
+    int n = 0;
+    for (int i = 0; i < kKeyRecords; ++i)
+        if (map[i].group == group) n += map[i].axis == 1 ? 2 : 1;
+    return n;
+}
+
+// Row -> record and direction (0x54b6b0); nullptr past the end.
+static KeyRecord* KeyRow(KeyRecord* map, int group, int row, int& half)
+{
+    for (int i = 0; i < kKeyRecords; ++i) {
+        if (map[i].group != group) continue;
+        if (row-- == 0) { half = 0; return &map[i]; }
+        if (map[i].axis == 1 && row-- == 0) { half = 1; return &map[i]; }
+    }
+    return nullptr;
+}
+
+static std::wstring TextOf(const std::map<int, std::wstring>& t, int id)
+{
+    auto it = t.find(id);
+    return it == t.end() ? std::wstring() : it->second;
+}
+
+// Preferred column (map vtbl+0x64, 0x54b210): keyboard codes get the
+// DirectInput key name (GetObjectInfo, 0x583660); here the Windows name of
+// the same scan code. 70 "<None>", 83 "<Unknown>" (Text\controls.txt).
+static std::wstring KeyName(int code, const std::map<int, std::wstring>& t)
+{
+    if (code & 0xf000) return TextOf(t, (code & 0xf000) == 0x4000 ? 70 : 83);
+    wchar_t buf[64];
+    LONG lp = ((code & 0x7f) << 16) | ((code & 0x80) ? 1 << 24 : 0);
+    return GetKeyNameTextW(lp, buf, 64) > 0 ? std::wstring(buf) : std::wstring();
+}
+
+// Alternative column, buttons (map vtbl+0x68, 0x54b290).
+static std::wstring AltName(int code, const std::map<int, std::wstring>& t)
+{
+    int kind = code & 0xf000, i = code - 0x1000;
+    if (kind == 0x1000) {
+        if (i >= 0 && i <= 3) return TextOf(t, 71) + TextOf(t, 75 + i);  // "Joy POV1 " + Up/Down/Left/Right
+        if (i >= 4 && i <= 0x23) return TextOf(t, 79) + std::to_wstring(code - 0x1003);  // "Joy But n"
+        if (i >= 0x24 && i <= 0x2f) return TextOf(t, 72 + (i - 0x24) / 4) + TextOf(t, 75 + (i - 0x24) % 4);
+        return TextOf(t, 83);
+    }
+    if (kind == 0x2000 && code <= 0x2007) return TextOf(t, 82) + std::to_wstring(code - 0x1fff);  // "Mouse But n"
+    return TextOf(t, kind == 0x4000 ? 70 : 83);
+}
+
+// Alternative column, axes (map vtbl+0x6c, 0x54b580): "Joy X Axis" + " -"/" +".
+static std::wstring AxisName(int axis, int dir, const std::map<int, std::wstring>& t)
+{
+    if (axis >= 0 && axis <= 7) return TextOf(t, 84 + axis) + TextOf(t, dir ? 81 : 80);
+    return TextOf(t, axis == 11 ? 70 : 83);
+}
+
 // ====================================================== screens / states ===
 // State IDs are the indices in the factory registry FUN_005867f0
 // (creator slot = id * 0x14 + 0x10), registered by the static initialisers
@@ -276,6 +410,10 @@ struct App
     // On/off settings by key ("<key>_toggle" / "stat_<key>"); unknown keys read as on.
     std::map<std::string, bool> toggles;
     bool Toggle(const std::string& k) const { auto it = toggles.find(k); return it == toggles.end() || it->second; }
+
+    int turn = 50;  // look sensitivity, +0x17c (0..100, default 0x549880)
+    KeyRecord keymap[kKeyRecords];
+    void ResetKeyMap() { memcpy(keymap, kDefaultKeyMap, sizeof(keymap)); }
 
     // "TERR:" / "LANG:" prefixes as used by the game's file layer (0x8ac230 vtbl+0x10).
     std::string Resolve(const std::string& p) const
@@ -614,6 +752,8 @@ public:
     int32_t Int(int off) const { int32_t v; memcpy(&v, &data_[off - 8], 4); return v; }
     void SetInt(int off, int32_t v) { memcpy(&data_[off - 8], &v, 4); }
     bool Flag(int off) const { return data_[off - 8] != 0; }
+    void Read(int off, void* p, size_t n) const { memcpy(p, &data_[off - 8], n); }
+    void Write(int off, const void* p, size_t n) { memcpy(&data_[off - 8], p, n); }
     // Some flags hold fill bytes (e.g. 0xA1); only rewrite on a real change.
     void SetFlag(int off, bool v) { if (Flag(off) != v) data_[off - 8] = v ? 1 : 0; }
 
@@ -644,6 +784,13 @@ static void ApplyProfile()
     g.vol.effects = std::max(0, std::min(100, int(g_profile.Int(0x38))));
     g.vol.music = std::max(0, std::min(100, int(g_profile.Int(0x3c))));
     for (const SettingFlag& f : kSettingFlags) g.toggles[f.key] = g_profile.Flag(f.off);
+    g.turn = std::max(0, std::min(100, int(g_profile.Int(0x17c))));
+    // Key map copy at +0x208; a block without the four groups keeps the current map.
+    KeyRecord km[kKeyRecords];
+    g_profile.Read(0x208, km, sizeof(km));
+    bool valid = true;
+    for (int grp = 0; grp < 4; ++grp) valid = valid && KeyRowCount(km, grp) > 0;
+    if (valid) memcpy(g.keymap, km, sizeof(km));
     // +0x2c text language, +0x28 audio language (handlers 0x548a92..0x548b3c);
     // here one language drives both.
     for (int i = 0; i < kLanguageCount; ++i)
@@ -658,6 +805,8 @@ static void SaveProfile(bool toFile = true)
     g_profile.SetInt(0x38, g.vol.effects);
     g_profile.SetInt(0x3c, g.vol.music);
     for (const SettingFlag& f : kSettingFlags) g_profile.SetFlag(f.off, g.Toggle(f.key));
+    g_profile.SetInt(0x17c, g.turn);
+    g_profile.Write(0x208, g.keymap, sizeof(g.keymap));
     g_profile.SetInt(0x28, kLanguages[g.lang].id);
     g_profile.SetInt(0x2c, kLanguages[g.lang].id);
     if (!toFile) return;
@@ -983,7 +1132,10 @@ class FrontEnd : public Screen
 public:
     FrontEnd()
     {
-        g.onLanguageChanged.push_back([this] { if (menu_.mec.screens.size()) menu_.ReloadText(); });
+        g.onLanguageChanged.push_back([this] {
+            if (menu_.mec.screens.size()) menu_.ReloadText();
+            LoadControlsText();
+        });
     }
 
     void Enter() override
@@ -992,20 +1144,25 @@ public:
         menu_.onAction = [this](const std::string& a) { Action(a); };
         menu_.onStatus = [this](const std::string& s, int st) { return Status(s, st); };
         menu_.drawFmv = [this](HDC dc, int x, int y, int w, int h) { pane_.Draw(dc, x, y, w, h, false); };
-        menu_.dynamicText = [](const std::string& fn, std::wstring& out) {
+        menu_.dynamicText = [this](const std::string& fn, std::wstring& out) {
             // Vehicle names come from the game's vehicle database: not loaded here,
             // so hide the "DevOnly: Vehicle txt" placeholder.
             if (fn == "reqvehicletext") { out.clear(); return true; }
-            return false;
+            // Controller name (0x554f26 -> 0x5522d0): no joystick support, so none.
+            if (fn == "txt_controller") { out.clear(); return true; }
+            return KeyMapText(fn, out);
         };
         // The original answers only val_overallvol (0x5551c4, +0x34); it has no
-        // handler for val_volume / val_music, so their values are an assumption.
+        // handler for val_volume / val_music / val_turn, so their values are an
+        // assumption.
         menu_.valueText = [](const std::string& fn, int& v) {
             if (fn == "val_overallvol") { v = g.vol.overall; return true; }
             if (fn == "val_volume") { v = g.vol.effects; return true; }
             if (fn == "val_music") { v = g.vol.music; return true; }
+            if (fn == "val_turn") { v = g.turn; return true; }
             return false;
         };
+        LoadControlsText();
         menu_.Reset(0);  // "Main"
         g_music.Load();  // SOUNDS\FEMUSIC.DAT (FUN_00552480), started at 0x551ca0
         g_music.Play();
@@ -1027,6 +1184,9 @@ public:
         }
         bg_.Update();
         pane_.Update();
+        // Waiting for a key: the chosen row's two cells blink (0x549f84, 30
+        // updates per phase; taken here as 0.5 s).
+        if (km_.state == 1) km_.blink = ((GetTickCount() - km_.since) / 500) % 2;
     }
 
     void Render(HDC dc, Canvas& cv) override
@@ -1039,6 +1199,7 @@ public:
     void OnKey(WPARAM vk) override
     {
         if (extra_.IsOpen()) { if (IsSkipKey(vk)) EndExtra(); return; }
+        if (km_.state == 1) return CaptureKey(vk);
         menu_.OnKey(vk);
     }
 
@@ -1097,6 +1258,12 @@ private:
         for (int i = 0; i < 8; ++i)
             if (a == kRestorePages[i]) { restorePage_ = i; return; }
         if (a == "restore_accept") {
+            if (restorePage_ == 2) {  // 0x549880: vibration (platform default, taken as on), inverted look, 50
+                g.toggles["vib"] = true;
+                g.toggles["inv"] = true;
+                g.turn = 50;
+            }
+            if (restorePage_ == 3) g.ResetKeyMap();  // 0x5498b0: "keymap_reset" (dead zone not used here)
             if (restorePage_ == 4) {  // 0x5498e0: overall 100, effects 100, music 60
                 g.vol = App::Volumes();
                 g_music.UpdateVolume();
@@ -1104,6 +1271,38 @@ private:
             menu_.Pop();
             return;
         }
+
+        // Options: Controls (screen 13). Look sensitivity: +0x17c, step 5, 0..100,
+        // then menu sound 0 (0x54908e / 0x5490cf).
+        if (a == "increaseturn" || a == "decreaseturn") {
+            g.turn = std::max(0, std::min(100, g.turn + (a[0] == 'i' ? 5 : -5)));
+            return Changed();
+        }
+        // Controller Setup (screen 35, 0x554e20..). No joystick support: the
+        // device list is empty, so the controller events have nothing to do.
+        if (a == "joystick_backup" || a == "Prev_Controller" || a == "Next_Controller") return;
+        // keymap_start1..4 (0x555012): open the key list (screen 31) on a group.
+        if (StartsWithI(a, "keymap_start") && a.size() == 13) {
+            km_ = KeyEditor();
+            km_.group = a[12] - '1';
+            km_.count = KeyRowCount(g.keymap, km_.group);
+            return;
+        }
+        // Key list events (0x549ff0): scroll, choose a row, accept.
+        if (a == "km_pageup") { if (km_.offset > 0) --km_.offset; return; }
+        if (a == "km_pagedown") { if (km_.offset < km_.count - 10) ++km_.offset; return; }
+        if (StartsWithI(a, "km_a")) {  // "km_aNN" -> wait for a key; the link opens screen 34
+            km_.sel = atoi(a.c_str() + 4) + km_.offset - 1;
+            km_.state = 1;
+            km_.since = GetTickCount();
+            km_.blink = 0;
+            return;
+        }
+        // The map is copied into the live settings (+0x208) after every change,
+        // so here it already is; the _dropback version also goes back.
+        if (a == "keymap_changed") return;
+        if (a == "keymap_changed_dropback") { menu_.Pop(); return; }
+        if (a == "keymap_reset") { g.ResetKeyMap(); return; }
 
         // Options: language
         if (a == "nextlangtext" || a == "nextlangaudio") { Changed(); return g.SetLanguage(g.lang + 1); }
@@ -1148,6 +1347,32 @@ private:
             int first = (s[17] - '1') * 2;
             return restorePage_ == first ? 0 : restorePage_ == first + 1 ? 1 : 2;
         }
+        // Controls: the inverted-look row asks "stat_vert" for inv_toggle (+0x175).
+        if (s == "stat_vert") return g.Toggle("inv") ? 0 : 1;
+        // Controller Setup with no joystick (count at 0x8ac2b8+0x6d0 is 0):
+        // "No Device Detected" stays, the device arrows are hidden (0x554eec).
+        if (s == "stat_no_ctrl_detected") return st;
+        if (s == "stat_controllercount_arrow") return 2;
+        // Key list (0x54a0a7..0x54a2f5).
+        if (s == "stat_km_pageup") return km_.offset > 0 ? 0 : 2;
+        if (s == "stat_km_pagedown") return km_.offset < km_.count - 10 ? 0 : 2;
+        if (StartsWithI(s, "stat_keymap_t") && s.size() == 14) {  // group title: t1 groups 0/1, t2 groups 2/3
+            int first = (s[13] - '1') * 2;
+            return km_.group == first ? 0 : km_.group == first + 1 ? 1 : 2;
+        }
+        if (StartsWithI(s, "stat_keymap_") && s.size() == 15) {  // stat_keymap_{a,p,s}NN
+            int row = atoi(s.c_str() + 13) + km_.offset - 1;
+            if (km_.state == 1) {  // waiting: the chosen row is lit, its key cells blink
+                if (row != km_.sel) return 1;
+                return s[12] == 'a' ? 0 : km_.blink;
+            }
+            if (row >= km_.count) return 2;
+            // The original leaves the state as it is. The key cells are never
+            // focused, so put them back to normal: the popup is drawn over
+            // screen 31, whose cell p05 asks for stat_keymap_p01 and would
+            // otherwise stay lit after blinking.
+            return s[12] == 'a' ? st : 1;
+        }
         static const char* kDg[] = { "stat_dg chase", "stat_dg getaway", "stat_dg trail",
                                      "stat_dg survival", "stat_dg check", "stat_dg gate" };
         for (int i = 0; i < 6; ++i)
@@ -1183,6 +1408,59 @@ private:
         v = std::max(0, std::min(100, v + (up ? 5 : -5)));
         g_music.UpdateVolume();
         Changed();
+    }
+
+    // Action and button names: Text\controls.txt, reloaded with the language
+    // (object 0x8ac598, 0x54bcc0).
+    void LoadControlsText() { controlsText_ = LoadTxt(g.Resolve("LANG:TEXT\\CONTROLS.TXT")); }
+
+    // txt_keymap_aNN / pNN / sNN (0x54a109..0x54a1dd): action, preferred key
+    // and alternative (joystick / mouse) of row NN on the current page.
+    bool KeyMapText(const std::string& fn, std::wstring& out)
+    {
+        if (!StartsWithI(fn, "txt_keymap_") || fn.size() != 14) return false;
+        int half = 0;
+        KeyRecord* r = KeyRow(g.keymap, km_.group, atoi(fn.c_str() + 12) + km_.offset - 1, half);
+        out.clear();
+        if (!r) return true;
+        const KeyBind& b = r->bind[half];
+        switch (fn[11]) {
+        case 'a': out = TextOf(controlsText_, r->text[half]); break;
+        case 'p': out = KeyName(b.key, controlsText_); break;
+        case 's': out = b.altAxis ? AxisName(b.alt, b.dir, controlsText_) : AltName(b.alt, controlsText_); break;
+        }
+        return true;
+    }
+
+    // Waiting for a key on screen 34 (update 0x549e70). Escape (code 1)
+    // cancels. A keyboard key first clears that code from the other rows of the
+    // group (0x54a430), then becomes the row's preferred key (map vtbl+0x4c);
+    // the editor then goes back one screen and sends keymap_changed. Joystick
+    // and mouse input (the alternative column) are not read here.
+    void CaptureKey(WPARAM vk)
+    {
+        if (vk == VK_ESCAPE) {
+            km_.state = 0;
+            menu_.OnKey(vk);  // back out of the popup
+            return;
+        }
+        UINT sc = MapVirtualKeyW(UINT(vk), MAPVK_VK_TO_VSC_EX);
+        int code = int((sc & 0x7f) | ((sc & 0xff00) ? 0x80 : 0));  // scan code -> DIK_*
+        if ((sc & 0x7f) == 0) return;
+        for (int row = 0; row < km_.count; ++row) {
+            int half = 0;
+            KeyRecord* r = KeyRow(g.keymap, km_.group, row, half);
+            if (!r) continue;
+            KeyBind& b = r->bind[half];
+            if (b.key == code) b.key = 0x4000;
+            if (!b.altAxis && b.alt == code) b.alt = 0x4000;
+        }
+        int half = 0;
+        if (KeyRecord* r = KeyRow(g.keymap, km_.group, km_.sel, half)) r->bind[half].key = code;
+        Log("Key map: group %d row %d = 0x%02X", km_.group, km_.sel, code);
+        km_.state = 0;
+        menu_.Pop();
+        Action("keymap_changed");
     }
 
     void PlayBackground(const std::string& file)
@@ -1248,6 +1526,10 @@ private:
     bool cops_ = true;
     int dg_ = 0, dgCity_ = 0, subgame_ = 0;
     int restorePage_ = 0;     // page for the restore-defaults popup
+    // Key-map editor (front end +0x6a0; init 0x549e40): group, its row count,
+    // first row shown, 1 = waiting for a key, chosen row, blink phase.
+    struct KeyEditor { int group = 0, count = 0, offset = 0, state = 0, sel = 0, blink = 0; DWORD since = 0; } km_;
+    TextTable controlsText_;
 };
 
 // ============================================================ window ========
@@ -1380,6 +1662,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
 
     g.onLanguageChanged.push_back([] { g_sounds.Load(); });  // AUDIO: follows the language
     g.SetLanguage(0);
+    g.ResetKeyMap();
     if (g_profile.Load(g.gameDir)) {
         Log("Settings: loaded %s", g_profile.Path().c_str());
         ApplyProfile();
