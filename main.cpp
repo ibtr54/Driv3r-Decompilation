@@ -513,7 +513,9 @@ static std::vector<std::wstring> EnumSoundDrivers()
 // at 0x6df220.. / 0x6dc5b5.
 enum StateId
 {
-    ST_FRONTEND  = 0,     // id not resolved (reached via manager vtbl+0x24 after "bootup_over")
+    ST_FRONTEND  = 0xAD,  // front end          vtbl 0x78a51c, creator 0x5562c0; the manager
+                          // (vtbl 0x78a3bc) creates A9, AD, AC, ... and vtbl+0x24 after
+                          // "bootup_over" moves from A9 to the next one, AD
     ST_BOOT_SEQ  = 0xA9,  // sequencer          vtbl 0x78b834, Next() @ 0x5564c0
     ST_INTRO_FMV = 0xAA,  // intro movie        vtbl 0x78b7d8, Enter @ 0x5563a0
     ST_LANGUAGE  = 0xAB,  // GUI\LANGUAGE       vtbl 0x78b878, Enter @ 0x5565f0
@@ -1268,29 +1270,45 @@ class IntroFmvScreen : public Screen
 public:
     void SetIndex(int i) { index_ = i; }                    // vtbl+0x20 (0x5507f0)
     void SetFile(const std::string& f) { custom_ = f; }     // vtbl+0x24 (0x556380)
+    // The attract video (0x551dc0) comes back to the front end and could not
+    // be skipped with a key in the original (observed, see Update below).
+    void SetReturn(int state, bool skippable) { returnTo_ = state; skippable_ = skippable; }
 
     void Enter() override                                    // 0x5563a0
     {
         static const char* kFiles[] = { "TERR:FMV\\LEGAL.XMV", "FMV\\ATARI.XMV", "FMV\\REFLECT.XMV" };
         std::string file = index_ <= 2 ? kFiles[index_] : custom_;
         if (!movie_.Open(g.Resolve(file), g.AudioTrack(), false))
-            g.Goto(ST_BOOT_SEQ);  // missing file: carry on with the sequence
+            Finish();  // missing file: carry on
     }
     void Leave() override { movie_.Close(); }
     void Update() override
     {
         movie_.Update();
-        if (movie_.Done()) g.Goto(ST_BOOT_SEQ);  // listener -> back to the sequencer
+        if (movie_.Done()) Finish();  // listener 0x556470 -> manager vtbl+0x28
     }
     void Render(HDC dc, Canvas&) override { movie_.Draw(dc, 0, 0, kWidth, kHeight, true); }
     void OnKey(WPARAM vk) override
     {
-        if (IsSkipKey(vk)) g.Goto(ST_BOOT_SEQ);
+        if (skippable_ && IsSkipKey(vk)) Finish();
     }
 
 private:
+    // At boot the original returns to the sequencer. After the attract video
+    // it returned to the main menu (observed; the static path through manager
+    // vtbl+0x28, whose "home" is the first state created, was not resolved).
+    void Finish()
+    {
+        int to = returnTo_;
+        returnTo_ = ST_BOOT_SEQ;
+        skippable_ = true;
+        g.Goto(to);
+    }
+
     int index_ = 0;
     std::string custom_;
+    int returnTo_ = ST_BOOT_SEQ;
+    bool skippable_ = true;
     Movie movie_;
 };
 static IntroFmvScreen g_introFmv;
@@ -1517,6 +1535,7 @@ public:
         menu_.Reset(0);  // "Main"
         g_music.Load();  // SOUNDS\FEMUSIC.DAT (FUN_00552480), started at 0x551ca0
         g_music.Play();
+        idleSince_ = GetTickCount();  // 0x551d22: attract counter +0x18 = 0
     }
     void Leave() override
     {
@@ -1538,6 +1557,7 @@ public:
         // Waiting for a key: the chosen row's two cells blink (0x549f84, 30
         // updates per phase; taken here as 0.5 s).
         if (km_.state == 1) km_.blink = ((GetTickCount() - km_.since) / 500) % 2;
+        UpdateAttract();
     }
 
     void Render(HDC dc, Canvas& cv) override
@@ -1549,12 +1569,36 @@ public:
 
     void OnKey(WPARAM vk) override
     {
+        idleSince_ = GetTickCount();  // any input clears the counter (0x551e00 -> +0x18 = 0)
         if (extra_.IsOpen()) { if (IsSkipKey(vk)) EndExtra(); return; }
         if (km_.state == 1) return CaptureKey(vk);
         menu_.OnKey(vk);
     }
 
 private:
+    // ---- attract mode ----------------------------------------------------
+    // 0x551e00, once per front-end update: input or a GUI query that is
+    // non-zero away from the Main screen (0x8ac3b0 vtbl+0x38(1)) clears the
+    // counter +0x18; otherwise it counts up to +0x14 = 3600 (set at
+    // 0x551d29) and then calls 0x551dc0, which plays FMV\ATTRACT.XMV
+    // through the intro-video state. The original reached 3600 in about
+    // 30 s (measured), so the count is kept here in real time.
+    static const DWORD kAttractMs = 30000;
+    void UpdateAttract()
+    {
+        DWORD now = GetTickCount();
+        bool onMain = menu_.stack.size() == 1 && menu_.stack[0] == 0;
+        if (extra_.IsOpen() || km_.state != 0 || !onMain) { idleSince_ = now; return; }
+        if (now - idleSince_ < kAttractMs) return;
+        idleSince_ = now;
+        Log("Attract mode: no input for %lu ms on the Main screen", kAttractMs);
+        g_introFmv.SetFile("FMV\\ATTRACT.XMV");  // 0x551dc0: vtbl+0x24, then index 3
+        g_introFmv.SetIndex(3);
+        g_introFmv.SetReturn(ST_FRONTEND, false);
+        g.Goto(ST_INTRO_FMV);
+    }
+    DWORD idleSince_ = 0;
+
     // ---- events --------------------------------------------------------
     void Action(const std::string& a)
     {
