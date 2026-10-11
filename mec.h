@@ -102,6 +102,9 @@ struct MecScreen
     std::string name, onEnter, onExit;
     int focus = 0;
     int defaultFocus = 0;  // header focus item; screens shown by name start there (0x467730)
+    // Header byte +16. Go-to-screen 0x467b70 does not put a screen with it
+    // into the back history; it is not drawn over its parent (only the
+    // current screen is drawn).
     bool overlay = false;
     std::vector<Element> items;
     // Runtime (screen object +0x134): set by a mouse move, cleared by

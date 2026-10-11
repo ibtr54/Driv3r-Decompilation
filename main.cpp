@@ -18,7 +18,10 @@
 #include <mmsystem.h>
 #include <d3d9.h>
 #include <dsound.h>
+#define DIRECTINPUT_VERSION 0x0800
+#include <dinput.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -30,6 +33,8 @@
 #include "mec.h"
 
 #pragma comment(lib, "winmm.lib")  // PlaySound (menu sounds)
+#pragma comment(lib, "dinput8.lib")  // joystick (DirectInput8Create, c_dfDIJoystick2)
+#pragma comment(lib, "dxguid.lib")
 
 // ============================================================== logging ====
 static FILE* g_log = nullptr;
@@ -543,6 +548,14 @@ public:
     // Mouse button newly pressed, DirectInput order (0 left, 1 right,
     // 2 middle, 3..): the code 0x2000 + n polled by 0x583a00.
     virtual void OnMouseButton(int) {}
+    // Joystick: a newly pressed POV direction or button as 0x1000 + n
+    // (0x583fb0), or an axis pushed past half way (0x583ff0, dir: positive).
+    // Return true when the press is used up (the menu does not get it).
+    virtual bool OnJoyButton(int) { return false; }
+    virtual bool OnJoyAxis(int, bool) { return false; }
+    // Menu navigation from the joystick (GUI inputs 2..7, see
+    // DispatchJoystick): the same as the arrow keys, Enter and Escape.
+    virtual void OnPad(WPARAM vk) { OnKey(vk); }
 };
 
 static const int kWidth = 640, kHeight = 480;  // CreateWindowExA in WinMain (0x576bf0)
@@ -709,6 +722,151 @@ static int StepLanguage(int index, bool next)
 }
 
 static bool IsSkipKey(WPARAM vk) { return vk == VK_RETURN || vk == VK_ESCAPE || vk == VK_SPACE; }
+
+// ============================================================ joystick =====
+// DirectInput game controllers (input object 0x8ac2b8, joystick part at
+// +0x24c). Init 0x583a40: EnumDevices(game controllers, attached only)
+// creates up to 8 devices (callback 0x584550); each gets the joystick data
+// format, the window's cooperative level, a range of -1000..1000 on every
+// axis (0x5845c0) and its instance name (0x5841c0: 64 wide characters at +0x8
+// of its 0x90-byte slot). Only the selected device (+0x480, set by Controller
+// Setup through 0x5522b0, 0 at start) is read. Force feedback (vibration) is
+// not implemented.
+class Joystick
+{
+public:
+    static const int kCodes = 48;  // codes 0x1000..0x102f
+
+    ~Joystick()
+    {
+        for (Device& d : devs_) { d.dev->Unacquire(); d.dev->Release(); }
+        if (di_) di_->Release();
+    }
+
+    void Init(HWND hwnd)
+    {
+        if (FAILED(DirectInput8Create(GetModuleHandleA(nullptr), DIRECTINPUT_VERSION, IID_IDirectInput8A,
+                                      reinterpret_cast<void**>(&di_), nullptr))) {
+            Log("Joystick: DirectInput8Create failed");
+            return;
+        }
+        di_->EnumDevices(DI8DEVCLASS_GAMECTRL, EnumDevice, this, DIEDFL_ATTACHEDONLY);
+        for (Device& d : devs_) {
+            d.dev->SetDataFormat(&c_dfDIJoystick2);
+            d.dev->SetCooperativeLevel(hwnd, DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
+            d.dev->EnumObjects(SetAxisRange, d.dev, DIDFT_AXIS);
+        }
+        Log("Joystick: %d device(s)", Count());
+    }
+
+    int Count() const { return int(devs_.size()); }
+    // txt_controller (0x5522d0): the slot's name; slots past the count are empty.
+    std::wstring Name(int i) const { return i >= 0 && i < Count() ? devs_[i].name : std::wstring(); }
+    void Select(int i) { if (i >= 0 && i < 8) sel_ = i; }  // 0x5522b0
+
+    // 0x582670 polls at most every 8 ms; 0x583c10 then reads the selected
+    // device. Codes: 0..3 POV 1 up / down / left / right (only the exact
+    // angles 0, 18000, 27000, 9000), POV 2..4 at 36..47, then buttons 0..43
+    // from code 4 (written last, so they cover POV 2..4). Axes: x, y, z,
+    // rx, ry, rz, slider 0, slider 1 times 0.001 (y and the sliders -0.001).
+    // A failed Poll acquires the device and leaves everything released.
+    // Returns true when new data was read.
+    bool Poll()
+    {
+        DWORD now = GetTickCount();
+        if (now - last_ < 8) return false;
+        last_ = now;
+        memcpy(prev_, cur_, sizeof(cur_));
+        memcpy(prevAxes_, axes_, sizeof(axes_));
+        if (sel_ >= Count()) return false;
+        memset(cur_, 0, sizeof(cur_));
+        memset(axes_, 0, sizeof(axes_));
+        IDirectInputDevice8A* dev = devs_[sel_].dev;
+        DIJOYSTATE2 st;
+        if (FAILED(dev->Poll())) { dev->Acquire(); return true; }
+        if (FAILED(dev->GetDeviceState(sizeof(st), &st))) return true;
+        for (int p = 0; p < 4; ++p) {
+            DWORD a = st.rgdwPOV[p];
+            uint8_t* c = cur_ + (p ? 32 + 4 * p : 0);
+            c[0] = a == 0;
+            c[1] = a == 18000;
+            c[2] = a == 27000;
+            c[3] = a == 9000;
+        }
+        for (int i = 4; i < kCodes; ++i) cur_[i] = (st.rgbButtons[i - 4] & 0x80) != 0;
+        const LONG v[8] = { st.lX, st.lY, st.lZ, st.lRx, st.lRy, st.lRz, st.rglSlider[0], st.rglSlider[1] };
+        for (int i = 0; i < 8; ++i) axes_[i] = float(v[i]) * (i == 1 || i >= 6 ? -0.001f : 0.001f);
+        return true;
+    }
+
+    bool Down(int i) const { return cur_[i] != 0; }
+    bool WasDown(int i) const { return prev_[i] != 0; }
+    // 0x583fb0: the first code down now and not in the previous poll.
+    bool NewButton(int& code) const
+    {
+        for (int i = 0; i < kCodes; ++i)
+            if (cur_[i] && !prev_[i]) { code = 0x1000 + i; return true; }
+        return false;
+    }
+    // 0x583ff0: the first axis at |v| >= 0.5 now and below 0.5 before;
+    // dir is true for a positive value.
+    bool NewAxis(int& axis, bool& dir) const
+    {
+        for (int i = 0; i < 8; ++i)
+            if (fabsf(axes_[i]) >= 0.5f && fabsf(prevAxes_[i]) < 0.5f) {
+                axis = i;
+                dir = axes_[i] > 0.0f;
+                return true;
+            }
+        return false;
+    }
+
+private:
+    struct Device { IDirectInputDevice8A* dev; std::wstring name; };
+
+    static BOOL CALLBACK EnumDevice(LPCDIDEVICEINSTANCEA inst, void* ctx)
+    {
+        Joystick* self = static_cast<Joystick*>(ctx);
+        IDirectInputDevice8A* dev = nullptr;
+        if (FAILED(self->di_->CreateDevice(inst->guidInstance, &dev, nullptr))) return DIENUM_CONTINUE;
+        wchar_t name[64] = {};
+        MultiByteToWideChar(CP_ACP, 0, inst->tszInstanceName, -1, name, 64);
+        name[63] = 0;
+        self->devs_.push_back({ dev, name });
+        Log("Joystick %d: %ls", int(self->devs_.size()) - 1, name);
+        return self->devs_.size() < 8 ? DIENUM_CONTINUE : DIENUM_STOP;
+    }
+    static BOOL CALLBACK SetAxisRange(LPCDIDEVICEOBJECTINSTANCEA obj, void* ctx)
+    {
+        DIPROPRANGE r = {};
+        r.diph.dwSize = sizeof(r);
+        r.diph.dwHeaderSize = sizeof(r.diph);
+        r.diph.dwObj = obj->dwType;
+        r.diph.dwHow = DIPH_BYID;
+        r.lMin = -1000;
+        r.lMax = 1000;
+        return SUCCEEDED(static_cast<IDirectInputDevice8A*>(ctx)->SetProperty(DIPROP_RANGE, &r.diph))
+                   ? DIENUM_CONTINUE : DIENUM_STOP;
+    }
+
+    IDirectInput8A* di_ = nullptr;
+    std::vector<Device> devs_;
+    int sel_ = 0;
+    DWORD last_ = 0;
+    uint8_t cur_[kCodes] = {}, prev_[kCodes] = {};
+    float axes_[8] = {}, prevAxes_[8] = {};
+};
+static Joystick g_joy;
+
+// Skip Sequence (key-map control 0x21, read through scheme 0x162 by the
+// movie player 0x558260): its first alternative may be a joystick code.
+// By default it has none, so the joystick does not skip videos.
+static bool IsSkipJoy(int code)
+{
+    for (const KeyRecord& r : g.keymap)
+        if (r.id == 0x21) return !r.bind[0].altAxis && r.bind[0].alt == code;
+    return false;
+}
 
 // ============================================================ SOUND.GSD ====
 // AUDIO:SOUNDS\SOUND.GSD: "01KB", u32 bankCount, u32 bankOffset[bankCount].
@@ -1273,6 +1431,13 @@ public:
         Fire(s.onEnter);
     }
 
+    // Show by name (GUI vtbl+0x30): the named screen on top of the stack.
+    void PushByName(const char* name)
+    {
+        for (size_t i = 0; i < mec.screens.size(); ++i)
+            if (_stricmp(mec.screens[i].name.c_str(), name) == 0) return Push(int(i));
+    }
+
     void Pop()
     {
         if (stack.size() <= 1) return;
@@ -1291,6 +1456,14 @@ public:
             // Popups shown by name (MUMAIN, NAME) have no parent: back sends
             // the screen's exit action (mu_cancel, mu_no, mu_exit, ...).
             if (rootBackFiresExit && stack.size() <= 1) { Fire(s->onExit); return; }
+            // Back on the root screen (0x46a015, 0x467b4b): the exit action
+            // unless "<NoAction>", then the event "exitmenu" (the front end
+            // shows QuitCon; seen on the game with the pad's back button).
+            if (stack.size() <= 1) {
+                if (s->onExit != "<NoAction>") Fire(s->onExit);
+                Fire("exitmenu");
+                return;
+            }
             Pop();
             return;
         }
@@ -1398,8 +1571,10 @@ public:
     void Render(HDC dc, Canvas& cv)
     {
         if (stack.empty()) return;
+        // Only the current screen is drawn (GUI draw 0x4677a0 -> 0x469a40).
+        // The header byte kept as "overlay" does not bring the parent in:
+        // QuitCon has it and shows alone over the video on the game.
         size_t first = stack.size() - 1;
-        while (first > 0 && mec.screens[stack[first]].overlay) --first;  // popups draw over their parent
         // Two passes: the items add sprites to the GUI render list
         // (0x57e2b0) but give their texts to the text manager (0x8ac254),
         // which draws later; so texts are always above sprites, whatever the
@@ -2049,6 +2224,15 @@ public:
     {
         if (skippable_ && IsSkipKey(vk)) Finish();
     }
+    // The player (state 0xD1, 0x558260) has no GUI; the joystick skips only
+    // when Skip Sequence has a joystick alternative.
+    void OnPad(WPARAM) override {}
+    bool OnJoyButton(int code) override
+    {
+        if (!skippable_ || !IsSkipJoy(code)) return false;
+        Finish();
+        return true;
+    }
 
 private:
     // At boot the original returns to the sequencer. After the attract video
@@ -2299,8 +2483,8 @@ public:
             // Vehicle names come from the game's vehicle database: not loaded here,
             // so hide the "DevOnly: Vehicle txt" placeholder.
             if (fn == "reqvehicletext") { out.clear(); return true; }
-            // Controller name (0x554f26 -> 0x5522d0): no joystick support, so none.
-            if (fn == "txt_controller") { out.clear(); return true; }
+            // Controller name (0x554f26 -> 0x5522d0) of the shown index +0x48.
+            if (fn == "txt_controller") { out = g_joy.Name(joyIndex_); return true; }
             // Gamma (0x555228): _gcvt with 3 digits, "1." completed to "1.0".
             if (fn == "txt_gamma") {
                 char buf[32];
@@ -2413,6 +2597,34 @@ public:
         if (km_.state == 1) CaptureAlt(0x2000 + button);
     }
 
+    // Joystick buttons and POV directions (0x583fb0) also count for the
+    // attract counter (0x551e46); the key-map editor reads them before the
+    // mouse, and axes after it (0x549eae, 0x549f41).
+    bool OnJoyButton(int code) override
+    {
+        idleSince_ = GetTickCount();
+        if (extra_.IsOpen()) {
+            if (!IsSkipJoy(code)) return false;
+            EndExtra();
+            return true;
+        }
+        if (km_.state != 1) return false;
+        CaptureAlt(code);
+        return true;
+    }
+    bool OnJoyAxis(int axis, bool dir) override
+    {
+        if (km_.state != 1 || extra_.IsOpen()) return false;
+        CaptureAxis(axis, dir);
+        return true;
+    }
+    // While a video plays or the editor waits, the menu does not move.
+    void OnPad(WPARAM vk) override
+    {
+        if (extra_.IsOpen() || km_.state == 1) return;
+        OnKey(vk);
+    }
+
     // Cheat codes (0x551e63..0x551f14, every front-end update with a key
     // from 0x551f50, on any screen). Each table entry keeps its own
     // position: the key either matches the next one (position + 1) or the
@@ -2474,6 +2686,9 @@ private:
             if (_stricmp(a.c_str(), gp) == 0) return LaunchGameplay(a);
         if (StartsWithI(a, "RunMission=")) return LaunchGameplay(a);
         if (a == "fe_quitgame") { g.Quit(); return; }  // 0x8ac258 vtbl+0x10
+        // Back on the root screen (0x554e71): GUI vtbl+0x30(1, "QuitCon"),
+        // "Quit DRIV3R?" over the main menu (Enter quits, Escape returns).
+        if (a == "exitmenu") { menu_.PushByName("QuitCon"); return; }
 
         // Take A Ride
         if (a == "fe_setupmood" || a == "fe_playmood" || a == "fe_playweather") return PreviewRide();
@@ -2522,6 +2737,9 @@ private:
         if (StartsWithI(a, "settings_restore")) {
             ApplyProfile();  // 0x548840
             g_music.UpdateVolume();
+            // The front end (0x554de1 / 0x554e06) puts the shown device back
+            // from +0x4c; the device being read is not changed back.
+            joyIndex_ = joyBackup_;
             if (a == "settings_restore") menu_.Pop();
             return;
         }
@@ -2586,9 +2804,19 @@ private:
             g.turn = std::max(0, std::min(100, g.turn + (a[0] == 'i' ? 5 : -5)));
             return Changed();
         }
-        // Controller Setup (screen 35, 0x554e20..). No joystick support: the
-        // device list is empty, so the controller events have nothing to do.
-        if (a == "joystick_backup" || a == "Prev_Controller" || a == "Next_Controller") return;
+        // Controller Setup (screen 35, 0x554e20..). The front end shows device
+        // +0x48; joystick_backup copies it to +0x4c (on the way in). Prev /
+        // Next wrap within the count and select that device for reading
+        // (0x5522b0).
+        if (a == "joystick_backup") { joyBackup_ = joyIndex_; return; }
+        if (a == "Prev_Controller" || a == "Next_Controller") {
+            int n = g_joy.Count();
+            if (a[0] == 'P') { if (--joyIndex_ < 0) joyIndex_ = n - 1; }
+            else if (++joyIndex_ >= n) joyIndex_ = 0;
+            if (joyIndex_ < 0) joyIndex_ = 0;
+            g_joy.Select(joyIndex_);
+            return;
+        }
         // keymap_start1..4 (0x555012): open the key list (screen 31) on a group.
         if (StartsWithI(a, "keymap_start") && a.size() == 13) {
             km_ = KeyEditor();
@@ -2736,10 +2964,11 @@ private:
         }
         // Controls: the inverted-look row asks "stat_vert" for inv_toggle (+0x175).
         if (s == "stat_vert") return g.Toggle("inv") ? 0 : 1;
-        // Controller Setup with no joystick (count at 0x8ac2b8+0x6d0 is 0):
-        // "No Device Detected" stays, the device arrows are hidden (0x554eec).
-        if (s == "stat_no_ctrl_detected") return st;
-        if (s == "stat_controllercount_arrow") return 2;
+        // Controller Setup (count at 0x8ac2b8+0x6d0): "No Device Detected"
+        // is hidden when there is a device, the device arrows are shown only
+        // for more than one (0x554eec, 0x554fd6).
+        if (s == "stat_no_ctrl_detected") return g_joy.Count() > 0 ? 2 : st;
+        if (s == "stat_controllercount_arrow") return g_joy.Count() > 1 ? 0 : 2;
         // Key list (0x54a0a7..0x54a2f5).
         if (s == "stat_km_pageup") return km_.offset > 0 ? 0 : 2;
         if (s == "stat_km_pagedown") return km_.offset < km_.count - 10 ? 0 : 2;
@@ -2755,9 +2984,8 @@ private:
             }
             if (row >= km_.count) return 2;
             // The original leaves the state as it is. The key cells are never
-            // focused, so put them back to normal: the popup is drawn over
-            // screen 31, whose cell p05 asks for stat_keymap_p01 and would
-            // otherwise stay lit after blinking.
+            // focused, so put them back to normal: screen 31's cell p05 asks
+            // for stat_keymap_p01 and would otherwise stay lit after blinking.
             return s[12] == 'a' ? st : 1;
         }
         // Display. Stat_Aspect (0x554829): 0 for aspect 0 or 1, 2 for 16:9.
@@ -2927,10 +3155,11 @@ private:
     // Waiting for a key on screen 34 (update 0x549e70). Escape (code 1)
     // cancels. A keyboard key first clears that code from the other rows of the
     // group (0x54a430), then becomes the row's preferred key (map vtbl+0x4c);
-    // the editor then goes back one screen and sends keymap_changed. A mouse
-    // button (0x2000 + n) is cleared the same way and becomes the row's
-    // alternative (vtbl+0x58, which also clears the axis flag); joystick
-    // input is not read here.
+    // the editor then goes back one screen and sends keymap_changed. A
+    // joystick button / POV direction (0x1000 + n) or a mouse button
+    // (0x2000 + n) is cleared the same way and becomes the row's alternative
+    // (vtbl+0x58, which also clears the axis flag); a joystick axis becomes
+    // the row's axis alternative (CaptureAxis). The joystick cannot cancel.
     void CaptureKey(WPARAM vk)
     {
         if (vk == VK_ESCAPE) {
@@ -2956,6 +3185,27 @@ private:
             r->bind[half].alt = code;
         }
         Log("Key map: group %d row %d alt = 0x%04X", km_.group, km_.sel, code);
+        EndCapture();
+    }
+    // 0x54a4a0: rows of the group with the same axis and direction get axis
+    // 11 (<None>), direction 0 (the axis flag stays set); then vtbl+0x60
+    // (0x54b1b0) sets the row's axis flag, axis and direction.
+    void CaptureAxis(int axis, bool dir)
+    {
+        for (int row = 0; row < km_.count; ++row) {
+            int half = 0;
+            KeyRecord* r = KeyRow(g.keymap, km_.group, row, half);
+            if (!r) continue;
+            KeyBind& b = r->bind[half];
+            if (b.altAxis == 1 && b.alt == axis && b.dir == (dir ? 1 : 0)) { b.alt = 11; b.dir = 0; }
+        }
+        int half = 0;
+        if (KeyRecord* r = KeyRow(g.keymap, km_.group, km_.sel, half)) {
+            r->bind[half].altAxis = 1;
+            r->bind[half].alt = axis;
+            r->bind[half].dir = dir ? 1 : 0;
+        }
+        Log("Key map: group %d row %d axis = %d %s", km_.group, km_.sel, axis, dir ? "+" : "-");
         EndCapture();
     }
     // 0x54a430: the new code is removed from every row of the group.
@@ -3053,20 +3303,66 @@ private:
     // Key-map editor (front end +0x6a0; init 0x549e40): group, its row count,
     // first row shown, 1 = waiting for a key, chosen row, blink phase.
     struct KeyEditor { int group = 0, count = 0, offset = 0, state = 0, sel = 0, blink = 0; DWORD since = 0; } km_;
+    int joyIndex_ = 0, joyBackup_ = 0;  // Controller Setup: shown device +0x48, its backup +0x4c
     TextTable controlsText_;
 };
+
+// GUI direction inputs 2..5 (screen input 0x469d20): the menu reads key OR
+// POV through one mapper input, so both share one repeat counter: act on a
+// new press (counter 30), then while held every 5 updates (value 1.0 >
+// 0.7). At ~120 updates per second: 250 ms, then 42 ms. Select and back
+// never repeat, so Windows' own key repeat is not used.
+// Times in ms from the performance counter: GetTickCount steps by ~15.6 ms,
+// which made the 42 ms repeat run slow. Repeats keep a fixed cadence (next
+// += kNext), like the original's per-update counter.
+struct GuiRepeat
+{
+    static constexpr double kFirst = 30 * 1000.0 / 120, kNext = 5 * 1000.0 / 120;
+    bool key[4] = {};   // arrow key held (WM_KEYDOWN .. WM_KEYUP)
+    double next[4] = {};
+    static double Now()
+    {
+        static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
+        LARGE_INTEGER c;
+        QueryPerformanceCounter(&c);
+        return double(c.QuadPart) * 1000.0 / double(f.QuadPart);
+    }
+    static int Index(WPARAM vk)
+    {
+        return vk == VK_UP ? 0 : vk == VK_DOWN ? 1 : vk == VK_LEFT ? 2 : vk == VK_RIGHT ? 3 : -1;
+    }
+    bool Held(int i) const { return key[i] || g_joy.Down(i); }
+};
+static GuiRepeat g_repeat;
 
 // ============================================================ window ========
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
-    case WM_KEYDOWN:
-        if (g.cur && !(lp & (1 << 30))) {  // bit 30: key was already down (repeat)
-            int sc = int((lp >> 16) & 0x7f), ext = int((lp >> 24) & 1);
-            g.cur->OnKeyPress(sc | (ext ? 0x80 : 0));  // scan code -> DIK_*
+    case WM_KEYDOWN: {
+        if (lp & (1 << 30)) return 0;  // bit 30: Windows' key repeat; repeats come from g_repeat
+        int i = GuiRepeat::Index(wp);
+        if (i >= 0) {
+            // Already down through the POV: no new press for the mapper input.
+            bool was = g_repeat.Held(i);
+            g_repeat.key[i] = true;
+            if (was) return 0;
+            g_repeat.next[i] = GuiRepeat::Now() + GuiRepeat::kFirst;
         }
+        if (!g.cur) return 0;
+        int sc = int((lp >> 16) & 0x7f), ext = int((lp >> 24) & 1);
+        g.cur->OnKeyPress(sc | (ext ? 0x80 : 0));  // scan code -> DIK_*
         if (g.cur) g.cur->OnKey(wp);
         return 0;
+    }
+    case WM_KEYUP: {
+        int i = GuiRepeat::Index(wp);
+        if (i >= 0) g_repeat.key[i] = false;
+        return 0;
+    }
+    case WM_KILLFOCUS:  // DirectInput (foreground) stops reporting keys
+        for (bool& k : g_repeat.key) k = false;
+        break;
     case WM_SYSKEYDOWN:
         if (wp == VK_F4) { g.Quit(); return 0; }
         break;
@@ -3117,6 +3413,56 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+// After each joystick poll. First a newly pressed button / POV direction,
+// else a newly pushed axis, goes to the state (attract counter, key-map
+// editor, video skip). Then the GUI inputs: the menu reads them through
+// the input mapper 0x4d9cc0 (vtbl 0x78777c) with scheme 0x161 (0x558470),
+// which binds GUI inputs 2..7 to control ids 2..7 of the fixed table
+// 0x7a4c78 (static initialiser 0x6dd790; not in the key map, so they
+// cannot be changed): up / down / left / right = arrow key or POV 1 (codes
+// 0..3), select = Enter or button 1 (code 4), back = Escape or button 2
+// (code 5). The keyboard half comes in through WM_KEYDOWN; the joystick
+// half is fed here as the same keys. Screen input 0x469d20: a direction
+// acts when newly pressed and then, while held, after 30 updates and every
+// 5 updates after that (10 for an analogue value <= 0.7, never the case
+// for a POV); select and back act only when newly pressed. At ~120 updates
+// per second that is 250 ms, then 42 ms. The analogue stick is not bound,
+// so it does not move the menu.
+static void DispatchJoystick()
+{
+    static const WPARAM kVk[6] = { VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_RETURN, VK_ESCAPE };
+    if (!g_joy.Poll() || !g.cur) return;
+    Screen* s = g.cur;
+    int code = 0, axis = 0;
+    bool dir = false;
+    bool used = g_joy.NewButton(code) ? s->OnJoyButton(code) : g_joy.NewAxis(axis, dir) && s->OnJoyAxis(axis, dir);
+    if (used || g.cur != s) return;  // a new state sees the press as old (no edge)
+    double now = GuiRepeat::Now();
+    for (int i = 0; i < 6; ++i) {
+        if (!g_joy.Down(i) || g_joy.WasDown(i)) continue;
+        if (i < 4) {
+            if (g_repeat.key[i]) continue;  // already down through the key
+            g_repeat.next[i] = now + GuiRepeat::kFirst;
+        }
+        s->OnPad(kVk[i]);
+        if (g.cur != s) return;
+    }
+}
+
+// Repeats of held directions, keyboard or POV (see GuiRepeat).
+static void UpdateGuiRepeat()
+{
+    static const WPARAM kVk[4] = { VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT };
+    double now = GuiRepeat::Now();
+    for (int i = 0; i < 4 && g.cur; ++i) {
+        if (!g_repeat.Held(i) || now < g_repeat.next[i]) continue;
+        g_repeat.next[i] += GuiRepeat::kNext;
+        if (g_repeat.next[i] < now) g_repeat.next[i] = now + GuiRepeat::kNext;  // far behind (stall)
+        Screen* s = g.cur;
+        s->OnPad(kVk[i]);
+    }
 }
 
 static void Present()
@@ -3225,6 +3571,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
     g.canvas.w = kWidth;
     g.canvas.h = kHeight;
 
+    g_joy.Init(g.hwnd);  // joystick init 0x583a40
     g.onAudioLanguageChanged.push_back([] { g_sounds.Load(); });  // AUDIO: sounds follow the audio language
     g.SetLanguage(0);
     g.ResetKeyMap();
@@ -3262,6 +3609,9 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
         }
+        if (!g.running) break;
+        DispatchJoystick();
+        UpdateGuiRepeat();
         if (!g.running) break;
         if (g.cur) g.cur->Update();
         DWORD now = GetTickCount();
