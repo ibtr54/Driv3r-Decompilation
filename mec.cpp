@@ -414,14 +414,18 @@ bool MecFile::Load(const std::string& path)
             }
         }
         if (sc.focus < 0 || sc.focus >= int(sc.items.size())) sc.focus = 0;
+        sc.defaultFocus = sc.focus;
         screens.push_back(std::move(sc));
     }
     return r.ok && !screens.empty();
 }
 
+// The GUI compares screen names with _strnicmp(.., 7) (0x4677fa, 0x4678a2):
+// names are stored with 7 characters, and the code asks for "Checking",
+// "LODOyesno", ... (MUMAIN screens "Checkin", "LODOyes").
 int MecFile::Find(const std::string& name) const
 {
     for (size_t i = 0; i < screens.size(); ++i)
-        if (_stricmp(screens[i].name.c_str(), name.c_str()) == 0) return int(i);
+        if (_strnicmp(screens[i].name.c_str(), name.c_str(), 7) == 0) return int(i);
     return -1;
 }

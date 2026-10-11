@@ -101,6 +101,7 @@ struct MecScreen
 {
     std::string name, onEnter, onExit;
     int focus = 0;
+    int defaultFocus = 0;  // header focus item; screens shown by name start there (0x467730)
     bool overlay = false;
     std::vector<Element> items;
     // Runtime (screen object +0x134): set by a mouse move, cleared by

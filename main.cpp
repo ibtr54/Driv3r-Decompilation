@@ -951,39 +951,6 @@ public:
 
     Profile() : data_(kSize) {}
 
-    // The name screen (GUI\NAME) that creates profiles is not implemented, so
-    // use the most recently saved existing profile. Without one the block is
-    // kept in memory only (accept / restore still work, nothing is written).
-    bool Load(const std::string& gameDir)
-    {
-        std::string saves = gameDir + "\\Saves\\";
-        WIN32_FIND_DATAA fd;
-        HANDLE h = FindFirstFileA((saves + "D3P_*").c_str(), &fd);
-        if (h == INVALID_HANDLE_VALUE) return false;
-        FILETIME newest = {};
-        do {
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-            std::string p = saves + fd.cFileName + "\\ProfileData";
-            WIN32_FILE_ATTRIBUTE_DATA a;
-            if (!GetFileAttributesExA(p.c_str(), GetFileExInfoStandard, &a) || a.nFileSizeLow != kSize) continue;
-            if (path_.empty() || CompareFileTime(&a.ftLastWriteTime, &newest) > 0) {
-                path_ = p;
-                newest = a.ftLastWriteTime;
-            }
-        } while (FindNextFileA(h, &fd));
-        FindClose(h);
-        if (path_.empty()) return false;
-
-        FILE* f = fopen(path_.c_str(), "rb");
-        if (!f) { path_.clear(); return false; }
-        std::vector<uint8_t> d(kSize);
-        bool ok = fread(d.data(), 1, kSize, f) == size_t(kSize);
-        fclose(f);
-        if (ok) data_.swap(d);
-        else path_.clear();
-        return ok;
-    }
-
     // Keeps a copy of the original file next to it before the first write.
     bool Save()
     {
@@ -996,6 +963,63 @@ public:
         ok = fclose(f) == 0 && ok;
         return ok && MoveFileExA(tmp.c_str(), path_.c_str(), MOVEFILE_REPLACE_EXISTING);
     }
+
+    // ---- profile folders (save device 0x8ac2bc, Saves\<prefix><name>) ------
+    static std::string SavesDir() { return g.gameDir + "\\Saves\\"; }
+
+    // Load (0x5421f0): the folder must hold ProfileData of exactly 0xc90
+    // bytes (0x542460), else 3 ("corrupt"); a read error gives 2. The data
+    // goes straight into the live block, so the caller reverts on failure.
+    int LoadFolder(const std::string& folder)
+    {
+        std::string p = SavesDir() + folder + "\\ProfileData";
+        WIN32_FILE_ATTRIBUTE_DATA a;
+        if (!GetFileAttributesExA(p.c_str(), GetFileExInfoStandard, &a) || a.nFileSizeHigh || a.nFileSizeLow != kSize)
+            return 3;
+        FILE* f = fopen(p.c_str(), "rb");
+        if (!f) return 2;
+        std::vector<uint8_t> d(kSize);
+        bool ok = fread(d.data(), 1, kSize, f) == size_t(kSize);
+        fclose(f);
+        if (!ok) return 2;
+        data_.swap(d);
+        return 1;
+    }
+    // Save (0x5422f0 -> device vtbl+0x60 = 0x583250): CreateDirectory Saves
+    // and Saves\<folder>, then write ProfileData (the live block).
+    bool SaveFolder(const std::string& folder)
+    {
+        CreateDirectoryA(SavesDir().c_str(), nullptr);
+        CreateDirectoryA((SavesDir() + folder).c_str(), nullptr);
+        std::string keep = path_;
+        path_ = SavesDir() + folder + "\\ProfileData";
+        bool ok = Save();
+        if (!ok) path_ = keep;
+        return ok;
+    }
+    // Delete (0x5423c0 -> device vtbl+0x68 = 0x583370): every file of the
+    // folder, then the folder.
+    static bool DeleteFolder(const std::string& folder)
+    {
+        std::string dir = SavesDir() + folder;
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA((dir + "\\*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) DeleteFileA((dir + "\\" + fd.cFileName).c_str());
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+        return RemoveDirectoryA(dir.c_str()) != 0;
+    }
+    static bool FolderHasProfile(const std::string& folder)
+    {
+        return FileExists(SavesDir() + folder + "\\ProfileData");
+    }
+    // The current profile (0x8ac5a0 vtbl+4), where Accept saves the settings.
+    void SetCurrent(const std::string& folder) { path_ = SavesDir() + folder + "\\ProfileData"; }
+    std::vector<uint8_t> Snapshot() const { return data_; }
+    void Restore(const std::vector<uint8_t>& d) { if (d.size() == data_.size()) data_ = d; }
 
     bool HasFile() const { return !path_.empty(); }
     const std::string& Path() const { return path_; }
@@ -1112,6 +1136,32 @@ static void SaveProfile(bool toFile = true)
 }
 
 // ============================================================ MEC menus ====
+// Greedy word wrap into a box width; explicit line breaks are kept. Used by
+// the FMV subtitles and by MEC texts wider than their element. The original's
+// code was not traced; the making-of subtitle line 0 and the MUMAIN popup
+// "ASOffQ" broke at the same words as the original (compared on screen).
+static std::vector<std::wstring> WrapText(const std::wstring& s, float width, float sx)
+{
+    std::vector<std::wstring> lines;
+    std::wstring cur, word;
+    auto flushWord = [&] {
+        if (word.empty()) return;
+        std::wstring trial = cur.empty() ? word : cur + L' ' + word;
+        if (!cur.empty() && g.font.Width(trial, sx) > width) { lines.push_back(cur); cur = word; }
+        else cur = trial;
+        word.clear();
+    };
+    for (wchar_t c : s) {
+        if (c == L'\r') continue;
+        if (c == L'\n') { flushWord(); lines.push_back(cur); cur.clear(); continue; }
+        if (c == L' ') { flushWord(); continue; }
+        word += c;
+    }
+    flushWord();
+    if (!cur.empty()) lines.push_back(cur);
+    return lines;
+}
+
 // Runtime for one .MEC file: screen stack, focus, navigation and drawing.
 // Mirrors the GUI manager at 0x8ac3b0 (handler vtbl 0x781e48): select links
 // push a screen (FUN_00467a00 flag 2), back pops it (flag 8), action strings
@@ -1128,6 +1178,7 @@ public:
     std::function<void(HDC, int, int, int, int)> drawFmv;
     std::function<bool(const std::string&, std::wstring&)> dynamicText;  // TEXT textFn
     std::function<bool(const std::string&, int&)> valueText;  // "val_*" -> number for "%d"
+    bool rootBackFiresExit = false;
 
     bool Load(const std::string& name)  // e.g. "GUI\\FRONT" -> TERR:%s.MEC + LANG:%s.TXT
     {
@@ -1141,6 +1192,8 @@ public:
     void ReloadText() { text = LoadTxt(g.Resolve("LANG:" + name_ + ".TXT")); }
 
     MecScreen* Top() { return stack.empty() ? nullptr : &mec.screens[stack.back()]; }
+    // Focus back on the top screen's default item (header focus).
+    void ResetFocus() { if (MecScreen* s = Top()) SetFocus(*s, s->defaultFocus); }
 
     void Reset(int screen)
     {
@@ -1174,6 +1227,9 @@ public:
         if (vk == VK_ESCAPE || vk == VK_BACK) {  // input 7: back sound, then pop
             s->hover = false;
             g_sounds.Play(MenuSounds::BACK);
+            // Popups shown by name (MUMAIN, NAME) have no parent: back sends
+            // the screen's exit action (mu_cancel, mu_no, mu_exit, ...).
+            if (rootBackFiresExit && stack.size() <= 1) { Fire(s->onExit); return; }
             Pop();
             return;
         }
@@ -1283,8 +1339,28 @@ public:
         if (stack.empty()) return;
         size_t first = stack.size() - 1;
         while (first > 0 && mec.screens[stack[first]].overlay) --first;  // popups draw over their parent
+        // Two passes: the items add sprites to the GUI render list
+        // (0x57e2b0) but give their texts to the text manager (0x8ac254),
+        // which draws later; so texts are always above sprites, whatever the
+        // item order (MUMAIN popups list their panel after the texts).
+        // Sprites carry the key (layer << 16) | material (0x466b40) into
+        // the render list, which draws them by that key, not in item order:
+        // MUMAIN lists draw the panel fill (material 1) under the bullets
+        // (6) and dashes (3) that come before it in the file (as observed).
+        // Video panes are not in that list; they are drawn first.
+        sprites_.clear();
         for (size_t i = first; i < stack.size(); ++i)
-            for (Element& e : mec.screens[stack[i]].items) DrawElement(dc, cv, e);
+            for (Element& e : mec.screens[stack[i]].items) DrawElement(dc, cv, e, 0);
+        std::stable_sort(sprites_.begin(), sprites_.end(),
+                         [](const Element* a, const Element* b) { return a->material < b->material; });
+        for (const Element* e : sprites_) {
+            if (e->material < 0 || e->material >= int(mec.materials.size())) continue;
+            const Texture& t = mec.materials[e->material];
+            cv.Draw(t, e->u0, e->v0, e->u1, e->v1, e->x * kWidth, e->y * kHeight, e->w * kWidth, e->h * kHeight,
+                    e->rgba, t.additive);
+        }
+        for (size_t i = first; i < stack.size(); ++i)
+            for (Element& e : mec.screens[stack[i]].items) DrawElement(dc, cv, e, 1);
     }
 
 private:
@@ -1301,15 +1377,13 @@ private:
         if (s.items[i].type == EL_BUTTON) s.items[i].state = 0;
     }
 
-    void DrawElement(HDC dc, Canvas& cv, Element& e)
+    void DrawElement(HDC dc, Canvas& cv, Element& e, int pass)  // pass 0 sprites / video, 1 texts
     {
         float x = e.x * kWidth, y = e.y * kHeight, w = e.w * kWidth, h = e.h * kHeight;
+        if (pass != (e.type == EL_TEXT ? 1 : 0) && e.type != EL_BUTTON) return;
         switch (e.type) {
         case EL_SPRITE:
-            if (e.material >= 0 && e.material < int(mec.materials.size())) {
-                const Texture& t = mec.materials[e.material];
-                cv.Draw(t, e.u0, e.v0, e.u1, e.v1, x, y, w, h, e.rgba, t.additive);
-            }
+            sprites_.push_back(&e);  // drawn sorted by material after this pass
             break;
         case EL_TEXT: {
             std::wstring s;
@@ -1324,28 +1398,36 @@ private:
                 s.replace(pct, 2, std::to_wstring(value));
             if (s.empty() || !g.font.Loaded()) break;
             s = ExpandIcons(s);
-            float tw = g.font.Width(s, e.sx);
-            // 0 left, 1 right, 2 centre: the game's text API (the same values
-            // as the FMV subtitles, 0x5992ac); front.MEC uses only these three.
-            float tx = e.align == 1 ? x + w - tw : e.align == 2 ? x + (w - tw) / 2 : x;
             // Compared with the original (aspect 0, 8 texts with scales from
             // 0.4 to 1.25): widths follow sx, heights follow sy x ~0.93
             // (taken as 480/512; the code behind it was not traced), and y
-            // is the top of the capitals, as for the subtitles.
+            // is the top of the capitals, as for the subtitles. Text wider
+            // than the element wraps inside it, lines LinePitch x sy apart
+            // (MUMAIN ASOffQ: 22 and 19 px for sy 0.7 and 0.6, measured).
             float hs = e.sy * (480.0f / 512.0f);
-            g.font.Draw(cv, s, tx, y - g.font.TopOffset() * hs, e.sx, hs, e.rgba);
+            float ly = y - g.font.TopOffset() * hs;
+            for (const std::wstring& line : WrapText(s, w, e.sx)) {
+                float tw = g.font.Width(line, e.sx);
+                // 0 left, 1 right, 2 centre: the game's text API (the same
+                // values as the FMV subtitles, 0x5992ac).
+                float tx = e.align == 1 ? x + w - tw : e.align == 2 ? x + (w - tw) / 2 : x;
+                g.font.Draw(cv, line, tx, ly, e.sx, hs, e.rgba);
+                ly += g.font.LinePitch() * e.sy;
+            }
             break;
         }
         case EL_BUTTON:
-            if (!e.actions[ACT_STATUS].empty() && onStatus) e.state = onStatus(e.actions[ACT_STATUS], e.state);
+            if (pass == 0 && !e.actions[ACT_STATUS].empty() && onStatus) e.state = onStatus(e.actions[ACT_STATUS], e.state);
             if (e.state >= 0 && e.state < int(e.rows.size()))
-                for (Element& c : e.rows[e.state]) DrawElement(dc, cv, c);
+                for (Element& c : e.rows[e.state]) DrawElement(dc, cv, c, pass);
             break;
         case EL_FMV:
             if (drawFmv) drawFmv(dc, int(x), int(y), int(w), int(h));
             break;
         }
     }
+
+    std::vector<const Element*> sprites_;
 
     // "$^a".."$^d" in the text files select the icon glyphs U+2480..U+2483
     // (down, up, right, left arrows) of FONT.BNK.
@@ -1365,6 +1447,383 @@ private:
 
     std::string name_;
 };
+
+// ================================================ profiles (GUI\MUMAIN) ====
+// The "memory unit" classes: an emulation of the Xbox save flow on top of
+// the save device 0x8ac2bc (Saves\<folder>\<file>). Three of them belong to
+// the menus:
+//   BOOT     slot 221, global 0x8ac5a8, vtbl 0x78930c (events 0x543090):
+//            run by the title screen after bu_continue;
+//   PROFILES slot 223, global 0x8ac5ac, vtbl 0x7894f0 (events 0x545060):
+//            Options -> Profiles (event LoadSave -> state 0xB2);
+//   REPLAYS  slot 222, global 0x8ac5b0, vtbl 0x7894a8 (events 0x544260):
+//            Options -> Replays (LoadReplay -> state 0xB1).
+// Each has Start / Busy (one step per update) / Finish, a step number and the
+// number of the popup on screen, both kept here with the original values.
+// Popups are MUMAIN screens shown by name (GUI slot 6); popup 4 is the name
+// entry, the only screen of GUI\NAME (slot 7). Folder names are a prefix
+// from LANG:TEXT\generic.txt (text 0 "D3P_", text 1 "D3R_") + the name.
+class MemoryUnit
+{
+public:
+    enum Mode { BOOT, PROFILES, REPLAYS };
+    bool Active() const { return active_; }
+    // Replay folder chosen with Load in REPLAYS mode (empty if none).
+    std::string TakeReplay() { std::string r; r.swap(replay_); return r; }
+
+    void Start(Mode m)  // 0x5428b0 / 0x544910 / 0x543df0
+    {
+        mode_ = m;
+        replay_.clear();
+        if (!loaded_) {
+            mu_.Load("GUI\\MUMAIN");
+            name_.Load("GUI\\NAME");
+            for (MecMenu* menu : { &mu_, &name_ }) {
+                menu->rootBackFiresExit = true;
+                menu->onAction = [this](const std::string& a) { Event(a); };
+                menu->onStatus = [this](const std::string& s, int st) { return Status(s, st); };
+                menu->dynamicText = [this](const std::string& fn, std::wstring& out) { return Text(fn, out); };
+            }
+            loaded_ = true;
+        }
+        TextTable generic = LoadTxt(g.Resolve("LANG:Text\\generic.txt"));
+        auto it = generic.find(m == REPLAYS ? 1 : 0);
+        prefix_ = it != generic.end() ? it->second : (m == REPLAYS ? L"D3R_" : L"D3P_");
+        SaveProfile(false);                // the live block holds the current settings
+        backup_ = g_profile.Snapshot();    // live -> saved copy (+0x8 -> +0xc98)
+        name58_.clear();
+        offset_ = count_ = op_ = 0;
+        step_ = 0;
+        active_ = true;
+        Log("Profiles: start (%s), prefix %ls", m == BOOT ? "boot" : m == PROFILES ? "profiles" : "replays", prefix_.c_str());
+        Show(0);
+    }
+
+    // Busy (0x542ac0 / 0x544ab0): false once the flow is over.
+    bool Update()
+    {
+        if (!active_) return false;
+        (popup_ == 4 ? name_ : mu_).Update();
+        DWORD el = GetTickCount() - shownAt_;
+        switch (step_) {
+        case 0: step_ = 1; break;
+        case 1: Enumerate(); step_ = 2; break;
+        case 2:
+            // Boot: no wait; no profile -> NoSave (popup 1). Others: Checking
+            // for at least 40 updates (0x544be1), then LSD1.
+            if (mode_ == BOOT) {
+                if (count_ == 0) { step_ = 3; Show(1); }
+                else { step_ = 4; Show(2); }
+            } else if (el >= kCheckingMs) {
+                step_ = 4;
+                Show(2);
+            }
+            break;
+        case 12: case 13: case 14: Work(el); break;
+        case 18: Verify(); break;
+        case kExit: active_ = false; Log("Profiles: done"); return false;
+        }
+        return true;
+    }
+
+    void Render(HDC dc, Canvas& cv) { (popup_ == 4 ? name_ : mu_).Render(dc, cv); }
+    void OnKey(WPARAM vk) { (popup_ == 4 ? name_ : mu_).OnKey(vk); }
+    void OnMouse(int code, float x, float y) { (popup_ == 4 ? name_ : mu_).OnMouse(code, x, y); }
+
+    // Name entry (0x5414c0, step 6): newly pressed keys from the table at
+    // 0x7a1f78 (0-9, a-z, space -> '_'); a key that the keyboard layout
+    // turns into one letter or digit uses that one. Shift XOR Caps Lock ->
+    // upper case. Backspace deletes, Enter / keypad Enter accepts if the name
+    // is not blank (then char_accept). At most 16 characters (0x5414a0).
+    void OnKeyPress(int dik)
+    {
+        if (!active_ || popup_ != 4) return;
+        if (dik == 0x0e) { if (!name58_.empty()) name58_.pop_back(); return; }
+        if (dik == 0x1c || dik == 0x9c) {
+            if (name58_.find_first_not_of(L' ') != std::wstring::npos) Event("char_accept");
+            return;
+        }
+        static const char* kDigits = "1234567890";  // DIK 0x02..0x0b
+        static const struct { int dik; char c; } kLetters[] = {
+            { 0x1e, 'a' }, { 0x30, 'b' }, { 0x2e, 'c' }, { 0x20, 'd' }, { 0x12, 'e' }, { 0x21, 'f' }, { 0x22, 'g' },
+            { 0x23, 'h' }, { 0x17, 'i' }, { 0x24, 'j' }, { 0x25, 'k' }, { 0x26, 'l' }, { 0x32, 'm' }, { 0x31, 'n' },
+            { 0x18, 'o' }, { 0x19, 'p' }, { 0x10, 'q' }, { 0x13, 'r' }, { 0x1f, 's' }, { 0x14, 't' }, { 0x16, 'u' },
+            { 0x2f, 'v' }, { 0x11, 'w' }, { 0x2d, 'x' }, { 0x15, 'y' }, { 0x2c, 'z' },
+        };
+        wchar_t ch = 0;
+        if (dik >= 0x02 && dik <= 0x0b) ch = wchar_t(kDigits[dik - 2]);
+        for (const auto& l : kLetters) if (l.dik == dik) ch = wchar_t(l.c);
+        if (dik == 0x39) ch = L'_';
+        if (!ch) return;
+        if (dik != 0x39) {  // the layout's character, if it is one letter or digit (0x583660)
+            UINT vk = MapVirtualKeyW(UINT(dik), MAPVK_VSC_TO_VK);
+            BYTE ks[256] = {};
+            wchar_t buf[4] = {};
+            if (vk && ToUnicode(vk, UINT(dik), ks, buf, 4, 0) == 1 && iswalnum(buf[0])) ch = buf[0];
+        }
+        bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0, caps = (GetKeyState(VK_CAPITAL) & 1) != 0;
+        ch = shift != caps ? towupper(ch) : towlower(ch);
+        if (name58_.size() < 16) name58_ += ch;
+    }
+
+private:
+    static const int kExit = 99;
+    static const DWORD kCheckingMs = 333;  // 40 updates (~120 per second, as the attract counter)
+    static const DWORD kWorkMs = 1000;     // 120 updates: shortest time "Saving..." etc. stays up
+
+    std::string ScreenName(int p) const
+    {
+        static const char* kNames[] = { "Checking", "EmptyCard", "LSD1", "LSD2", "EnterName", "InvName",
+                                        "FileExists", "LODOyesno", "LODyesno", "LODyesno", "LSDing", "LSDing",
+                                        "LSDing", "LSDok", "LSDok", "LSDok", "LSDfailed", "LSDfailed",
+                                        "LSDfailed", "Corrupt", "ASOffQ" };
+        if (mode_ == BOOT && p == 1) return "NoSave";      // 0x542910
+        if (mode_ == BOOT && p == 7) return "LODyesno";    // 0x5428dd
+        return p >= 0 && p < 21 ? kNames[p] : "";
+    }
+
+    // 0x545920: show popup p (MUMAIN by name, or GUI\NAME for 4).
+    void Show(int p)
+    {
+        popup_ = p;
+        shownAt_ = GetTickCount();
+        if (p == 2) op_ = 0;
+        if (p == 4) {
+            name_.Reset(0);
+        } else {
+            int i = mu_.mec.Find(ScreenName(p));
+            if (i >= 0) {
+                mu_.mec.screens[i].focus = mu_.mec.screens[i].defaultFocus;  // 0x4677e0 -> 0x467730
+                mu_.Reset(i);
+            }
+        }
+        Log("Profiles: step %d, popup %d '%s'", step_, p, ScreenName(p).c_str());
+    }
+
+    // Step 1: list the save folders (device vtbl+0x50/+0x54, 0x582f10). A
+    // folder counts if its name starts with the prefix (0x542860, exact
+    // case) and the rest is letters, digits or '_' (0x541770); at most 100.
+    void Enumerate()
+    {
+        names_.clear();
+        folders_.clear();
+        WIN32_FIND_DATAW fd;
+        std::string saves = Profile::SavesDir();
+        std::wstring dir(saves.begin(), saves.end());
+        HANDLE h = FindFirstFileW((dir + L"*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                std::wstring n = fd.cFileName;
+                if (n.compare(0, prefix_.size(), prefix_) != 0 || n.size() == prefix_.size()) continue;
+                std::wstring rest = n.substr(prefix_.size());
+                bool ok = true;
+                for (wchar_t c : rest) ok = ok && (iswalnum(c) || c == L'_');
+                if (!ok) continue;
+                names_.push_back(rest);
+                std::string a;
+                for (wchar_t c : n) a += c < 0x80 ? char(c) : '?';  // 0x542110
+                folders_.push_back(a);
+            } while (names_.size() < 100 && FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+        count_ = int(names_.size());
+        Log("Profiles: %d folder(s) with prefix %ls", count_, prefix_.c_str());
+    }
+
+    void Select(const std::string& folder) { sel_ = folder; }  // 0x542140 (device vtbl+0x10)
+    std::string FolderOf(const std::wstring& name) const
+    {
+        std::string a;
+        for (wchar_t c : prefix_ + name) a += c < 0x80 ? char(c) : '?';
+        return a;
+    }
+    void Revert()  // 0x548840: saved -> live
+    {
+        g_profile.Restore(backup_);
+        ApplyProfile();
+    }
+
+    // Steps 12 load / 13 save / 14 delete (0x5421f0 / 0x5422f0 / 0x5423c0).
+    // Done once; on success the popup stays for at least 120 updates.
+    void Work(DWORD el)
+    {
+        if (mode_ == REPLAYS && step_ == 12) {  // a replay plays in the game: gameplay boundary
+            replay_ = sel_;
+            step_ = kExit;
+            return;
+        }
+        if (!workDone_) {
+            workDone_ = true;
+            if (step_ == 12) result_ = g_profile.LoadFolder(sel_);
+            else if (step_ == 13) { SaveProfile(false); result_ = g_profile.SaveFolder(sel_) ? 1 : 2; }
+            else result_ = Profile::DeleteFolder(sel_) ? 1 : 2;
+            Log("Profiles: %s %s -> %d", step_ == 12 ? "load" : step_ == 13 ? "save" : "delete", sel_.c_str(), result_);
+        }
+        if (result_ == 1) {
+            if (el < kWorkMs) return;
+            workDone_ = false;
+            if (step_ == 14) { step_ = 15; Show(15); return; }  // deleted
+            prev_ = step_;
+            step_ = 18;
+            return;
+        }
+        workDone_ = false;
+        if (step_ == 12) {  // 0x544d1d / 0x544c9a: revert; corrupt or failed
+            Revert();
+            if (result_ == 3) { step_ = 17; Show(19); }
+            else { step_ = 16; Show(16); }
+        } else if (step_ == 13) { step_ = 17; Show(17); }
+        else { step_ = 16; Show(18); }
+    }
+
+    // Step 18 (0x544f06): ProfileData must be in the folder now; then the
+    // settings are committed (0x548300) and the folder becomes the current
+    // profile (0x8ac5a0 vtbl+4).
+    void Verify()
+    {
+        bool found = Profile::FolderHasProfile(sel_);
+        bool load = prev_ == 12;
+        if (found) {
+            if (load) ApplyProfile();
+            g_profile.SetCurrent(sel_);
+            backup_ = g_profile.Snapshot();
+            Log("Profiles: current profile %s", sel_.c_str());
+            step_ = 15;
+            Show(load ? 13 : 14);
+        } else {
+            if (load) Revert();
+            step_ = 16;
+            Show(load ? 16 : 17);
+        }
+    }
+
+    // Event handlers (0x543090 / 0x545060), by popup.
+    void Event(const std::string& a)
+    {
+        Log("Profiles: event %s (popup %d)", a.c_str(), popup_);
+        auto is = [&](const char* s) { return _stricmp(a.c_str(), s) == 0; };
+        switch (popup_) {
+        case 1:  // EmptyCard; at boot NoSave ("create a profile?")
+            if (mode_ == BOOT) {
+                if (is("mu_yes")) { name58_.clear(); op_ = 2; step_ = 6; Show(4); }
+                else if (is("mu_no")) { step_ = 19; Show(20); }
+            } else if (is("mu_continue") || is("mu_cancel")) { step_ = 4; Show(2); }
+            break;
+        case 2:  // LSD1: Load / Save / Delete / Exit
+            if (is("mu_load") || is("mu_delete") || (is("mu_save") && mode_ != REPLAYS)) {
+                op_ = is("mu_load") ? 1 : is("mu_save") ? 2 : 3;
+                if (op_ == 2 || count_ > 0) { step_ = 5; Show(3); }
+                else { step_ = 3; Show(1); }
+            } else if (is("mu_exit")) {
+                if (mode_ == BOOT) { step_ = 19; Show(20); }  // ASOffQ
+                else step_ = kExit;
+            }
+            break;
+        case 3:  // LSD2: the list
+            if (StartsWithI(a, "mu_file")) {
+                int idx = atoi(a.c_str() + 7) + offset_ - 1;
+                if (op_ == 1 && idx < count_) {
+                    Select(folders_[idx]);
+                    name58_ = names_[idx];  // only a load copies the name (0x545432)
+                    step_ = 9;
+                    Show(7);
+                } else if (op_ == 2) {
+                    if (idx < count_) { Select(folders_[idx]); step_ = 10; Show(8); }
+                    else { name58_.clear(); step_ = 6; Show(4); }  // the free slot: enter a name
+                } else if (op_ == 3 && idx < count_) {
+                    Select(folders_[idx]);
+                    step_ = 11;
+                    Show(9);
+                }
+            } else if (is("mu_cancel")) {
+                if (offset_ > 0 && count_ - offset_ < 10) --offset_;
+                step_ = 4;
+                Show(2);
+            } else if (is("mu_pageup")) {
+                if (offset_ > 0) --offset_;
+            } else if (is("mu_pagedown")) {
+                if (Limit() > offset_ + 10) ++offset_;
+            }
+            break;
+        case 4:  // name entry
+            if (is("char_accept")) {
+                for (const std::wstring& n : names_)
+                    if (_wcsicmp(n.c_str(), name58_.c_str()) == 0) { step_ = 8; Show(6); return; }  // FileExists
+                Select(FolderOf(name58_));
+                step_ = 13;
+                Show(11);
+            } else if (is("mu_cancel")) {
+                step_ = 5;
+                Show(3);
+            }
+            break;
+        case 5: case 6:  // InvName / FileExists
+            if (is("mu_cancel") || is("mu_continue")) { step_ = 6; Show(4); }
+            break;
+        case 7: case 8: case 9:  // confirm load / overwrite / delete
+            if (is("mu_yes")) { step_ = 12 + (popup_ - 7); Show(10 + (popup_ - 7)); }
+            else if (is("mu_no")) { step_ = 5; Show(3); }
+            break;
+        case 13: case 14: case 15: case 16: case 17: case 18: case 19:  // results
+            if (!is("mu_continue")) break;
+            if (mode_ == BOOT && (popup_ == 13 || popup_ == 14)) step_ = kExit;  // 0x5439a8
+            else { step_ = 0; Show(0); }
+            break;
+        case 20:  // ASOffQ (boot): carry on without a profile?
+            if (is("mu_yes")) step_ = kExit;
+            else if (is("mu_no")) { step_ = 0; Show(0); }
+            break;
+        }
+    }
+
+    int Limit() const { return count_ + (op_ == 2 && count_ < 100 ? 1 : 0); }  // save adds the free slot
+
+    // Status queries (0x5459a0 and the boot copy at 0x543b20..).
+    int Status(const std::string& s, int st) const
+    {
+        auto is = [&](const char* n) { return _stricmp(s.c_str(), n) == 0; };
+        if (is("mustat_datatype")) return mode_ == REPLAYS ? 1 : 0;  // row 0 profiles, 1 replays
+        if (is("mustat_replay")) return mode_ == REPLAYS ? st : 2;
+        if (is("mustat_title")) return op_ == 2 ? 1 : op_ == 3 ? 2 : 0;  // table 0x545c4c
+        if (StartsWithI(s, "mustat_file")) {
+            int idx = atoi(s.c_str() + 11) + offset_ - 1;
+            return idx >= (op_ == 2 ? Limit() : count_) ? 2 : st;
+        }
+        if (is("mustat_load")) return op_ == 1 ? 0 : st;
+        if (is("mustat_save")) return op_ == 2 ? 0 : st;
+        if (is("mustat_del")) return op_ == 3 ? 0 : st;
+        if (is("mustat_pageup")) return offset_ > 0 ? 0 : 2;
+        if (is("mustat_pagedown")) return offset_ + 10 < Limit() ? 0 : 2;
+        return st;
+    }
+    bool Text(const std::string& fn, std::wstring& out) const
+    {
+        if (StartsWithI(fn, "mutxt_file")) {
+            int idx = atoi(fn.c_str() + 10) + offset_ - 1;
+            if (idx < 0 || idx >= count_) return false;  // left as it is (MEC text)
+            out = names_[idx];
+            return true;
+        }
+        if (_stricmp(fn.c_str(), "mutxt_name") == 0 || _stricmp(fn.c_str(), "txt_entryname") == 0) {
+            out = name58_;
+            return true;
+        }
+        return false;
+    }
+
+    MecMenu mu_, name_;
+    bool loaded_ = false, active_ = false, workDone_ = false;
+    Mode mode_ = BOOT;
+    std::wstring prefix_, name58_;  // +0x58: the chosen or typed name
+    std::vector<std::wstring> names_;
+    std::vector<std::string> folders_;
+    std::string sel_, replay_;
+    std::vector<uint8_t> backup_;
+    int step_ = 0, popup_ = 0, op_ = 0, offset_ = 0, count_ = 0, prev_ = 0, result_ = 0;
+    DWORD shownAt_ = 0;
+};
+static MemoryUnit g_mu;
 
 // --------------------------------------------------- 0xAA intro movie ------
 // =========================================================== FMV subtitles =
@@ -1472,30 +1931,7 @@ private:
     // 0x5991b7: one bit per text language (+0x2c): English 0x1, French 0x2,
     // German 0x4, Spanish 0x8, Italian 0x10, Japanese 0x20, Chinese 0x40,
     // Taiwanese 0x100, Korean 0x200, Portuguese 0x400; other ids: always.
-    // Greedy word wrap into the box width; explicit line breaks are kept.
-    // The original's code was not traced, but its making-of line 0 broke at
-    // the same words (compared on screen).
-    static std::vector<std::wstring> Wrap(const std::wstring& s, float width, float sx)
-    {
-        std::vector<std::wstring> lines;
-        std::wstring cur, word;
-        auto flushWord = [&] {
-            if (word.empty()) return;
-            std::wstring trial = cur.empty() ? word : cur + L' ' + word;
-            if (!cur.empty() && g.font.Width(trial, sx) > width) { lines.push_back(cur); cur = word; }
-            else cur = trial;
-            word.clear();
-        };
-        for (wchar_t c : s) {
-            if (c == L'\r') continue;
-            if (c == L'\n') { flushWord(); lines.push_back(cur); cur.clear(); continue; }
-            if (c == L' ') { flushWord(); continue; }
-            word += c;
-        }
-        flushWord();
-        if (!cur.empty()) lines.push_back(cur);
-        return lines;
-    }
+    static std::vector<std::wstring> Wrap(const std::wstring& s, float width, float sx) { return WrapText(s, width, sx); }
 
     static bool LanguageAllowed(uint16_t flags)
     {
@@ -1644,21 +2080,43 @@ public:
     void Enter() override  // 0x541a70: loads GUI\BOOTUP (slot 5) + GUI\MUMAIN (slot 6)
     {
         menu_.Load("GUI\\BOOTUP");
-        menu_.onAction = [](const std::string& a) {
-            if (a == "bu_continue") {  // handler 0x541b60
+        menu_.onAction = [this](const std::string& a) {
+            if (a == "bu_continue" && !profiles_) {  // handler 0x541b60
                 Log("event: bu_continue");
-                g.Goto(ST_BOOT_SEQ);
+                // GUI slot 5 (BOOTUP) is hidden and the profile object
+                // (0x8ac5a8) started; Update waits until it is done (0x541ae5).
+                profiles_ = true;
+                g_mu.Start(MemoryUnit::BOOT);
             }
         };
         menu_.Reset(0);
+        profiles_ = false;
     }
-    void Render(HDC dc, Canvas& cv) override { menu_.Render(dc, cv); }
-    void Update() override { menu_.Update(); }
-    void OnKey(WPARAM vk) override { menu_.OnKey(vk); }
-    void OnMouse(int code, float x, float y) override { menu_.OnMouse(code, x, y); }
+    void Render(HDC dc, Canvas& cv) override
+    {
+        if (profiles_) g_mu.Render(dc, cv);
+        else menu_.Render(dc, cv);
+    }
+    void Update() override
+    {
+        if (!profiles_) { menu_.Update(); return; }
+        if (!g_mu.Update()) g.Goto(ST_BOOT_SEQ);  // finished: unload slots 5/6, back to 0xA9
+    }
+    void OnKey(WPARAM vk) override
+    {
+        if (profiles_) g_mu.OnKey(vk);
+        else menu_.OnKey(vk);
+    }
+    void OnKeyPress(int dik) override { if (profiles_) g_mu.OnKeyPress(dik); }
+    void OnMouse(int code, float x, float y) override
+    {
+        if (profiles_) g_mu.OnMouse(code, x, y);
+        else menu_.OnMouse(code, x, y);
+    }
 
 private:
     MecMenu menu_;
+    bool profiles_ = false;
 };
 
 // --------------------------------------------------- 0xB3 gameplay (stub) -
@@ -1825,6 +2283,20 @@ public:
         }
         bg_.Update();
         pane_.Update();
+        // Profiles / Replays (states 0xB2 / 0xB1, 0x541d10): the profile object
+        // runs until it is done, then the front end (0xAD) carries on; its own
+        // update (attract counter, cheat codes) does not run meanwhile.
+        if (g_mu.Active()) {
+            idleSince_ = GetTickCount();
+            if (!g_mu.Update()) {
+                // Back in the front end the Options screen has its default
+                // focus again (Extras, observed on the original).
+                menu_.ResetFocus();
+                std::string replay = g_mu.TakeReplay();
+                if (!replay.empty()) LaunchGameplay("LoadReplay " + replay);
+            }
+            return;
+        }
         menu_.Update();
         // Waiting for a key: the chosen row's two cells blink (0x549f84, 30
         // updates per phase; taken here as 0.5 s).
@@ -1839,6 +2311,9 @@ public:
             extraSubs_.Draw(cv, extra_.Frame());
             return;
         }
+        // While Profiles / Replays is open only its popup is drawn: the
+        // original shows it on black, without the front end (observed).
+        if (g_mu.Active()) return g_mu.Render(dc, cv);
         bg_.Draw(dc, 0, 0, kWidth, kHeight, false);
         menu_.Render(dc, cv);
     }
@@ -1848,12 +2323,15 @@ public:
         idleSince_ = GetTickCount();  // any input clears the counter (0x551e00 -> +0x18 = 0)
         if (extra_.IsOpen()) { if (IsSkipKey(vk)) EndExtra(); return; }
         if (km_.state == 1) return CaptureKey(vk);
+        if (g_mu.Active()) return g_mu.OnKey(vk);
         menu_.OnKey(vk);
     }
 
     void OnMouse(int code, float x, float y) override
     {
-        if (!extra_.IsOpen()) menu_.OnMouse(code, x, y);
+        if (extra_.IsOpen()) return;
+        if (g_mu.Active()) g_mu.OnMouse(code, x, y);
+        else menu_.OnMouse(code, x, y);
     }
 
     // DirectInput mouse buttons (0x583a00) count as input for the attract
@@ -1875,6 +2353,7 @@ public:
     // one has finished); then the position is reset.
     void OnKeyPress(int dik) override
     {
+        if (g_mu.Active()) return g_mu.OnKeyPress(dik);  // name entry; no cheat check outside 0xAD
         for (CheatCode& c : g_cheatCodes) {
             if (dik != c.keys[c.pos]) { c.pos = 0; continue; }
             if (++c.pos < 7) continue;
@@ -1916,8 +2395,11 @@ private:
         if (StartsWithI(a, "movie=")) { PlayBackground(a.substr(6)); return; }
 
         // Everything that leaves the front end for the game: FUN_00557d70 -> 0xB3.
+        // Options -> Profiles / Replays (0x553f08 / 0x553f3b): states 0xB2 / 0xB1.
+        if (_stricmp(a.c_str(), "LoadSave") == 0) return g_mu.Start(MemoryUnit::PROFILES);
+        if (_stricmp(a.c_str(), "LoadReplay") == 0) return g_mu.Start(MemoryUnit::REPLAYS);
         static const char* kGameplay[] = { "StartGame", "NewGame", "ContinueGame", "fe_dgstart",
-                                           "LoadSave", "LoadReplay", "ReplayMission2" };
+                                           "ReplayMission2" };
         for (const char* gp : kGameplay)
             if (_stricmp(a.c_str(), gp) == 0) return LaunchGameplay(a);
         if (StartsWithI(a, "RunMission=")) return LaunchGameplay(a);
@@ -2689,13 +3171,9 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
     g.modes = EnumDisplayModes(g.antialiasOk);
     g.soundDrivers = EnumSoundDrivers();
     g.res = DefaultMode(g.modes);
-    if (g_profile.Load(g.gameDir)) {
-        Log("Settings: loaded %s", g_profile.Path().c_str());
-        ApplyProfile();
-    } else {
-        Log("Settings: no profile in Saves\\, using defaults");
-        SaveProfile(false);  // defaults become the saved block for settings_restore
-    }
+    // No profile yet: it is chosen (or created) after the title screen by
+    // the boot profile flow (MemoryUnit::BOOT), as in the original.
+    SaveProfile(false);  // defaults become the live / saved block
 
     BootSequencer seq;
     LanguageScreen language;
