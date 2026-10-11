@@ -1,5 +1,5 @@
 // Driv3r (PC, 2005) boot sequence + front-end menu, re-implemented from
-// Driv3r.exe (sha256 355ad3d5...0f02) analysed with REA/Ghidra.
+// Driv3r.exe (sha256 355ad3d5...0f02) analysed with Ghidra.
 //
 // Covered: WinMain window setup, boot sequencer (state 0xA9), intro FMVs
 // (0xAA), language select (0xAB), "Press ENTER" title (0xAC) and the
@@ -15,6 +15,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <mmsystem.h>
+#include <d3d9.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -359,6 +360,105 @@ static std::wstring AxisName(int axis, int dir, const std::map<int, std::wstring
     return TextOf(t, axis == 11 ? 70 : 83);
 }
 
+// ======================================================== display modes ====
+// Resolution record, 0x54 bytes, as kept in the settings at +0xc34: built by
+// 0x54a890 ("%dx%d %dHz" plus " 32bit" / " 16bit" by format, widened to 32
+// characters).
+struct DisplayMode
+{
+    int32_t index;      // mode index in the adapter's table
+    wchar_t name[32];   // txt_displayres shows this (+0xc38)
+    uint32_t w, h, hz;  // +0x44
+    uint32_t fmt;       // D3DFORMAT; 0 matches any in a search
+};
+static_assert(sizeof(DisplayMode) == 0x54, "settings +0xc34 record");
+
+static DisplayMode MakeMode(int index, uint32_t w, uint32_t h, uint32_t hz, uint32_t fmt)
+{
+    DisplayMode m = {};
+    m.index = index;
+    m.w = w, m.h = h, m.hz = hz, m.fmt = fmt;
+    const wchar_t* bits = L"";
+    if (fmt == D3DFMT_X8R8G8B8 || fmt == D3DFMT_A2R10G10B10) bits = L" 32bit";
+    else if (fmt == D3DFMT_R5G6B5 || fmt == D3DFMT_X1R5G5B5) bits = L" 16bit";
+    swprintf(m.name, 32, L"%ux%u %uHz%ls", w, h, hz, bits);
+    return m;
+}
+
+// Search 0x54a990: same size and rate, and same format unless the key's is 0.
+static int FindMode(const std::vector<DisplayMode>& list, const DisplayMode& k)
+{
+    for (size_t i = 0; i < list.size(); ++i) {
+        const DisplayMode& e = list[i];
+        if (e.w == k.w && e.h == k.h && e.hz == k.hz && (e.fmt == k.fmt || k.fmt == 0)) return int(i);
+    }
+    return -1;
+}
+
+// Mode list (settings +0x1928, built by 0x54a500 when the settings object is
+// created): the adapter's modes from 640x480 to 2048x1536 whose format can
+// hold an A8R8G8B8 render target (0x5c8d00, at most 100), inserted before
+// the first entry that is at least as wide, high and fast (0x54a9e0). The
+// original reads the modes from its startup device table; here Direct3D 9 is
+// asked directly for the 32-bit and 16-bit formats. The same pass checks
+// anti-aliasing (0x5c9560): supported when a multisample type of 2 or more
+// works, otherwise the front end hides the Anti-Alias row.
+static std::vector<DisplayMode> EnumDisplayModes(bool& antialias)
+{
+    std::vector<DisplayMode> list;
+    antialias = false;
+    HMODULE dll = LoadLibraryA("d3d9.dll");
+    typedef IDirect3D9*(WINAPI * CreateFn)(UINT);
+    CreateFn create = dll ? reinterpret_cast<CreateFn>(GetProcAddress(dll, "Direct3DCreate9")) : nullptr;
+    IDirect3D9* d3d = create ? create(D3D_SDK_VERSION) : nullptr;
+    if (!d3d) {
+        Log("Display: Direct3D 9 not available, no mode list");
+        return list;
+    }
+    const D3DFORMAT formats[] = { D3DFMT_X8R8G8B8, D3DFMT_R5G6B5 };
+    int index = 0;
+    for (D3DFORMAT f : formats) {
+        UINT n = d3d->GetAdapterModeCount(D3DADAPTER_DEFAULT, f);
+        for (UINT i = 0; i < n; ++i, ++index) {
+            D3DDISPLAYMODE dm;
+            if (FAILED(d3d->EnumAdapterModes(D3DADAPTER_DEFAULT, f, i, &dm))) continue;
+            if (dm.Width < 640 || dm.Width > 2048 || dm.Height < 480 || dm.Height > 1536) continue;
+            if (FAILED(d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, dm.Format, D3DUSAGE_RENDERTARGET,
+                                              D3DRTYPE_SURFACE, D3DFMT_A8R8G8B8)))
+                continue;
+            if (list.size() >= 100) break;
+            size_t pos = 0;
+            while (pos < list.size() && !(list[pos].w >= dm.Width && list[pos].h >= dm.Height && list[pos].hz >= dm.RefreshRate))
+                ++pos;
+            list.insert(list.begin() + pos, MakeMode(index, dm.Width, dm.Height, dm.RefreshRate, dm.Format));
+        }
+    }
+    int best = 0;
+    for (int t = 0; t <= 16; ++t)
+        if (SUCCEEDED(d3d->CheckDeviceMultiSampleType(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, D3DFMT_X8R8G8B8, FALSE,
+                                                      D3DMULTISAMPLE_TYPE(t), nullptr)))
+            best = t;
+    antialias = best >= 2;
+    d3d->Release();
+    Log("Display: %u modes, anti-aliasing %s", unsigned(list.size()), antialias ? "supported" : "not supported");
+    return list;
+}
+
+// Default mode 0x54a7a0: 640x480 at 60Hz 32-bit (800x600 when the territory,
+// renderer vtbl+0x48, is 2 or 3; Europe is 1), else that size in any format,
+// else the first mode.
+static DisplayMode DefaultMode(const std::vector<DisplayMode>& list)
+{
+    DisplayMode k = MakeMode(0, 640, 480, 60, D3DFMT_X8R8G8B8);
+    int i = FindMode(list, k);
+    if (i < 0) {
+        k.fmt = 0;
+        i = FindMode(list, k);
+    }
+    if (i < 0) i = 0;
+    return list.empty() ? MakeMode(0, 640, 480, 60, D3DFMT_X8R8G8B8) : list[i];
+}
+
 // ====================================================== screens / states ===
 // State IDs are the indices in the factory registry FUN_005867f0
 // (creator slot = id * 0x14 + 0x10), registered by the static initialisers
@@ -414,6 +514,17 @@ struct App
     int turn = 50;  // look sensitivity, +0x17c (0..100, default 0x549880)
     KeyRecord keymap[kKeyRecords];
     void ResetKeyMap() { memcpy(keymap, kDefaultKeyMap, sizeof(keymap)); }
+
+    // Display (screens 12 and 29): aspect +0x160 (0 = 4:3, 2 = 16:9), gamma
+    // +0xc30, resolution +0xc34, draw distance +0xc88 and filter +0xc90
+    // (0..2; defaults 0x549950 / 0x549980). The values are kept and saved;
+    // this program does not change the display with them.
+    int aspect = 0;
+    float gamma = 1.0f;
+    DisplayMode res = {};
+    int drawdist = 1, filter = 1;
+    std::vector<DisplayMode> modes;  // settings +0x1928
+    bool antialiasOk = false;        // front end +0x110
 
     // "TERR:" / "LANG:" prefixes as used by the game's file layer (0x8ac230 vtbl+0x10).
     std::string Resolve(const std::string& p) const
@@ -791,6 +902,11 @@ static void ApplyProfile()
     bool valid = true;
     for (int grp = 0; grp < 4; ++grp) valid = valid && KeyRowCount(km, grp) > 0;
     if (valid) memcpy(g.keymap, km, sizeof(km));
+    g.aspect = g_profile.Int(0x160);
+    g_profile.Read(0xc30, &g.gamma, 4);
+    g_profile.Read(0xc34, &g.res, sizeof(g.res));
+    g.drawdist = std::max(0, std::min(2, int(g_profile.Int(0xc88))));
+    g.filter = std::max(0, std::min(2, int(g_profile.Int(0xc90))));
     // +0x2c text language, +0x28 audio language (handlers 0x548a92..0x548b3c);
     // here one language drives both.
     for (int i = 0; i < kLanguageCount; ++i)
@@ -807,6 +923,13 @@ static void SaveProfile(bool toFile = true)
     for (const SettingFlag& f : kSettingFlags) g_profile.SetFlag(f.off, g.Toggle(f.key));
     g_profile.SetInt(0x17c, g.turn);
     g_profile.Write(0x208, g.keymap, sizeof(g.keymap));
+    // A resolution missing from the mode list becomes the default (0x548385).
+    if (!g.modes.empty() && FindMode(g.modes, g.res) < 0) g.res = DefaultMode(g.modes);
+    g_profile.SetInt(0x160, g.aspect);
+    g_profile.Write(0xc30, &g.gamma, 4);
+    g_profile.Write(0xc34, &g.res, sizeof(g.res));
+    g_profile.SetInt(0xc88, g.drawdist);
+    g_profile.SetInt(0xc90, g.filter);
     g_profile.SetInt(0x28, kLanguages[g.lang].id);
     g_profile.SetInt(0x2c, kLanguages[g.lang].id);
     if (!toFile) return;
@@ -1150,6 +1273,17 @@ public:
             if (fn == "reqvehicletext") { out.clear(); return true; }
             // Controller name (0x554f26 -> 0x5522d0): no joystick support, so none.
             if (fn == "txt_controller") { out.clear(); return true; }
+            // Gamma (0x555228): _gcvt with 3 digits, "1." completed to "1.0".
+            if (fn == "txt_gamma") {
+                char buf[32];
+                _gcvt(g.gamma, 3, buf);
+                size_t n = strlen(buf);
+                if (n && buf[n - 1] == '.') strcat(buf, "0");
+                out.assign(buf, buf + strlen(buf));
+                return true;
+            }
+            // Resolution (0x5552ce): the name in the settings record (+0xc38).
+            if (fn == "txt_displayres") { out = g.res.name; return true; }
             return KeyMapText(fn, out);
         };
         // The original answers only val_overallvol (0x5551c4, +0x34); it has no
@@ -1268,6 +1402,16 @@ private:
                 g.vol = App::Volumes();
                 g_music.UpdateVolume();
             }
+            if (restorePage_ == 6) g.gamma = 1.0f;  // 0x549950: aspect read back from the renderer (kept), gamma 1
+            if (restorePage_ == 7) {  // 0x549980: default mode, draw distance and filter 1, these flags
+                g.res = DefaultMode(g.modes);
+                g.drawdist = g.filter = 1;
+                for (const char* k : { "shadows", "fulljointphysics", "synceveryframe", "particle" }) g.toggles[k] = true;
+                g.toggles["advshaders"] = g.toggles["antialias"] = false;
+            }
+            // Every defaults routine ends with 0x548300(this, 0): the defaults
+            // become the saved block (so Escape keeps them), without writing the file.
+            SaveProfile(false);
             menu_.Pop();
             return;
         }
@@ -1303,6 +1447,38 @@ private:
         if (a == "keymap_changed") return;
         if (a == "keymap_changed_dropback") { menu_.Pop(); return; }
         if (a == "keymap_reset") { g.ResetKeyMap(); return; }
+
+        // Options: Display (screen 12, settings handler 0x548f93..). The aspect is
+        // set on the renderer (vtbl+0x20) and read back (vtbl+0x1c); the
+        // handlers only choose 0 (4:3) and 2 (16:9).
+        if (a == "next_aspect") {
+            if (g.aspect == 0 || g.aspect == 1) g.aspect = 2;
+            else if (g.aspect == 2) g.aspect = 0;
+            return Changed();
+        }
+        if (a == "prev_aspect") {
+            if (g.aspect == 0) g.aspect = 2;
+            else if (g.aspect == 1 || g.aspect == 2) g.aspect = 0;
+            return Changed();
+        }
+        // Gamma +0xc30: steps of 0.1 within 0.5..6.0 (0x549302 / 0x54933c).
+        if (a == "gamma_up") { g.gamma = std::min(6.0f, g.gamma + 0.1f); return Changed(); }
+        if (a == "gamma_down") { g.gamma = std::max(0.5f, g.gamma - 0.1f); return Changed(); }
+        // "Advanced Video Card Settings": no handler in the executable; the
+        // menu link opens screen 29.
+        if (a == "initial_res_check") return;
+        // Video card settings (screen 29). Resolution: next / previous entry of
+        // the mode list, wrapping (0x54a830 / 0x54a860).
+        if (a == "next_res" || a == "prev_res") {
+            if (g.modes.empty()) return;
+            int n = int(g.modes.size()), i = FindMode(g.modes, g.res);
+            i = a[0] == 'n' ? (i + 1 < n ? i + 1 : 0) : (i - 1 >= 0 ? i - 1 : n - 1);
+            g.res = g.modes[i];
+            return Changed();
+        }
+        // Draw distance +0xc88 and filter +0xc90: 0..2, wrapping (0x5493e0.., 0x5494d7..).
+        if (a == "drawdist_up" || a == "drawdist_down") { Step(g.drawdist, 3, a == "drawdist_up"); return Changed(); }
+        if (a == "filter_up" || a == "filter_down") { Step(g.filter, 3, a == "filter_up"); return Changed(); }
 
         // Options: language
         if (a == "nextlangtext" || a == "nextlangaudio") { Changed(); return g.SetLanguage(g.lang + 1); }
@@ -1373,6 +1549,19 @@ private:
             // otherwise stay lit after blinking.
             return s[12] == 'a' ? st : 1;
         }
+        // Display. stat_aspect has no handler in the executable (state kept);
+        // showing the setting here is an assumption, as for val_turn.
+        if (s == "stat_aspect") return g.aspect == 2 ? 1 : 0;
+        // One label per value, the others hidden (0x5552fb.., 0x55545d..).
+        static const char* kDrawDist[] = { "stat_drawdist_low", "stat_drawdist_medium", "stat_drawdist_high" };
+        static const char* kFilter[] = { "stat_filter_none", "stat_filter_bi", "stat_filter_tri" };
+        for (int i = 0; i < 3; ++i) {
+            if (s == kDrawDist[i]) return g.drawdist == i ? 0 : 2;
+            if (s == kFilter[i]) return g.filter == i ? 0 : 2;
+        }
+        // Without anti-aliasing (+0x110) its row is hidden (0x55552f, 0x555563).
+        if (s == "stat_enable_antialias") return g.antialiasOk ? st : 2;
+        if (s == "stat_antialias") return g.antialiasOk ? (g.Toggle("antialias") ? 0 : 1) : 2;
         static const char* kDg[] = { "stat_dg chase", "stat_dg getaway", "stat_dg trail",
                                      "stat_dg survival", "stat_dg check", "stat_dg gate" };
         for (int i = 0; i < 6; ++i)
@@ -1663,6 +1852,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
     g.onLanguageChanged.push_back([] { g_sounds.Load(); });  // AUDIO: follows the language
     g.SetLanguage(0);
     g.ResetKeyMap();
+    g.modes = EnumDisplayModes(g.antialiasOk);
+    g.res = DefaultMode(g.modes);
     if (g_profile.Load(g.gameDir)) {
         Log("Settings: loaded %s", g_profile.Path().c_str());
         ApplyProfile();
