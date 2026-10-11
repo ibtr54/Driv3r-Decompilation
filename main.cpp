@@ -32,7 +32,7 @@
 
 #include "mec.h"
 
-#pragma comment(lib, "winmm.lib")  // PlaySound (menu sounds)
+#pragma comment(lib, "winmm.lib")  // waveOut (menu sounds, music)
 #pragma comment(lib, "dinput8.lib")  // joystick (DirectInput8Create, c_dfDIJoystick2)
 #pragma comment(lib, "dxguid.lib")
 
@@ -930,17 +930,24 @@ static bool LoadGsdSample(int bank, int sample, GsdSample& out)
 // volume 1.0, pitch 1.0. The GUI plays id 0 when the focus moves
 // (FUN_0046a170), 1 on select (FUN_00469d20 input 6) and 2 on back (input 7);
 // the front-end handlers play id 0 when a value changes.
+// Voices: the constructor (0x46a730) makes 5 sound-handle slots at +0x10.
+// Play takes the first empty slot (0x46a67f); 0x46a300 starts the sample
+// there and gives it the end callback 0x4a9a40, which empties the slot when
+// the sound stops. With all 5 busy the sound is dropped (no stealing). Each
+// voice here is a waveOut device; it is free once its buffer is done.
 class MenuSounds
 {
 public:
     // 0..2 from MENU.DAT; CHEAT is bank 0 sample 3, fixed in the code
     // that accepts a cheat code (0x551ecb).
     enum { MOVE = 0, SELECT = 1, BACK = 2, CHEAT = 3 };
+    static const int kVoices = 5;
+
+    ~MenuSounds() { for (Voice& v : voices_) v.Close(); }
 
     void Load()
     {
-        PlaySoundA(nullptr, nullptr, 0);  // stop before freeing the buffers
-        for (auto& w : wav_) w.clear();
+        for (Voice& v : voices_) v.Close();  // stop before freeing the samples
         for (auto& p : pcm_) p.clear();
 
         uint8_t dat[8] = {};
@@ -954,58 +961,90 @@ public:
             int s = int8_t(dat[5 + id]);
             GsdSample smp;
             if (s < 0 || !LoadGsdSample(bank, s, smp)) continue;
-            wav_[id] = MakeWav(smp.pcm, smp.rate);
+            rate_[id] = smp.rate;
             pcm_[id] = std::move(smp.pcm);
-            Log("Sound: menu id %d = bank %d sample %d (%u Hz, %u ms)", id, bank, s, smp.rate,
-                unsigned(pcm_[id].size() / 2 * 1000 / (smp.rate ? smp.rate : 1)));
+            Log("Sound: menu id %d = bank %d sample %d (%u Hz, %u ms)", id, bank, s, rate_[id],
+                unsigned(pcm_[id].size() / 2 * 1000 / (rate_[id] ? rate_[id] : 1)));
         }
         GsdSample smp;
         if (LoadGsdSample(0, 3, smp)) {
-            wav_[CHEAT] = MakeWav(smp.pcm, smp.rate);
+            rate_[CHEAT] = smp.rate;
             pcm_[CHEAT] = std::move(smp.pcm);
-            Log("Sound: cheat = bank 0 sample 3 (%u Hz, %u ms)", smp.rate,
-                unsigned(pcm_[CHEAT].size() / 2 * 1000 / (smp.rate ? smp.rate : 1)));
+            Log("Sound: cheat = bank 0 sample 3 (%u Hz, %u ms)", rate_[CHEAT],
+                unsigned(pcm_[CHEAT].size() / 2 * 1000 / (rate_[CHEAT] ? rate_[CHEAT] : 1)));
         }
     }
 
-    // PlaySound has no volume control, so the effects volume is applied to
-    // the samples (the original sets sound-manager categories 0/1 and 3).
+    // The effects volume is applied to the voice's copy of the sample (the
+    // original sets sound-manager categories 0/1 and 3).
     void Play(int id)
     {
-        if (id < 0 || id >= 4 || wav_[id].empty()) return;
-        PlaySoundA(nullptr, nullptr, 0);  // the buffer is rewritten below
-        float gain = g.EffectsGain();
-        const int16_t* src = reinterpret_cast<const int16_t*>(pcm_[id].data());
-        int16_t* dst = reinterpret_cast<int16_t*>(wav_[id].data() + 44);
-        for (size_t i = 0; i < pcm_[id].size() / 2; ++i) dst[i] = int16_t(src[i] * gain);
-        if (!PlaySoundA(reinterpret_cast<LPCSTR>(wav_[id].data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT))
-            Log("Sound: PlaySound failed for menu id %d", id);
+        if (id < 0 || id >= 4 || pcm_[id].empty()) return;
+        Voice* v = nullptr;
+        for (Voice& x : voices_)
+            if (!x.Busy()) { v = &x; break; }
+        if (!v) { Log("Sound: all %d voices busy, menu id %d dropped", kVoices, id); return; }
+        v->Start(pcm_[id], rate_[id], g.EffectsGain());
+        if (int n = Busy(); n > 1) Log("Sound: menu id %d on voice %d, %d playing", id, int(v - voices_), n);
+    }
+    int Busy() const  // voices playing (for the log / tests)
+    {
+        int n = 0;
+        for (const Voice& v : voices_) n += v.Busy();
+        return n;
     }
 
 private:
-    static std::vector<uint8_t> MakeWav(const std::vector<uint8_t>& pcm, uint32_t rate)
+    struct Voice
     {
-        std::vector<uint8_t> w(44 + pcm.size());
-        auto put32 = [&](size_t p, uint32_t v) { memcpy(&w[p], &v, 4); };
-        auto put16 = [&](size_t p, uint16_t v) { memcpy(&w[p], &v, 2); };
-        memcpy(&w[0], "RIFF", 4);
-        put32(4, uint32_t(36 + pcm.size()));
-        memcpy(&w[8], "WAVEfmt ", 8);
-        put32(16, 16);
-        put16(20, 1);         // PCM
-        put16(22, 1);         // mono
-        put32(24, rate);
-        put32(28, rate * 2);  // byte rate
-        put16(32, 2);         // block align
-        put16(34, 16);        // bits
-        memcpy(&w[36], "data", 4);
-        put32(40, uint32_t(pcm.size()));
-        memcpy(&w[44], pcm.data(), pcm.size());
-        return w;
-    }
+        HWAVEOUT out = nullptr;
+        uint32_t rate = 0;
+        WAVEHDR hdr = {};
+        std::vector<int16_t> buf;
 
-    std::vector<uint8_t> wav_[4];  // WAV images played by PlaySound
+        bool Busy() const { return out && (hdr.dwFlags & WHDR_PREPARED) && !(hdr.dwFlags & WHDR_DONE); }
+        void Start(const std::vector<uint8_t>& pcm, uint32_t r, float gain)
+        {
+            if (out && (hdr.dwFlags & WHDR_PREPARED)) waveOutUnprepareHeader(out, &hdr, sizeof(hdr));
+            if (out && rate != r) Close();
+            if (!out) {
+                WAVEFORMATEX wf = {};
+                wf.wFormatTag = WAVE_FORMAT_PCM;
+                wf.nChannels = 1;
+                wf.nSamplesPerSec = r;
+                wf.wBitsPerSample = 16;
+                wf.nBlockAlign = 2;
+                wf.nAvgBytesPerSec = r * 2;
+                if (waveOutOpen(&out, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
+                    out = nullptr;
+                    Log("Sound: waveOutOpen failed");
+                    return;
+                }
+                rate = r;
+            }
+            const int16_t* src = reinterpret_cast<const int16_t*>(pcm.data());
+            buf.resize(pcm.size() / 2);
+            for (size_t i = 0; i < buf.size(); ++i) buf[i] = int16_t(src[i] * gain);
+            hdr = {};
+            hdr.lpData = reinterpret_cast<LPSTR>(buf.data());
+            hdr.dwBufferLength = DWORD(buf.size() * 2);
+            waveOutPrepareHeader(out, &hdr, sizeof(hdr));
+            if (waveOutWrite(out, &hdr, sizeof(hdr)) != MMSYSERR_NOERROR) Log("Sound: waveOutWrite failed");
+        }
+        void Close()
+        {
+            if (!out) return;
+            waveOutReset(out);
+            if (hdr.dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(out, &hdr, sizeof(hdr));
+            waveOutClose(out);
+            out = nullptr;
+            hdr = {};
+        }
+    };
+
     std::vector<uint8_t> pcm_[4];  // original samples, at full volume
+    uint32_t rate_[4] = {};
+    Voice voices_[kVoices];
 };
 static MenuSounds g_sounds;
 
@@ -1018,8 +1057,7 @@ static MenuSounds g_sounds;
 // restarts them if they stopped). The front-end exit (0x552c6c) releases the
 // object, which stops them. Bank 60 is empty in every shipped SOUND.GSD, so
 // only bank 59 (~63 s, 44.1 kHz stereo, looping) is heard.
-// PlaySound plays one sound at a time (the menu sounds use it), so the
-// music goes through waveOut instead.
+// The music goes through waveOut, like the menu sound voices.
 class FrontEndMusic
 {
 public:
