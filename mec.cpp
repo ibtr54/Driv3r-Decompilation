@@ -318,6 +318,8 @@ bool Font::Load(const std::string& path)
     pages_ = LoadMaterials(d, md, mdSize);
     uint16_t count;
     memcpy(&count, &d[fb + 4], 2);
+    if (d[fb + 6]) linePitch_ = d[fb + 6];
+    topOffset_ = d[fb + 8];
     size_t p = fb + 16;
     for (int i = 0; i < count && p + 8 <= d.size(); ++i, p += 8) {
         uint16_t ch, a, b;

@@ -53,6 +53,10 @@ public:
     void Draw(Canvas& c, const std::wstring& s, float x, float y, float sx, float sy,
               const float rgba[4]) const;
     bool Loaded() const { return !pages_.empty(); }
+    // FBNK +6: line pitch, +8: offset from the top of a cell to the top of
+    // the capitals (both matched against the original's subtitles).
+    int LinePitch() const { return linePitch_; }
+    int TopOffset() const { return topOffset_; }
 
 private:
     struct Glyph { int x, y, w, h, page, yoff; };
@@ -62,6 +66,7 @@ private:
     std::map<wchar_t, Glyph> glyphs_;
     std::vector<uint8_t> kern_;  // 52x52 for A-Z, a-z
     int spaceWidth_ = 8;
+    int linePitch_ = 32, topOffset_ = 8;
 };
 
 enum ElemType { EL_SPRITE = 1, EL_TEXT = 2, EL_BUTTON = 3, EL_FMV = 4 };

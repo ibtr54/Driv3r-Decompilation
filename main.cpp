@@ -173,6 +173,8 @@ public:
 
     bool IsOpen() const { return h_ != nullptr; }
     bool Done() const { return done_; }
+    // Frame being shown (1-based, Bink FrameNum); 0 when closed.
+    uint32_t Frame() const { return h_ ? static_cast<const BinkHeader*>(h_)->FrameNum : 0; }
     const std::string& Path() const { return path_; }
 
 private:
@@ -1230,8 +1232,15 @@ private:
             if (s.empty() || !g.font.Loaded()) break;
             s = ExpandIcons(s);
             float tw = g.font.Width(s, e.sx);
-            float tx = e.align == 2 ? x + (w - tw) / 2 : e.align == 3 ? x + w - tw : x;
-            g.font.Draw(cv, s, tx, y, e.sx, e.sy, e.rgba);
+            // 0 left, 1 right, 2 centre: the game's text API (the same values
+            // as the FMV subtitles, 0x5992ac); front.MEC uses only these three.
+            float tx = e.align == 1 ? x + w - tw : e.align == 2 ? x + (w - tw) / 2 : x;
+            // Compared with the original (aspect 0, 8 texts with scales from
+            // 0.4 to 1.25): widths follow sx, heights follow sy x ~0.93
+            // (taken as 480/512; the code behind it was not traced), and y
+            // is the top of the capitals, as for the subtitles.
+            float hs = e.sy * (480.0f / 512.0f);
+            g.font.Draw(cv, s, tx, y - g.font.TopOffset() * hs, e.sx, hs, e.rgba);
             break;
         }
         case EL_BUTTON:
@@ -1265,6 +1274,150 @@ private:
 };
 
 // --------------------------------------------------- 0xAA intro movie ------
+// =========================================================== FMV subtitles =
+// The movie player's open (0x551220) builds "<video>.SBN" (timing) and
+// "LANG:<video>.TXT" (text) from the video path and loads them into a
+// subtitle object (registry slot 0x258, vtbl 0x78d724, loader 0x598e90,
+// parser 0x598ff0). The .SBN is: u32 0x02111966, float 5.01, u32 offset[12],
+// then per offset a track {u32 count, u32 cursor, count x 28-byte record:
+// float start, end (s); u16 flags; u16 text id; u8 r, g, b, a; u32;
+// float sx, sy}. Every frame (0x5990c0) the time is frame * 0.04 and each
+// track shows the record with start <= time <= end; one finished record
+// per frame moves the track's cursor on.
+class Subtitles
+{
+public:
+    void Load(const std::string& videoPath)
+    {
+        tracks_.clear();
+        text_.clear();
+        size_t dot = videoPath.find_last_of('.');
+        if (dot == std::string::npos) return;
+        std::string base = videoPath.substr(0, dot);
+        std::vector<uint8_t> d;
+        FILE* f = fopen(g.Resolve(base + ".SBN").c_str(), "rb");
+        if (!f) return;
+        uint8_t buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0) d.insert(d.end(), buf, buf + n);
+        fclose(f);
+        float version = 0;
+        if (d.size() < 0x38) return;
+        memcpy(&version, &d[4], 4);
+        if (version != 5.01f) return;  // 0x599068: anything else is dropped
+        for (int t = 0; t < 12; ++t) {
+            uint32_t off;
+            memcpy(&off, &d[8 + 4 * t], 4);
+            Track tr;
+            if (off && off + 8 <= d.size()) {
+                uint32_t count;
+                memcpy(&count, &d[off], 4);
+                for (uint32_t i = 0; i < count && off + 8 + 28 * (i + 1) <= d.size(); ++i) {
+                    const uint8_t* r = &d[off + 8 + 28 * i];
+                    Record rec;
+                    memcpy(&rec.start, r, 4);
+                    memcpy(&rec.end, r + 4, 4);
+                    memcpy(&rec.flags, r + 8, 2);
+                    memcpy(&rec.id, r + 10, 2);
+                    for (int k = 0; k < 4; ++k) rec.rgba[k] = r[12 + k] / 255.0f;
+                    memcpy(&rec.sx, r + 20, 4);
+                    memcpy(&rec.sy, r + 24, 4);
+                    tr.recs.push_back(rec);
+                }
+            }
+            tracks_.push_back(tr);
+        }
+        text_ = LoadTxt(g.Resolve("LANG:" + base + ".TXT"));
+        // 0x551220: the making-of has English speech only, so its subtitles
+        // are switched on when the text language is not English.
+        forceOn_ = _stricmp(videoPath.c_str(), "FMV\\THEMAKINGOF.XMV") == 0 && kLanguages[g.textSetting].id != 0;
+        Log("Subtitles: %s.SBN, %zu text entries", base.c_str(), text_.size());
+    }
+    void Clear() { tracks_.clear(); text_.clear(); }
+
+    void Draw(Canvas& cv, uint32_t frame)
+    {
+        if (tracks_.empty() || !g.font.Loaded()) return;
+        float time = float(frame) * 0.04f;
+        bool on = forceOn_ || g.Toggle("sub");  // settings +0x171 -> object +0x58
+        // 0x598e90: text block between y 0.125 and 0.725 (aspect 2: 0.0833 and
+        // 0.76666), each moved 0.045 inwards.
+        bool wide = g.aspect == 2;
+        float top = (wide ? 0.08334f : 0.125f) + 0.045f, bottom = (wide ? 0.76666f : 0.725f) - 0.045f;
+        for (size_t t = 0; t < tracks_.size(); ++t) {
+            Track& tr = tracks_[t];
+            if (tr.cur >= tr.recs.size()) continue;
+            if (tr.recs[tr.cur].end <= time && ++tr.cur >= tr.recs.size()) continue;
+            const Record& r = tr.recs[tr.cur];
+            if (!(r.start <= time && time <= r.end)) continue;
+            if (!on && !(r.flags & 0x80)) continue;  // 0x80: shown even with subtitles off
+            if (!LanguageAllowed(r.flags)) continue;
+            auto it = text_.find(r.id);
+            if (it == text_.end() || it->second.empty()) continue;
+            // 0x599330: tracks 0-2 and 6-8 from the top line, 3-5 and 9-11
+            // from the bottom line, 0.05 apart. y is the top of the text.
+            int row = int(t % 6);
+            float y = (row < 3 ? top + 0.05f * row : bottom + 0.05f * (row - 3)) * kHeight;
+            // Box x 0.1, width 0.8 (0x5991fc / 0x59925d); flags & 0x3000:
+            // 0x1000 -> 1 (right, measured), 0x2000 -> 2 (centre), else 0 (left).
+            // The text object gets the box (x, y, width) through vtbl+0x20
+            // (0x5761ca), so long lines wrap inside it, downwards.
+            // y is the top of the capitals (measured: 351 for y 0.73 x 480).
+            y -= g.font.TopOffset() * r.sy;
+            float x0 = 0.1f * kWidth, w = 0.8f * kWidth;
+            int align = (r.flags & 0x3000) == 0x1000 ? 1 : (r.flags & 0x3000) == 0x2000 ? 2 : 0;
+            for (const std::wstring& line : Wrap(it->second, w, r.sx)) {
+                float tw = g.font.Width(line, r.sx);
+                float x = align == 1 ? x0 + w - tw : align == 2 ? x0 + (w - tw) / 2 : x0;
+                g.font.Draw(cv, line, x, y, r.sx, r.sy, r.rgba);
+                y += g.font.LinePitch() * r.sy;  // 32 x 0.75 = 24 px, as measured
+            }
+        }
+    }
+
+private:
+    // 0x5991b7: one bit per text language (+0x2c): English 0x1, French 0x2,
+    // German 0x4, Spanish 0x8, Italian 0x10, Japanese 0x20, Chinese 0x40,
+    // Taiwanese 0x100, Korean 0x200, Portuguese 0x400; other ids: always.
+    // Greedy word wrap into the box width; explicit line breaks are kept.
+    // The original's code was not traced, but its making-of line 0 broke at
+    // the same words (compared on screen).
+    static std::vector<std::wstring> Wrap(const std::wstring& s, float width, float sx)
+    {
+        std::vector<std::wstring> lines;
+        std::wstring cur, word;
+        auto flushWord = [&] {
+            if (word.empty()) return;
+            std::wstring trial = cur.empty() ? word : cur + L' ' + word;
+            if (!cur.empty() && g.font.Width(trial, sx) > width) { lines.push_back(cur); cur = word; }
+            else cur = trial;
+            word.clear();
+        };
+        for (wchar_t c : s) {
+            if (c == L'\r') continue;
+            if (c == L'\n') { flushWord(); lines.push_back(cur); cur.clear(); continue; }
+            if (c == L' ') { flushWord(); continue; }
+            word += c;
+        }
+        flushWord();
+        if (!cur.empty()) lines.push_back(cur);
+        return lines;
+    }
+
+    static bool LanguageAllowed(uint16_t flags)
+    {
+        static const uint16_t kBits[] = { 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x100, 0x200, 0x400 };
+        uint32_t id = kLanguages[g.textSetting].id;
+        return id > 9 || (flags & kBits[id]) != 0;
+    }
+
+    struct Record { float start = 0, end = 0; uint16_t flags = 0, id = 0; float rgba[4] = {}; float sx = 1, sy = 1; };
+    struct Track { std::vector<Record> recs; size_t cur = 0; };
+    std::vector<Track> tracks_;
+    TextTable text_;
+    bool forceOn_ = false;
+};
+
 class IntroFmvScreen : public Screen
 {
 public:
@@ -1279,15 +1432,20 @@ public:
         static const char* kFiles[] = { "TERR:FMV\\LEGAL.XMV", "FMV\\ATARI.XMV", "FMV\\REFLECT.XMV" };
         std::string file = index_ <= 2 ? kFiles[index_] : custom_;
         if (!movie_.Open(g.Resolve(file), g.AudioTrack(), false))
-            Finish();  // missing file: carry on
+            return Finish();  // missing file: carry on
+        subs_.Load(file);
     }
-    void Leave() override { movie_.Close(); }
+    void Leave() override { movie_.Close(); subs_.Clear(); }
     void Update() override
     {
         movie_.Update();
         if (movie_.Done()) Finish();  // listener 0x556470 -> manager vtbl+0x28
     }
-    void Render(HDC dc, Canvas&) override { movie_.Draw(dc, 0, 0, kWidth, kHeight, true); }
+    void Render(HDC dc, Canvas& cv) override
+    {
+        movie_.Draw(dc, 0, 0, kWidth, kHeight, true);
+        subs_.Draw(cv, movie_.Frame());
+    }
     void OnKey(WPARAM vk) override
     {
         if (skippable_ && IsSkipKey(vk)) Finish();
@@ -1310,6 +1468,7 @@ private:
     int returnTo_ = ST_BOOT_SEQ;
     bool skippable_ = true;
     Movie movie_;
+    Subtitles subs_;
 };
 static IntroFmvScreen g_introFmv;
 
@@ -1562,7 +1721,11 @@ public:
 
     void Render(HDC dc, Canvas& cv) override
     {
-        if (extra_.IsOpen()) { extra_.Draw(dc, 0, 0, kWidth, kHeight, true); return; }
+        if (extra_.IsOpen()) {
+            extra_.Draw(dc, 0, 0, kWidth, kHeight, true);
+            extraSubs_.Draw(cv, extra_.Frame());
+            return;
+        }
         bg_.Draw(dc, 0, 0, kWidth, kHeight, false);
         menu_.Render(dc, cv);
     }
@@ -2125,11 +2288,13 @@ private:
         bg_.Close();
         pane_.Close();
         g_music.Stop();  // assumption: not traced, but the extras have their own soundtrack
-        if (!extra_.Open(g.Resolve(file), g.AudioTrack(), false)) EndExtra();
+        if (!extra_.Open(g.Resolve(file), g.AudioTrack(), false)) return EndExtra();
+        extraSubs_.Load(file);  // cutscenes, recap, making-of, ... (0x551220)
     }
     void EndExtra()
     {
         extra_.Close();
+        extraSubs_.Clear();
         g_music.Play();  // like 0x54b9a0: restart the music if it is not playing
         // Re-run the screen's enter action to restore its background video.
         if (MecScreen* s = menu_.Top()) Action(s->onEnter.empty() ? "Movie=FMV\\FRONTEND.XMV" : s->onEnter);
@@ -2150,6 +2315,7 @@ private:
 
     MecMenu menu_;
     Movie bg_, pane_, extra_;
+    Subtitles extraSubs_;
     // City +0x10 (also used by Driving Games), time +0x14, weather +0x18,
     // vehicle = index into the city's list (node pointer +0x75c), start point +0xc8.
     int city_ = 0, time_ = 1, weather_ = 0, vehicle_ = 0, startPoint_ = 0;
