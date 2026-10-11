@@ -1405,6 +1405,62 @@ static GameplayStub g_gameplay;
 // from front.MEC / front.TXT. This class plays the part of the game-side
 // event handlers (0x552c00-0x5555a0) for the actions that matter before
 // gameplay starts.
+// Cutscene -> mission that unlocks it (table 0x7a20e8, {name, mission}, ends
+// with a null name). "stat_sc<id>" asks for the cutscene, "cut <id>" plays it.
+struct CutsceneUnlock { const char* id; int mission; };
+static const CutsceneUnlock kCutscenes[] = {
+    { "01", 2 },   { "5a", 4 },   { "5b", 4 },   { "07", 5 },   { "09", 7 },   { "10b", 8 },
+    { "11", 9 },   { "13a", 10 }, { "13b", 11 }, { "14", 13 },  { "15", 14 },  { "16", 15 },
+    { "17a", 16 }, { "17b", 17 }, { "18a", 18 }, { "18b", 19 }, { "19", 21 },  { "20", 22 },
+    { "21", 22 },  { "22", 24 },  { "24", 25 },  { "25a", 27 }, { "25b", 28 }, { "27", 30 },
+    { "28", 31 },  { "30", 32 },  { "31", 32 },
+};
+
+// Take A Ride vehicles: one list per city, filled in this order by the front
+// end's constructor (0x552541.., insert 0x5559a0). Each node keeps the preview
+// video "FMV\<CITY>_CAR<car>.XMV" (+0x8) and the vehicle id (+0xc).
+struct RideVehicle { int car, id; };
+static const RideVehicle kMiamiVehicles[] = {
+    { 12, 6 }, { 23, 45 }, { 9, 31 },  { 17, 44 }, { 1, 22 },  { 16, 34 }, { 4, 33 },  { 8, 35 },
+    { 14, 2 }, { 15, 38 }, { 6, 40 },  { 2, 32 },  { 11, 24 }, { 13, 37 }, { 3, 23 },  { 5, 10 },
+    { 19, 36 }, { 20, 39 }, { 18, 64 }, { 27, 19 }, { 24, 47 }, { 25, 46 }, { 22, 80 }, { 21, 66 },
+    { 7, 43 },
+};
+static const RideVehicle kNiceVehicles[] = {
+    { 21, 50 }, { 26, 69 }, { 2, 67 },  { 24, 68 }, { 19, 93 }, { 6, 25 },  { 11, 13 }, { 4, 16 },
+    { 8, 17 },  { 16, 61 }, { 7, 92 },  { 20, 62 }, { 12, 94 }, { 1, 55 },  { 3, 27 },  { 10, 51 },
+    { 22, 52 }, { 23, 53 }, { 18, 59 }, { 17, 60 }, { 14, 58 }, { 13, 19 }, { 27, 71 }, { 28, 70 },
+    { 5, 65 },  { 25, 42 }, { 9, 54 },
+};
+static const RideVehicle kIstanbulVehicles[] = {
+    { 1, 29 },  { 19, 85 }, { 16, 81 }, { 15, 82 }, { 11, 21 }, { 10, 30 }, { 5, 72 },  { 9, 75 },
+    { 2, 28 },  { 3, 74 },  { 14, 77 }, { 13, 73 }, { 6, 15 },  { 12, 76 }, { 18, 19 }, { 21, 84 },
+    { 20, 83 }, { 8, 79 },  { 4, 78 },  { 17, 41 },
+};
+struct RideCity { const char* prefix; const RideVehicle* list; int count; };
+static const RideCity kRideCities[] = {
+    { "MIAMI_", kMiamiVehicles, int(_countof(kMiamiVehicles)) },
+    { "NICE_", kNiceVehicles, int(_countof(kNiceVehicles)) },
+    { "ISTAN_", kIstanbulVehicles, int(_countof(kIstanbulVehicles)) },
+};
+
+// 0x549d70: vehicles that must be unlocked, and their byte in the settings
+// object (+0x174 + 0x3e..0x4c). Any other id is always available.
+struct VehicleLock { int id, off; };
+static const VehicleLock kVehicleLocks[] = {
+    { 37, 0x1b2 }, { 35, 0x1b3 }, { 33, 0x1b4 }, { 66, 0x1b5 }, { 80, 0x1b6 }, { 43, 0x1b7 }, { 51, 0x1b8 },
+    { 77, 0x1ba }, { 42, 0x1bb }, { 54, 0x1bc }, { 65, 0x1bd }, { 79, 0x1be }, { 78, 0x1bf }, { 41, 0x1c0 },
+};
+
+// 0x556190: boats (vehicle ids 0x2d..0x5b, byte table 0x5561c0).
+static bool IsBoat(int id)
+{
+    static const int kBoats[] = { 45, 46, 47, 48, 69, 70, 71, 83, 84, 85, 89, 90, 91 };
+    for (int b : kBoats)
+        if (b == id) return true;
+    return false;
+}
+
 class FrontEnd : public Screen
 {
 public:
@@ -1515,17 +1571,36 @@ private:
 
         // Take A Ride
         if (a == "fe_setupmood" || a == "fe_playmood" || a == "fe_playweather") return PreviewRide();
-        if (a == "fe_playvehicle") return PreviewVehicle();
-        if (a == "fe_nextcity" || a == "fe_prevcity") { Changed(); Step(city_, 3, a[3] == 'n'); return PreviewRide(); }
+        if (_stricmp(a.c_str(), "fe_playVehicle") == 0) return PreviewVehicle();  // 0x553487
+        // fe_/dg_ next/prev city (0x55351d / 0x553586) share the city (+0x10).
+        if (a == "fe_nextcity" || a == "dg_nextcity" || a == "fe_prevcity" || a == "dg_prevcity") {
+            Changed();
+            StepCity(a[3] == 'n');
+            return a[0] == 'f' ? PreviewRide() : PreviewDg();  // "fe" prefix: 0x555c40, else 0x555e20
+        }
         if (a == "nexttime" || a == "prevtime") { Changed(); Step(time_, 4, a[0] == 'n'); return PreviewRide(); }
         if (a == "nextweather" || a == "prevweather") { Changed(); Step(weather_, 3, a[0] == 'n'); return PreviewRide(); }
-        if (a == "fe_nextVehicle" || a == "fe_prevVehicle") { Changed(); Step(vehicle_, 20, a[3] == 'n'); return PreviewVehicle(); }
+        if (a == "fe_nextVehicle" || a == "fe_prevVehicle") { Changed(); StepVehicle(a[3] == 'n'); return PreviewVehicle(); }
         if (a == "cops_toggle") { Changed(); cops_ = !cops_; return; }
+        // Start points (screen 3 'TAR_Sta', front end +0xc8): 4 per city, 3 with a boat.
+        if (a == "fe_enter_sp_screen") { startPoint_ = 0; return; }  // 0x553185
+        if (a == "nextstartpoint") {  // 0x55319f
+            Changed();
+            if (++startPoint_ >= (BoatSelected() ? 3 : 4)) startPoint_ = 0;
+            return;
+        }
+        if (a == "prevstartpoint") {  // 0x5531e9
+            Changed();
+            if (--startPoint_ < 0) startPoint_ = BoatSelected() ? 2 : 3;
+            return;
+        }
+        // "<city>_sp<N>" / "boat_<city>_sp<N>" (0x553246..0x55330e): point N-1, the city is not checked.
+        for (const char* p : { "boat_istan_sp", "istan_sp", "boat_miami_sp", "miami_sp", "boat_nice_sp", "nice_sp" })
+            if (StartsWithI(a, p)) { Changed(); startPoint_ = atoi(a.c_str() + strlen(p)) - 1; return; }
 
         // Driving Games
         if (a == "fe_setupdg" || a == "fe_playdg") return PreviewDg();
         if (a == "nextdg" || a == "prevdg") { Changed(); Step(dg_, 6, a[0] == 'n'); return PreviewDg(); }
-        if (a == "dg_nextcity" || a == "dg_prevcity") { Changed(); Step(dgCity_, 3, a[3] == 'n'); return PreviewDg(); }
         if (a == "nextsubgame" || a == "prevsubgame") { Changed(); Step(subgame_, 3, a[0] == 'n'); return; }
 
         // Options: Sound (settings handler 0x548b77..0x5492fb)
@@ -1722,14 +1797,27 @@ private:
     // 1 = second row, n = row n. Unknown names keep the current state.
     int Status(const std::string& s, int st)
     {
-        bool dg = StartsWithI(Top(), "DG");
-        if (s == "stat_city") return dg ? dgCity_ : city_;
+        if (s == "stat_city") return city_;
         if (s == "stat_weather") return weather_;
         if (s == "stat_dawn") return time_ == 0 ? 0 : 1;
         if (s == "stat_day") return time_ == 1 ? 0 : 1;
         if (s == "stat_dusk") return time_ == 2 ? 0 : 1;
         if (s == "stat_night") return time_ == 3 ? 0 : 1;
         if (s == "stat_cops") return cops_ ? 0 : 1;
+        // Start-point markers (0x553316..0x553431): only the current city's
+        // markers for the selected vehicle type (boat or not) are shown; the
+        // selected point uses row 0, the others row 1.
+        {
+            static const char* kCity[] = { "miami", "nice", "istan" };
+            for (int c = 0; c < 3; ++c) {
+                std::string land = std::string("stat_") + kCity[c] + "_sp";
+                std::string boat = std::string("stat_") + kCity[c] + "_boat_sp";
+                bool isBoat = StartsWithI(s, boat.c_str());
+                if (!isBoat && !StartsWithI(s, land.c_str())) continue;
+                if (city_ != c || BoatSelected() != isBoat) return 2;
+                return startPoint_ == atoi(s.c_str() + (isBoat ? boat : land).size()) - 1 ? 0 : 1;
+            }
+        }
         if (s == "stat_subgame") return subgame_;
         // stat_restoretitle1..4 (0x55581f..): title n shows row 0 for page
         // 2(n-1), row 1 for page 2(n-1)+1, and nothing (empty row 2) otherwise.
@@ -1791,6 +1879,31 @@ private:
             if (s == l + "text") return g.textSetting == i ? 0 : 1;
             if (s == l + "audio") return g.audioSetting == i ? 0 : 1;
         }
+        // Progress (0x553680..0x553e4b): a locked item shows row 2 ("Locked"
+        // or a dimmed copy), an unlocked one keeps its state.
+        if (StartsWithI(s, "stat_mis")) return MissionUnlocked(atoi(s.c_str() + 8)) ? st : 2;  // 0x553b04
+        if (StartsWithI(s, "stat_sc")) {  // 0x553c36: "%s" into a 4-byte buffer -> table 0x7a20e8
+            std::string id = s.substr(7, 3);
+            for (const CutsceneUnlock& c : kCutscenes)
+                if (_stricmp(id.c_str(), c.id) == 0) return MissionUnlocked(c.mission) ? st : 2;
+            return st;
+        }
+        if (s == "stat_undernice") return Progress() >= 11 ? st : 2;  // 0x5536b7
+        if (s == "stat_underinst") return Progress() >= 22 ? st : 2;  // 0x5536fb
+        if (s == "stat_recap") return Progress() >= 32 ? st : 2;      // 0x553cd4
+        // The two documentaries are hidden in territory 3 (0x553d17, 0x553e10).
+        if (s == "stat_pirates" || s == "stat_boiling") return TerritoryId() == 3 ? 2 : st;
+        // Cheats: 10 pairs at +0x19e {unlocked, enabled}; the enabled bytes
+        // are the "<cheat>_toggle" flags (allmissions +0x19f, weapons +0x1a1, ...).
+        if (s == "stat_cheats") {  // 0x554d31 -> 0x5480f0: any cheat unlocked
+            for (int i = 0; i < 10; ++i)
+                if (CheatUnlocked(i)) return st;
+            return 2;
+        }
+        if (StartsWithI(s, "stat_cheat")) {  // 0x554d58: stat_cheat0..9, other numbers -> 2 (0x553b34)
+            unsigned i = unsigned(atoi(s.c_str() + 10));
+            return i < 10 && CheatUnlocked(int(i)) ? st : 2;
+        }
         if (StartsWithI(s, "stat_")) {
             std::string key = s.substr(5);
             if (g.toggles.count(key)) return g.Toggle(key) ? 0 : 1;
@@ -1803,6 +1916,62 @@ private:
     }
 
     // ---- helpers ---------------------------------------------------------
+    // Settings +0x20: furthest mission reached. Mission script steps of type 3
+    // raise it to the step's value (stores at 0x557fa6, 0x558036) unless flag +0x5 is set.
+    static int Progress() { return AllMissions() ? 0x7fffffff : g_profile.Int(0x20); }
+    // 0x548040: unlocked when the "all missions" cheat (+0x19f) is on or n <= progress.
+    static bool MissionUnlocked(int n) { return AllMissions() || uint32_t(n) <= uint32_t(g_profile.Int(0x20)); }
+    // Live +0x19f; g.Toggle() would read a missing key (no profile) as on.
+    static bool AllMissions() { auto it = g.toggles.find("allmissions"); return it != g.toggles.end() && it->second; }
+    static bool CheatUnlocked(int i) { return g_profile.Flag(0x19e + 2 * i); }
+    // Istanbul can be chosen with the all-missions cheat or settings +0x24,
+    // which a mission-script step of type 2 with value 5 or 6 sets (0x557f83).
+    static bool IstanbulOpen() { return AllMissions() || g_profile.Flag(0x24); }
+
+    // City change (0x55351d next, 0x553586 prev): Miami -> Nice -> Istanbul,
+    // skipping a closed Istanbul; then 0x555bb0 picks the city's first
+    // vehicle and start point 0.
+    void StepCity(bool next)
+    {
+        if (next) city_ = city_ == 0 ? 1 : city_ == 1 && IstanbulOpen() ? 2 : 0;
+        else city_ = city_ == 0 ? (IstanbulOpen() ? 2 : 1) : city_ == 1 ? 0 : 1;
+        if (city_ == 2 && !IstanbulOpen()) city_ = 0;
+        vehicle_ = 0;
+        startPoint_ = 0;
+    }
+
+    int VehicleId() const { return kRideCities[city_].list[vehicle_].id; }
+    bool BoatSelected() const { return IsBoat(VehicleId()); }
+    // 0x549d70: the "vehicle" cheat (+0x1ab, i.e. +0x174+0x37) opens all of them.
+    static bool VehicleUnlocked(int id)
+    {
+        auto it = g.toggles.find("vehicle");
+        if (it != g.toggles.end() && it->second) return true;
+        for (const VehicleLock& l : kVehicleLocks)
+            if (l.id == id) return g_profile.Flag(l.off);
+        return true;
+    }
+    // fe_nextVehicle (0x555a30) / fe_prevVehicle (0x555ab0): step through the
+    // city's list with wrap-around until an unlocked vehicle is found. The
+    // first vehicle of each list is never locked, so the loop ends.
+    void StepVehicle(bool next)
+    {
+        const RideCity& c = kRideCities[city_];
+        do vehicle_ = (vehicle_ + (next ? 1 : c.count - 1)) % c.count;
+        while (!VehicleUnlocked(c.list[vehicle_].id));
+    }
+    // 0x555b30: level id for StartGame; vehicle 19 has its own level per city.
+    int RideLevel() const { return (VehicleId() == 19 ? 0x4e : 0x4d) + 3 * city_; }
+    // Renderer vtbl+0x48. The order is taken from the language pages
+    // (0 US, 1 EU, 2 JP, other AS, 0x556660); only Europe ships here.
+    static int TerritoryId()
+    {
+        if (_stricmp(g.territory.c_str(), "Usa") == 0 || _stricmp(g.territory.c_str(), "America") == 0) return 0;
+        if (_stricmp(g.territory.c_str(), "Europe") == 0) return 1;
+        if (_stricmp(g.territory.c_str(), "Japan") == 0) return 2;
+        return 3;
+    }
+
     std::string Top()
     {
         MecScreen* s = menu_.Top();
@@ -1892,11 +2061,11 @@ private:
         static const char* wthr[] = { "DRY", "OVR", "WET" };
         PlayPane(std::string("FMV\\") + city[city_] + time[time_] + wthr[weather_] + ".XMV");
     }
+    // 0x8ac3bc vtbl+0x10 with the node's video (+0x8).
     void PreviewVehicle()
     {
-        static const char* city[] = { "MIAMI_", "NICE_", "ISTAN_" };
         char f[64];
-        snprintf(f, sizeof(f), "FMV\\%sCAR%02d.XMV", city[city_], vehicle_ + 1);
+        snprintf(f, sizeof(f), "FMV\\%sCAR%02d.XMV", kRideCities[city_].prefix, kRideCities[city_].list[vehicle_].car);
         PlayPane(f);
     }
     // FUN_00555e20: "FMV\" + MIAMI/NICE/BUL + CHASE/GETAWAY/... + ".XMV"
@@ -1904,7 +2073,7 @@ private:
     {
         static const char* city[] = { "MIAMI", "NICE", "BUL" };
         static const char* game[] = { "CHASE", "GETAWAY", "TRAILBLZ", "SURVIVAL", "CHECKPNT", "GATERACE" };
-        PlayPane(std::string("FMV\\") + city[dgCity_] + game[dg_] + ".XMV");
+        PlayPane(std::string("FMV\\") + city[city_] + game[dg_] + ".XMV");
     }
 
     void PlayExtra(const std::string& file)
@@ -1926,15 +2095,22 @@ private:
     // FUN_00557d70: setup object (0x8ac3ac) vtbl+8, then state 0xB3.
     void LaunchGameplay(const std::string& what)
     {
+        // StartGame (0x555920) hands these to the setup object 0x8ac3ac.
+        if (_stricmp(what.c_str(), "StartGame") == 0)
+            Log("Take A Ride: city %d, time %d, weather %d, vehicle %d (car %d), cops %d, start point %d, level 0x%x",
+                city_, time_, weather_, VehicleId(), kRideCities[city_].list[vehicle_].car, cops_ ? 1 : 0,
+                startPoint_, RideLevel());
         g_gameplay.request = what;
         g.Goto(ST_GAMEPLAY);
     }
 
     MecMenu menu_;
     Movie bg_, pane_, extra_;
-    int city_ = 0, time_ = 1, weather_ = 0, vehicle_ = 0;
+    // City +0x10 (also used by Driving Games), time +0x14, weather +0x18,
+    // vehicle = index into the city's list (node pointer +0x75c), start point +0xc8.
+    int city_ = 0, time_ = 1, weather_ = 0, vehicle_ = 0, startPoint_ = 0;
     bool cops_ = true;
-    int dg_ = 0, dgCity_ = 0, subgame_ = 0;
+    int dg_ = 0, subgame_ = 0;
     int restorePage_ = 0;     // page for the restore-defaults popup
     // Key-map editor (front end +0x6a0; init 0x549e40): group, its row count,
     // first row shown, 1 = waiting for a key, chosen row, blink phase.
