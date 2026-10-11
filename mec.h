@@ -103,6 +103,9 @@ struct MecScreen
     int focus = 0;
     bool overlay = false;
     std::vector<Element> items;
+    // Runtime (screen object +0x134): set by a mouse move, cleared by
+    // keyboard navigation; while set the focus follows the pointer.
+    bool hover = false;
 };
 
 struct MecFile

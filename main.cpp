@@ -14,6 +14,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <windowsx.h>
 #include <mmsystem.h>
 #include <d3d9.h>
 #include <dsound.h>
@@ -534,6 +535,11 @@ public:
     virtual void Update() {}
     virtual void Render(HDC, Canvas&) {}
     virtual void OnKey(WPARAM) {}
+    // GUI mouse event (code, pointer as fractions of the client area).
+    virtual void OnMouse(int, float, float) {}
+    // Mouse button newly pressed, DirectInput order (0 left, 1 right,
+    // 2 middle, 3..): the code 0x2000 + n polled by 0x583a00.
+    virtual void OnMouseButton(int) {}
 };
 
 static const int kWidth = 640, kHeight = 480;  // CreateWindowExA in WinMain (0x576bf0)
@@ -543,6 +549,7 @@ struct App
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
     bool running = true;
+    int mouseX = -1, mouseY = -1;  // last WM_MOUSEMOVE position (0x8ac278 +0xc / +0x10)
     std::string gameDir, territory = "Europe";
     // Languages in use (indices into kLanguages): text = renderer vtbl+0x50 /
     // +0x54 (LANG: files, font), audio = vtbl+0x60 / +0x64 (AUDIO: files, Bink
@@ -1153,15 +1160,88 @@ public:
         MecScreen* s = Top();
         if (!s || s->items.empty()) return;
         if (vk == VK_ESCAPE || vk == VK_BACK) {  // input 7: back sound, then pop
+            s->hover = false;
             g_sounds.Play(MenuSounds::BACK);
             Pop();
             return;
         }
-        Element& e = s->items[s->focus];
-        if (e.type != EL_BUTTON) return;
         int slot = vk == VK_UP ? ACT_UP : vk == VK_DOWN ? ACT_DOWN : vk == VK_LEFT ? ACT_LEFT
                  : vk == VK_RIGHT ? ACT_RIGHT : vk == VK_RETURN ? ACT_SELECT : -1;
         if (slot < 0) return;
+        s->hover = false;  // keyboard navigation ends mouse hover (0x46a06d)
+        Press(*s, slot);
+    }
+
+    // Mouse event from the window procedure (GUI listener 0x467c80): only the
+    // latest one is kept until the next update. x, y are fractions of the
+    // client area (0x576650 divides by the client size).
+    void OnMouse(int code, float x, float y)
+    {
+        mouse_.pending = true;
+        mouse_.code = code;
+        mouse_.x = x;
+        mouse_.y = y;
+    }
+
+    // Once per update (0x467a00 -> 0x469d20). First, while the screen is in
+    // hover mode, the focus moves to any item under the last pointer
+    // position (no sound). Then the pending event: code 0 (left button
+    // down) selects the item under the pointer, 9 / 10 (wheel) send the
+    // focused button's action slot 6 / 7, 11 (move) turns hover mode on
+    // (0x46a1f0). Other codes are ignored. The event is then cleared (0x467b67).
+    void Update()
+    {
+        MecScreen* s = Top();
+        Mouse m = mouse_;
+        mouse_.pending = false;
+        if (!s || s->items.empty()) return;
+        if (s->hover)
+            for (int i = 0; i < int(s->items.size()); ++i)
+                if (Hit(s->items[i], m.x, m.y)) SetFocus(*s, i);
+        if (!m.pending) return;
+        switch (m.code) {
+        case 0:
+            // The original loops over all items and selects every hit one;
+            // FRONT.MEC buttons do not overlap, and a select can change the
+            // screen here at once, so stop at the first.
+            for (int i = 0; i < int(s->items.size()); ++i) {
+                if (!Hit(s->items[i], m.x, m.y)) continue;
+                SetFocus(*s, i);
+                Press(*s, ACT_SELECT);
+                break;
+            }
+            break;
+        case 9:
+        case 10: {  // button vtbl+0x10 (0x4671c0): +0x180 / +0x1a0, unless "<NoAction>"
+            Element& e = s->items[s->focus];
+            if (e.type == EL_BUTTON) Fire(e.actions[m.code == 9 ? 6 : 7]);
+            break;
+        }
+        case 11:
+            s->hover = true;
+            break;
+        }
+    }
+
+private:
+    struct Mouse { bool pending = false; int code = 0; float x = -1, y = -1; };
+    Mouse mouse_;
+
+    // Button hit test (vtbl+0x28, 0x467260): enabled flag (+0x7c), strictly
+    // inside the button's own rectangle, and not disabled (state 2). Other
+    // element types never hit (0x520e80).
+    static bool Hit(const Element& e, float x, float y)
+    {
+        return e.type == EL_BUTTON && e.enabled && e.state != 2 &&
+               x > e.x && x < e.x + e.w && y > e.y && y < e.y + e.h;
+    }
+
+    // Input on the focused button: a direction or select (input 6).
+    void Press(MecScreen& screen, int slot)
+    {
+        MecScreen* s = &screen;
+        Element& e = s->items[s->focus];
+        if (e.type != EL_BUTTON) return;
         MecLink link = e.links[slot];
         std::string action = e.actions[slot];
         size_t depth = stack.size();
@@ -1185,6 +1265,7 @@ public:
         if (link.kind == 1) Push(link.target);
     }
 
+public:
     void Render(HDC dc, Canvas& cv)
     {
         if (stack.empty()) return;
@@ -1533,10 +1614,12 @@ public:
             }
     }
     void Render(HDC dc, Canvas& cv) override { menu_.Render(dc, cv); }
+    void Update() override { menu_.Update(); }
     void OnKey(WPARAM vk) override
     {
         if (vk != VK_ESCAPE) menu_.OnKey(vk);
     }
+    void OnMouse(int code, float x, float y) override { menu_.OnMouse(code, x, y); }
 
 private:
     MecMenu menu_;
@@ -1558,7 +1641,9 @@ public:
         menu_.Reset(0);
     }
     void Render(HDC dc, Canvas& cv) override { menu_.Render(dc, cv); }
+    void Update() override { menu_.Update(); }
     void OnKey(WPARAM vk) override { menu_.OnKey(vk); }
+    void OnMouse(int code, float x, float y) override { menu_.OnMouse(code, x, y); }
 
 private:
     MecMenu menu_;
@@ -1713,6 +1798,7 @@ public:
         }
         bg_.Update();
         pane_.Update();
+        menu_.Update();
         // Waiting for a key: the chosen row's two cells blink (0x549f84, 30
         // updates per phase; taken here as 0.5 s).
         if (km_.state == 1) km_.blink = ((GetTickCount() - km_.since) / 500) % 2;
@@ -1736,6 +1822,20 @@ public:
         if (extra_.IsOpen()) { if (IsSkipKey(vk)) EndExtra(); return; }
         if (km_.state == 1) return CaptureKey(vk);
         menu_.OnKey(vk);
+    }
+
+    void OnMouse(int code, float x, float y) override
+    {
+        if (!extra_.IsOpen()) menu_.OnMouse(code, x, y);
+    }
+
+    // DirectInput mouse buttons (0x583a00) count as input for the attract
+    // counter (0x551e51) and are read by the key-map editor (0x549ec2).
+    void OnMouseButton(int button) override
+    {
+        idleSince_ = GetTickCount();
+        if (extra_.IsOpen()) return;
+        if (km_.state == 1) CaptureAlt(0x2000 + button);
     }
 
 private:
@@ -1911,6 +2011,9 @@ private:
         // so here it already is; the _dropback version also goes back.
         if (a == "keymap_changed") return;
         if (a == "keymap_changed_dropback") { menu_.Pop(); return; }
+        // Back-arrow icons that only the mouse can reach (0x554e47): GUI
+        // vtbl+0x2c(1), back one screen.
+        if (a == "mouseclick_dropback") { menu_.Pop(); return; }
         if (a == "keymap_reset") { g.ResetKeyMap(); return; }
 
         // Sound card (screen 30). Driver: -1 (no sound) .. count-1, wrapping,
@@ -2100,6 +2203,11 @@ private:
         if (s == "stat_recap") return Progress() >= 32 ? st : 2;      // 0x553cd4
         // The two documentaries are hidden in territory 3 (0x553d17, 0x553e10).
         if (s == "stat_pirates" || s == "stat_boiling") return TerritoryId() == 3 ? 2 : st;
+        // The Language entry of 'Opt_Set' is dimmed in territory 2 (0x55515e).
+        if (s == "stat_language_settings") return TerritoryId() == 2 ? 2 : st;
+        // stat_unlock, stat_city_arrows (TAR_Mai) and the events Main_Options
+        // (Main, Options button) and restore_cancel ('Restore' back event) are
+        // in FRONT.MEC but not in the exe: they keep their state / do nothing.
         // Cheats: 10 pairs at +0x19e {unlocked, enabled}; the enabled bytes
         // are the "<cheat>_toggle" flags (allmissions +0x19f, weapons +0x1a1, ...).
         if (s == "stat_cheats") {  // 0x554d31 -> 0x5480f0: any cheat unlocked
@@ -2221,8 +2329,10 @@ private:
     // Waiting for a key on screen 34 (update 0x549e70). Escape (code 1)
     // cancels. A keyboard key first clears that code from the other rows of the
     // group (0x54a430), then becomes the row's preferred key (map vtbl+0x4c);
-    // the editor then goes back one screen and sends keymap_changed. Joystick
-    // and mouse input (the alternative column) are not read here.
+    // the editor then goes back one screen and sends keymap_changed. A mouse
+    // button (0x2000 + n) is cleared the same way and becomes the row's
+    // alternative (vtbl+0x58, which also clears the axis flag); joystick
+    // input is not read here.
     void CaptureKey(WPARAM vk)
     {
         if (vk == VK_ESCAPE) {
@@ -2233,6 +2343,26 @@ private:
         UINT sc = MapVirtualKeyW(UINT(vk), MAPVK_VK_TO_VSC_EX);
         int code = int((sc & 0x7f) | ((sc & 0xff00) ? 0x80 : 0));  // scan code -> DIK_*
         if ((sc & 0x7f) == 0) return;
+        ClearCode(code);
+        int half = 0;
+        if (KeyRecord* r = KeyRow(g.keymap, km_.group, km_.sel, half)) r->bind[half].key = code;
+        Log("Key map: group %d row %d = 0x%02X", km_.group, km_.sel, code);
+        EndCapture();
+    }
+    void CaptureAlt(int code)
+    {
+        ClearCode(code);
+        int half = 0;
+        if (KeyRecord* r = KeyRow(g.keymap, km_.group, km_.sel, half)) {
+            r->bind[half].altAxis = 0;
+            r->bind[half].alt = code;
+        }
+        Log("Key map: group %d row %d alt = 0x%04X", km_.group, km_.sel, code);
+        EndCapture();
+    }
+    // 0x54a430: the new code is removed from every row of the group.
+    void ClearCode(int code)
+    {
         for (int row = 0; row < km_.count; ++row) {
             int half = 0;
             KeyRecord* r = KeyRow(g.keymap, km_.group, row, half);
@@ -2241,9 +2371,9 @@ private:
             if (b.key == code) b.key = 0x4000;
             if (!b.altAxis && b.alt == code) b.alt = 0x4000;
         }
-        int half = 0;
-        if (KeyRecord* r = KeyRow(g.keymap, km_.group, km_.sel, half)) r->bind[half].key = code;
-        Log("Key map: group %d row %d = 0x%02X", km_.group, km_.sel, code);
+    }
+    void EndCapture()
+    {
         km_.state = 0;
         menu_.Pop();
         Action("keymap_changed");
@@ -2338,6 +2468,43 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SYSKEYDOWN:
         if (wp == VK_F4) { g.Quit(); return 0; }
         break;
+    // NOTE: deliberate difference. In the original the GUI mouse path is
+    // dead: the input object's +0x28 is zeroed at init (0x581060) and never
+    // set, so 0x581560 posts nothing; the pointer is hidden (WM_SETCURSOR ->
+    // SetCursor(NULL)) and hover / click do nothing (checked on the game).
+    // Here the dormant path is enabled and the arrow cursor is kept.
+    // Mouse (0x576650): position / client size, then the input object
+    // 0x8ac270 posts a GUI event: move 11 (only if the position changed),
+    // left / middle / right down 0 / 1 / 2, up 3 / 4 / 5, wheel 9 (no
+    // direction is passed). The class has no CS_DBLCLKS, so no
+    // double-click codes (6..8). Buttons are also polled through
+    // DirectInput (0x583a00), which sees the X buttons too.
+    case WM_MOUSEMOVE:
+    case WM_LBUTTONDOWN: case WM_MBUTTONDOWN: case WM_RBUTTONDOWN:
+    case WM_LBUTTONUP: case WM_MBUTTONUP: case WM_RBUTTONUP:
+    case WM_MOUSEWHEEL: case WM_XBUTTONDOWN: {
+        POINT p = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        if (msg == WM_MOUSEWHEEL) ScreenToClient(hwnd, &p);  // the wheel gives screen coordinates
+        if (msg == WM_MOUSEMOVE) {
+            if (p.x == g.mouseX && p.y == g.mouseY) return 0;
+            g.mouseX = p.x;
+            g.mouseY = p.y;
+        }
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        float x = float(p.x) / float(rc.right > 0 ? rc.right : 1);
+        float y = float(p.y) / float(rc.bottom > 0 ? rc.bottom : 1);
+        if (!g.cur) return 0;
+        int button = msg == WM_LBUTTONDOWN ? 0 : msg == WM_RBUTTONDOWN ? 1 : msg == WM_MBUTTONDOWN ? 2
+                   : msg == WM_XBUTTONDOWN ? (GET_XBUTTON_WPARAM(wp) == XBUTTON1 ? 3 : 4) : -1;
+        if (button >= 0) g.cur->OnMouseButton(button);
+        if (msg == WM_XBUTTONDOWN) return TRUE;
+        int code = msg == WM_MOUSEMOVE ? 11 : msg == WM_LBUTTONDOWN ? 0 : msg == WM_MBUTTONDOWN ? 1
+                 : msg == WM_RBUTTONDOWN ? 2 : msg == WM_LBUTTONUP ? 3 : msg == WM_MBUTTONUP ? 4
+                 : msg == WM_RBUTTONUP ? 5 : 9;
+        g.cur->OnMouse(code, x, y);
+        return 0;
+    }
     case WM_CLOSE:
         g.Quit();
         return 0;
