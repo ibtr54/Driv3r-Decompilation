@@ -16,6 +16,7 @@
 #include <windows.h>
 #include <mmsystem.h>
 #include <d3d9.h>
+#include <dsound.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -459,6 +460,46 @@ static DisplayMode DefaultMode(const std::vector<DisplayMode>& list)
     return list.empty() ? MakeMode(0, 640, 480, 60, D3DFMT_X8R8G8B8) : list[i];
 }
 
+// ======================================================== sound drivers ====
+// Sound driver list of the sound system (0x8ac2b0: count +0x74c, entries of
+// 0xe8 bytes from +0xc). 0x595f25 passes the callback 0x597ef0 to
+// DirectSoundEnumerateA (dsound ordinal 2). For each device Windows reports,
+// the callback opens it with DirectSoundCreate8 (ordinal 11), keeps it when
+// GetCaps reports 16-bit primary and secondary buffers and mono secondary
+// buffers (flags & 0x908), and stores the device description as a wide name
+// of 64 characters; at most 8 devices.
+static BOOL CALLBACK OnSoundDevice(LPGUID guid, LPCSTR desc, LPCSTR, LPVOID ctx)
+{
+    auto* list = static_cast<std::vector<std::wstring>*>(ctx);
+    static HMODULE dll = GetModuleHandleA("dsound.dll");
+    typedef HRESULT(WINAPI * CreateFn)(LPCGUID, LPDIRECTSOUND8*, LPUNKNOWN);
+    auto create = reinterpret_cast<CreateFn>(GetProcAddress(dll, "DirectSoundCreate8"));
+    IDirectSound8* ds = nullptr;
+    if (!create || FAILED(create(guid, &ds, nullptr))) return TRUE;
+    DSCAPS caps = {};
+    caps.dwSize = sizeof(caps);
+    bool ok = SUCCEEDED(ds->GetCaps(&caps)) && (caps.dwFlags & 0x908) == 0x908;
+    ds->Release();
+    if (!ok) return TRUE;
+    wchar_t name[64] = {};
+    MultiByteToWideChar(CP_ACP, 0, desc, -1, name, 64);
+    name[63] = 0;
+    list->push_back(name);
+    Log("Sound: driver %u = %s", unsigned(list->size() - 1), desc);  // cf. "Found device: " (0x78d708)
+    return list->size() < 8;
+}
+
+static std::vector<std::wstring> EnumSoundDrivers()
+{
+    std::vector<std::wstring> list;
+    HMODULE dll = LoadLibraryA("dsound.dll");
+    typedef HRESULT(WINAPI * EnumFn)(LPDSENUMCALLBACKA, LPVOID);
+    auto enumerate = dll ? reinterpret_cast<EnumFn>(GetProcAddress(dll, "DirectSoundEnumerateA")) : nullptr;
+    if (enumerate) enumerate(OnSoundDevice, &list);
+    Log("Sound: %u drivers", unsigned(list.size()));
+    return list;
+}
+
 // ====================================================== screens / states ===
 // State IDs are the indices in the factory registry FUN_005867f0
 // (creator slot = id * 0x14 + 0x10), registered by the static initialisers
@@ -525,6 +566,18 @@ struct App
     int drawdist = 1, filter = 1;
     std::vector<DisplayMode> modes;  // settings +0x1928
     bool antialiasOk = false;        // front end +0x110
+
+    // Sound card (screen 30): driver index +0x14c (-1 = no sound) and its
+    // name +0xcc, mixer rate +0x150 (defaults 0x549920: 0, "", 44100).
+    int soundDriver = 0;
+    std::wstring soundDriverName;
+    int mixRate = 44100;
+    std::vector<std::wstring> soundDrivers;
+    // Driver name, "-" for an index outside the list (0x597d60 / 0x548060).
+    std::wstring DriverName(int i) const
+    {
+        return i >= 0 && i < int(soundDrivers.size()) ? soundDrivers[i] : L"-";
+    }
 
     // "TERR:" / "LANG:" prefixes as used by the game's file layer (0x8ac230 vtbl+0x10).
     std::string Resolve(const std::string& p) const
@@ -906,6 +959,12 @@ static void ApplyProfile()
     g_profile.Read(0xc30, &g.gamma, 4);
     g_profile.Read(0xc34, &g.res, sizeof(g.res));
     g.drawdist = std::max(0, std::min(2, int(g_profile.Int(0xc88))));
+    g.soundDriver = g_profile.Int(0x14c);
+    g.mixRate = g_profile.Int(0x150);
+    wchar_t name[64];
+    g_profile.Read(0xcc, name, sizeof(name));
+    name[63] = 0;
+    g.soundDriverName = name;
     g.filter = std::max(0, std::min(2, int(g_profile.Int(0xc90))));
     // +0x2c text language, +0x28 audio language (handlers 0x548a92..0x548b3c);
     // here one language drives both.
@@ -930,6 +989,27 @@ static void SaveProfile(bool toFile = true)
     g_profile.Write(0xc34, &g.res, sizeof(g.res));
     g_profile.SetInt(0xc88, g.drawdist);
     g_profile.SetInt(0xc90, g.filter);
+    // Sound driver check on accept (0x54851e): no drivers -> -1; a driver
+    // whose name no longer matches is looked up by name (else entry 0); the
+    // name is then taken from the list.
+    int n = int(g.soundDrivers.size());
+    if (n == 0) {
+        g.soundDriver = -1;
+    } else if (g.soundDriver >= n || g.DriverName(g.soundDriver) != g.soundDriverName) {
+        g.soundDriver = 0;
+        for (int i = 1; i < n; ++i)
+            if (g.soundDrivers[i] == g.soundDriverName) { g.soundDriver = i; break; }
+    }
+    g.soundDriverName = g.DriverName(g.soundDriver);
+    g_profile.SetInt(0x14c, g.soundDriver);
+    g_profile.SetInt(0x150, g.mixRate);
+    // The name is copied up to its terminator (0x5420e0); the bytes after it
+    // are left as they are.
+    wchar_t old[64];
+    g_profile.Read(0xcc, old, sizeof(old));
+    old[63] = 0;
+    if (g.soundDriverName != old)
+        g_profile.Write(0xcc, g.soundDriverName.c_str(), (std::min<size_t>(g.soundDriverName.size(), 63) + 1) * 2);
     g_profile.SetInt(0x28, kLanguages[g.lang].id);
     g_profile.SetInt(0x2c, kLanguages[g.lang].id);
     if (!toFile) return;
@@ -1284,16 +1364,18 @@ public:
             }
             // Resolution (0x5552ce): the name in the settings record (+0xc38).
             if (fn == "txt_displayres") { out = g.res.name; return true; }
+            if (fn == "Txt_SoundDriver") { out = g.DriverName(g.soundDriver); return true; }  // 0x55471f
             return KeyMapText(fn, out);
         };
-        // The original answers only val_overallvol (0x5551c4, +0x34); it has no
-        // handler for val_volume / val_music / val_turn, so their values are an
-        // assumption.
+        // "%d" values: val_overallvol +0x34 (0x5551c4), Val_Volume +0x38 and
+        // Val_Music +0x3c (0x5545b0 / 0x5545de), Val_Turn +0x17c (0x5548dd),
+        // val_mixer +0x150 (0x5547c2). The names are compared without case.
         menu_.valueText = [](const std::string& fn, int& v) {
             if (fn == "val_overallvol") { v = g.vol.overall; return true; }
             if (fn == "val_volume") { v = g.vol.effects; return true; }
             if (fn == "val_music") { v = g.vol.music; return true; }
             if (fn == "val_turn") { v = g.turn; return true; }
+            if (fn == "val_mixer") { v = g.mixRate; return true; }
             return false;
         };
         LoadControlsText();
@@ -1402,6 +1484,11 @@ private:
                 g.vol = App::Volumes();
                 g_music.UpdateVolume();
             }
+            if (restorePage_ == 5) {  // 0x549920: first driver (name resolved below), 44100
+                g.soundDriver = 0;
+                g.soundDriverName.clear();
+                g.mixRate = 44100;
+            }
             if (restorePage_ == 6) g.gamma = 1.0f;  // 0x549950: aspect read back from the renderer (kept), gamma 1
             if (restorePage_ == 7) {  // 0x549980: default mode, draw distance and filter 1, these flags
                 g.res = DefaultMode(g.modes);
@@ -1447,6 +1534,23 @@ private:
         if (a == "keymap_changed") return;
         if (a == "keymap_changed_dropback") { menu_.Pop(); return; }
         if (a == "keymap_reset") { g.ResetKeyMap(); return; }
+
+        // Sound card (screen 30). Driver: -1 (no sound) .. count-1, wrapping,
+        // and the name follows (0x548e01 / 0x548e55). Mixer rate: 11025,
+        // 22050, 44100, 48000, wrapping (0x548ea9 / 0x548f0b).
+        if (a == "Prev_SoundDriver" || a == "Next_SoundDriver") {
+            int n = int(g.soundDrivers.size());
+            if (a[0] == 'P') g.soundDriver = g.soundDriver - 1 < -1 ? n - 1 : g.soundDriver - 1;
+            else g.soundDriver = g.soundDriver + 1 == n ? -1 : g.soundDriver + 1;
+            g.soundDriverName = g.DriverName(g.soundDriver);
+            return Changed();
+        }
+        if (a == "prev_soundfreq" || a == "next_soundfreq") {
+            int r = g.mixRate;
+            if (a[0] == 'p') g.mixRate = r == 11025 ? 48000 : r == 22050 ? 11025 : r == 44100 ? 22050 : 44100;
+            else g.mixRate = r == 11025 ? 22050 : r == 22050 ? 44100 : r == 44100 ? 48000 : 11025;
+            return Changed();
+        }
 
         // Options: Display (screen 12, settings handler 0x548f93..). The aspect is
         // set on the renderer (vtbl+0x20) and read back (vtbl+0x1c); the
@@ -1549,9 +1653,8 @@ private:
             // otherwise stay lit after blinking.
             return s[12] == 'a' ? st : 1;
         }
-        // Display. stat_aspect has no handler in the executable (state kept);
-        // showing the setting here is an assumption, as for val_turn.
-        if (s == "stat_aspect") return g.aspect == 2 ? 1 : 0;
+        // Display. Stat_Aspect (0x554829): 0 for aspect 0 or 1, 2 for 16:9.
+        if (s == "stat_aspect") return g.aspect == 0 || g.aspect == 1 ? 0 : g.aspect == 2 ? 2 : st;
         // One label per value, the others hidden (0x5552fb.., 0x55545d..).
         static const char* kDrawDist[] = { "stat_drawdist_low", "stat_drawdist_medium", "stat_drawdist_high" };
         static const char* kFilter[] = { "stat_filter_none", "stat_filter_bi", "stat_filter_tri" };
@@ -1562,6 +1665,12 @@ private:
         // Without anti-aliasing (+0x110) its row is hidden (0x55552f, 0x555563).
         if (s == "stat_enable_antialias") return g.antialiasOk ? st : 2;
         if (s == "stat_antialias") return g.antialiasOk ? (g.Toggle("antialias") ? 0 : 1) : 2;
+        // Sound card: "No Sound" only for driver -1 (0x55474f), the name row
+        // hidden then (0x554788), the arrows only with more than one driver
+        // (0x5551ee).
+        if (s == "stat_sd_nosound") return g.soundDriver < 0 ? 0 : 2;
+        if (s == "stat_sounddriver_txt") return g.soundDriver >= 0 ? st : 2;
+        if (s == "stat_sd_count_arrow") return g.soundDrivers.size() > 1 ? 0 : 2;
         static const char* kDg[] = { "stat_dg chase", "stat_dg getaway", "stat_dg trail",
                                      "stat_dg survival", "stat_dg check", "stat_dg gate" };
         for (int i = 0; i < 6; ++i)
@@ -1853,6 +1962,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
     g.SetLanguage(0);
     g.ResetKeyMap();
     g.modes = EnumDisplayModes(g.antialiasOk);
+    g.soundDrivers = EnumSoundDrivers();
     g.res = DefaultMode(g.modes);
     if (g_profile.Load(g.gameDir)) {
         Log("Settings: loaded %s", g_profile.Path().c_str());
