@@ -199,6 +199,13 @@ static const Language kLanguages[] = {
 };
 static const int kLanguageCount = int(sizeof(kLanguages) / sizeof(kLanguages[0]));
 
+static int LanguageIndex(uint32_t id)
+{
+    for (int i = 0; i < kLanguageCount; ++i)
+        if (kLanguages[i].id == id) return i;
+    return -1;
+}
+
 using TextTable = std::map<int, std::wstring>;
 
 // Parses the UTF-16 locale files: <ID>00001</ID><TEXT>...</TEXT>
@@ -533,14 +540,20 @@ struct App
     HWND hwnd = nullptr;
     bool running = true;
     std::string gameDir, territory = "Europe";
-    int lang = 0;  // index into kLanguages
+    // Languages in use (indices into kLanguages): text = renderer vtbl+0x50 /
+    // +0x54 (LANG: files, font), audio = vtbl+0x60 / +0x64 (AUDIO: files, Bink
+    // sound track). The settings keep their own copies, +0x2c text and +0x28
+    // audio, which the Language screen changes and Accept / Escape apply.
+    int lang = 0, audioLang = 0;
+    int textSetting = 0, audioSetting = 0;
     Font font;
     HDC backDC = nullptr;
     HBITMAP backBmp = nullptr;
     Canvas canvas;
     std::map<int, Screen*> screens;
     Screen* cur = nullptr;
-    std::vector<std::function<void()>> onLanguageChanged;
+    std::vector<std::function<void()>> onLanguageChanged;       // text language
+    std::vector<std::function<void()>> onAudioLanguageChanged;  // audio language
 
     // Sound settings (settings object 0x8ac58c: +0x34 overall, +0x38 effects,
     // +0x3c music; 0..100, defaults from 0x5498e0).
@@ -553,6 +566,7 @@ struct App
     bool Toggle(const std::string& k) const { auto it = toggles.find(k); return it == toggles.end() || it->second; }
 
     int turn = 50;  // look sensitivity, +0x17c (0..100, default 0x549880)
+    float motionBlur = 0.6f;  // Game screen, +0xc (0.0..0.8, default 0x5497f0)
     KeyRecord keymap[kKeyRecords];
     void ResetKeyMap() { memcpy(keymap, kDefaultKeyMap, sizeof(keymap)); }
 
@@ -585,25 +599,49 @@ struct App
         if (StartsWithI(p, "TERR:")) return "Territory\\" + territory + "\\" + p.substr(5);
         if (StartsWithI(p, "LANG:"))
             return "Territory\\" + territory + "\\Locale\\" + kLanguages[lang].folder + "\\" + p.substr(5);
-        if (StartsWithI(p, "AUDIO:"))  // audio language (same as the text language here)
-            return "Territory\\" + territory + "\\Locale\\" + kLanguages[lang].folder + "\\" + p.substr(6);
+        if (StartsWithI(p, "AUDIO:"))
+            return "Territory\\" + territory + "\\Locale\\" + kLanguages[audioLang].folder + "\\" + p.substr(6);
         return p;
     }
 
     uint32_t AudioTrack() const
     {
-        // Driv3r maps language -> Bink sound track 0..4 (0x599520), others use 0.
-        uint32_t id = kLanguages[lang].id;
+        // Driv3r maps the audio language (vtbl+0x60) -> Bink sound track 0..4
+        // (0x599520), others use 0.
+        uint32_t id = kLanguages[audioLang].id;
         return id <= 4 ? id : 0;
     }
 
-    void SetLanguage(int i)
+    void SetTextLanguage(int i)
     {
-        lang = (i % kLanguageCount + kLanguageCount) % kLanguageCount;
+        i = (i % kLanguageCount + kLanguageCount) % kLanguageCount;
+        if (i == lang && font.Loaded()) return;
+        lang = i;
         font.Load(Resolve("LANG:FONTS\\FONT.BNK"));  // FUN_00467ca0 loads it per language
         for (auto& f : onLanguageChanged) f();
-        Log("Language: %s", kLanguages[lang].folder);
+        Log("Text language: %s", kLanguages[lang].folder);
     }
+
+    void SetAudioLanguage(int i)
+    {
+        i = (i % kLanguageCount + kLanguageCount) % kLanguageCount;
+        if (i == audioLang && audioSet_) return;
+        audioLang = i;
+        audioSet_ = true;
+        for (auto& f : onAudioLanguageChanged) f();
+        Log("Audio language: %s", kLanguages[audioLang].folder);
+    }
+
+    // Language screen (0x556900): text and audio (when available) both
+    // follow the choice; the settings start from these (0x549a6e).
+    void SetLanguage(int i)
+    {
+        SetTextLanguage(i);
+        SetAudioLanguage(i);
+        textSetting = audioSetting = lang;
+    }
+
+    bool audioSet_ = false;
 
     void Goto(int id)
     {
@@ -620,6 +658,31 @@ struct App
     }
 };
 static App g;
+
+// A language is offered when its Locale folder exists. The original asks the
+// renderer (vtbl+0x5c text, +0x6c audio), whose list was not traced.
+static bool LanguageAvailable(uint32_t id)
+{
+    int i = LanguageIndex(id);
+    if (i < 0) return false;
+    DWORD a = GetFileAttributesA(("Territory\\" + g.territory + "\\Locale\\" + kLanguages[i].folder).c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// Next / previous language id (0x5496c0 / 0x549760): fixed orders through
+// the ids 0..9 (jump tables 0x549730 / 0x5497c8; ids past them go to 0),
+// skipping languages that are not available.
+static int StepLanguage(int index, bool next)
+{
+    static const uint32_t kNext[] = { 1, 2, 3, 4, 5, 6, 8, 9, 7 };
+    static const uint32_t kPrev[] = { 9, 0, 1, 2, 3, 4, 5, 8, 6, 8 };
+    uint32_t id = kLanguages[index].id;
+    for (int n = 0; n < 16; ++n) {
+        id = next ? (id < 9 ? kNext[id] : 0) : (id < 10 ? kPrev[id] : 0);
+        if (LanguageAvailable(id)) return LanguageIndex(id);
+    }
+    return index;
+}
 
 static bool IsSkipKey(WPARAM vk) { return vk == VK_RETURN || vk == VK_ESCAPE || vk == VK_SPACE; }
 
@@ -949,6 +1012,7 @@ static void ApplyProfile()
     g.vol.music = std::max(0, std::min(100, int(g_profile.Int(0x3c))));
     for (const SettingFlag& f : kSettingFlags) g.toggles[f.key] = g_profile.Flag(f.off);
     g.turn = std::max(0, std::min(100, int(g_profile.Int(0x17c))));
+    g_profile.Read(0xc, &g.motionBlur, 4);
     // Key map copy at +0x208; a block without the four groups keeps the current map.
     KeyRecord km[kKeyRecords];
     g_profile.Read(0x208, km, sizeof(km));
@@ -966,10 +1030,12 @@ static void ApplyProfile()
     name[63] = 0;
     g.soundDriverName = name;
     g.filter = std::max(0, std::min(2, int(g_profile.Int(0xc90))));
-    // +0x2c text language, +0x28 audio language (handlers 0x548a92..0x548b3c);
-    // here one language drives both.
-    for (int i = 0; i < kLanguageCount; ++i)
-        if (kLanguages[i].id == uint32_t(g_profile.Int(0x2c)) && i != g.lang) g.SetLanguage(i);
+    // +0x28 audio and +0x2c text language; 0x548300 then sets both in use.
+    int audio = LanguageIndex(uint32_t(g_profile.Int(0x28))), text = LanguageIndex(uint32_t(g_profile.Int(0x2c)));
+    if (audio >= 0) g.audioSetting = audio;
+    if (text >= 0) g.textSetting = text;
+    g.SetAudioLanguage(g.audioSetting);
+    g.SetTextLanguage(g.textSetting);
 }
 
 // Live settings -> saved block (0x548300), then the profile file (autosave)
@@ -981,6 +1047,7 @@ static void SaveProfile(bool toFile = true)
     g_profile.SetInt(0x3c, g.vol.music);
     for (const SettingFlag& f : kSettingFlags) g_profile.SetFlag(f.off, g.Toggle(f.key));
     g_profile.SetInt(0x17c, g.turn);
+    g_profile.Write(0xc, &g.motionBlur, 4);
     g_profile.Write(0x208, g.keymap, sizeof(g.keymap));
     // A resolution missing from the mode list becomes the default (0x548385).
     if (!g.modes.empty() && FindMode(g.modes, g.res) < 0) g.res = DefaultMode(g.modes);
@@ -1010,8 +1077,11 @@ static void SaveProfile(bool toFile = true)
     old[63] = 0;
     if (g.soundDriverName != old)
         g_profile.Write(0xcc, g.soundDriverName.c_str(), (std::min<size_t>(g.soundDriverName.size(), 63) + 1) * 2);
-    g_profile.SetInt(0x28, kLanguages[g.lang].id);
-    g_profile.SetInt(0x2c, kLanguages[g.lang].id);
+    g_profile.SetInt(0x28, kLanguages[g.audioSetting].id);
+    g_profile.SetInt(0x2c, kLanguages[g.textSetting].id);
+    // 0x548300 sets the audio (vtbl+0x64) and text (vtbl+0x54) language in use.
+    g.SetAudioLanguage(g.audioSetting);
+    g.SetTextLanguage(g.textSetting);
     if (!toFile) return;
     if (!g_profile.HasFile()) { Log("Settings: no profile in Saves\\, not written"); return; }
     bool ok = g_profile.Save();
@@ -1264,7 +1334,12 @@ public:
         menu_.onAction = [](const std::string& a) {  // events handled at 0x556770
             for (int i = 0; i < kLanguageCount; ++i)
                 if (a == kLanguages[i].event) {
-                    if (i != g.lang) g.SetLanguage(i);
+                    g.SetLanguage(i);  // both languages and settings, even if unchanged
+                    // The original loads the profile after this screen; loading
+                    // ends in 0x548840 (0x542d03), which applies its saved
+                    // settings, both languages included. Here the profile is
+                    // already loaded, so apply it again.
+                    if (g_profile.HasFile()) ApplyProfile();
                     g.Goto(ST_BOOT_SEQ);
                     return;
                 }
@@ -1369,13 +1444,17 @@ public:
         };
         // "%d" values: val_overallvol +0x34 (0x5551c4), Val_Volume +0x38 and
         // Val_Music +0x3c (0x5545b0 / 0x5545de), Val_Turn +0x17c (0x5548dd),
-        // val_mixer +0x150 (0x5547c2). The names are compared without case.
+        // val_mixer +0x150 (0x5547c2), Val_TC_MotionBlur (below). The names
+        // are compared without case.
         menu_.valueText = [](const std::string& fn, int& v) {
             if (fn == "val_overallvol") { v = g.vol.overall; return true; }
             if (fn == "val_volume") { v = g.vol.effects; return true; }
             if (fn == "val_music") { v = g.vol.music; return true; }
             if (fn == "val_turn") { v = g.turn; return true; }
             if (fn == "val_mixer") { v = g.mixRate; return true; }
+            // Val_TC_MotionBlur (0x55493f): +0xc times 10.05, truncated (fistp
+            // with the rounding mode set to chop).
+            if (fn == "val_tc_motionblur") { v = int(double(g.motionBlur) * double(10.05f)); return true; }
             return false;
         };
         LoadControlsText();
@@ -1474,6 +1553,14 @@ private:
         for (int i = 0; i < 8; ++i)
             if (a == kRestorePages[i]) { restorePage_ = i; return; }
         if (a == "restore_accept") {
+            if (restorePage_ == 0) {  // 0x5497f0: Game screen (+0x15 single press = 0 is not kept here)
+                g.toggles["weapon"] = true;
+                g.toggles["autoaim"] = false;
+                g.toggles["mph"] = true;
+                g.toggles["tc_pressure_slomo"] = true;
+                g.toggles["sub"] = false;  // on only in territories 2 and 3 (renderer vtbl+0x48); Europe is 1
+                g.motionBlur = 0.6f;
+            }
             if (restorePage_ == 2) {  // 0x549880: vibration (platform default, taken as on), inverted look, 50
                 g.toggles["vib"] = true;
                 g.toggles["inv"] = true;
@@ -1496,12 +1583,21 @@ private:
                 for (const char* k : { "shadows", "fulljointphysics", "synceveryframe", "particle" }) g.toggles[k] = true;
                 g.toggles["advshaders"] = g.toggles["antialias"] = false;
             }
-            // Every defaults routine ends with 0x548300(this, 0): the defaults
-            // become the saved block (so Escape keeps them), without writing the file.
+            // Every defaults routine ends with 0x548300(this, 0): the languages
+            // go back to the saved ones (0x54830f), then the defaults become the
+            // saved block (so Escape keeps them), without writing the file.
+            int audio = LanguageIndex(uint32_t(g_profile.Int(0x28))), text = LanguageIndex(uint32_t(g_profile.Int(0x2c)));
+            if (audio >= 0) g.audioSetting = audio;
+            if (text >= 0) g.textSetting = text;
             SaveProfile(false);
             menu_.Pop();
             return;
         }
+
+        // Options: Game (screen 15). Motion blur +0xc: steps of 0.1, at most
+        // 0.8 and at least 0.0, then menu sound 0 (0x548869 / 0x5488af).
+        if (a == "tc_motionblur_up") { g.motionBlur = std::min(0.8f, g.motionBlur + 0.1f); return Changed(); }
+        if (a == "tc_motionblur_down") { g.motionBlur = std::max(0.0f, g.motionBlur - 0.1f); return Changed(); }
 
         // Options: Controls (screen 13). Look sensitivity: +0x17c, step 5, 0..100,
         // then menu sound 0 (0x54908e / 0x5490cf).
@@ -1585,8 +1681,22 @@ private:
         if (a == "filter_up" || a == "filter_down") { Step(g.filter, 3, a == "filter_up"); return Changed(); }
 
         // Options: language
-        if (a == "nextlangtext" || a == "nextlangaudio") { Changed(); return g.SetLanguage(g.lang + 1); }
-        if (a == "prevlangtext" || a == "prevlangaudio") { Changed(); return g.SetLanguage(g.lang - 1); }
+        // Audio (0x548a92 / 0x548ad2): +0x28 changes and the audio language in
+        // use follows at once (vtbl+0x64). Text (0x548af0 / 0x548b0e): +0x2c
+        // changes, but the handler then passes +0x28, the audio language, to
+        // the text setter (vtbl+0x54 at 0x548b39). So the menu text changes
+        // only on Accept / Escape, when 0x548300 sets both from the settings.
+        // Kept as in the original. Both then play menu sound 0.
+        if (a == "nextlangaudio" || a == "prevlangaudio") {
+            g.audioSetting = StepLanguage(g.audioSetting, a[0] == 'n');
+            g.SetAudioLanguage(g.audioSetting);
+            return Changed();
+        }
+        if (a == "nextlangtext" || a == "prevlangtext") {
+            g.textSetting = StepLanguage(g.textSetting, a[0] == 'n');
+            g.SetTextLanguage(g.audioSetting);
+            return Changed();
+        }
 
         // Extras / cutscenes (FMV only, no gameplay)
         if (a == "extra_credits") return PlayExtra("FMV\\CREDITS.XMV");
@@ -1595,7 +1705,7 @@ private:
         if (a == "extra_pirates") {
             static const char* byLang[] = { "FMV\\PIRATES.XMV", "FMV\\PIRATES_FRE.XMV", "FMV\\PIRATES_GER.XMV",
                                             "FMV\\PIRATES_ITA.XMV", "FMV\\PIRATES_SPA.XMV" };
-            return PlayExtra(byLang[g.lang]);
+            return PlayExtra(byLang[g.textSetting]);  // by +0x2c (0x553d6c)
         }
         if (a == "cut recap") return PlayExtra("FMV\\RECAP.XMV");
         if (StartsWithI(a, "cut ")) return PlayExtra("FMV\\SC" + a.substr(4) + ".XMV");  // "cut 05a" -> SC05a
@@ -1677,7 +1787,9 @@ private:
             if (s == kDg[i]) return dg_ == i ? 0 : 1;
         for (int i = 0; i < kLanguageCount; ++i) {
             std::string l = std::string("stat_") + kLanguages[i].stat;
-            if (s == l + "text" || s == l + "audio") return g.lang == i ? 0 : 1;
+            // Stat_<Language>Text / Audio (0x554374.., 0x55416e..): +0x2c / +0x28.
+            if (s == l + "text") return g.textSetting == i ? 0 : 1;
+            if (s == l + "audio") return g.audioSetting == i ? 0 : 1;
         }
         if (StartsWithI(s, "stat_")) {
             std::string key = s.substr(5);
@@ -1958,7 +2070,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
     g.canvas.w = kWidth;
     g.canvas.h = kHeight;
 
-    g.onLanguageChanged.push_back([] { g_sounds.Load(); });  // AUDIO: follows the language
+    g.onAudioLanguageChanged.push_back([] { g_sounds.Load(); });  // AUDIO: sounds follow the audio language
     g.SetLanguage(0);
     g.ResetKeyMap();
     g.modes = EnumDisplayModes(g.antialiasOk);
