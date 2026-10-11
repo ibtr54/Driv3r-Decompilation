@@ -535,6 +535,9 @@ public:
     virtual void Update() {}
     virtual void Render(HDC, Canvas&) {}
     virtual void OnKey(WPARAM) {}
+    // Keyboard key newly pressed (no auto-repeat), as a DirectInput code
+    // (DIK_*), like the poll 0x551f50 used for the cheat codes.
+    virtual void OnKeyPress(int) {}
     // GUI mouse event (code, pointer as fractions of the client area).
     virtual void OnMouse(int, float, float) {}
     // Mouse button newly pressed, DirectInput order (0 left, 1 right,
@@ -762,7 +765,9 @@ static bool LoadGsdSample(int bank, int sample, GsdSample& out)
 class MenuSounds
 {
 public:
-    enum { MOVE = 0, SELECT = 1, BACK = 2 };
+    // 0..2 from MENU.DAT; CHEAT is bank 0 sample 3, fixed in the code
+    // that accepts a cheat code (0x551ecb).
+    enum { MOVE = 0, SELECT = 1, BACK = 2, CHEAT = 3 };
 
     void Load()
     {
@@ -786,13 +791,20 @@ public:
             Log("Sound: menu id %d = bank %d sample %d (%u Hz, %u ms)", id, bank, s, smp.rate,
                 unsigned(pcm_[id].size() / 2 * 1000 / (smp.rate ? smp.rate : 1)));
         }
+        GsdSample smp;
+        if (LoadGsdSample(0, 3, smp)) {
+            wav_[CHEAT] = MakeWav(smp.pcm, smp.rate);
+            pcm_[CHEAT] = std::move(smp.pcm);
+            Log("Sound: cheat = bank 0 sample 3 (%u Hz, %u ms)", smp.rate,
+                unsigned(pcm_[CHEAT].size() / 2 * 1000 / (smp.rate ? smp.rate : 1)));
+        }
     }
 
     // PlaySound has no volume control, so the effects volume is applied to
     // the samples (the original sets sound-manager categories 0/1 and 3).
     void Play(int id)
     {
-        if (id < 0 || id >= 3 || wav_[id].empty()) return;
+        if (id < 0 || id >= 4 || wav_[id].empty()) return;
         PlaySoundA(nullptr, nullptr, 0);  // the buffer is rewritten below
         float gain = g.EffectsGain();
         const int16_t* src = reinterpret_cast<const int16_t*>(pcm_[id].data());
@@ -824,8 +836,8 @@ private:
         return w;
     }
 
-    std::vector<uint8_t> wav_[3];  // WAV images played by PlaySound
-    std::vector<uint8_t> pcm_[3];  // original samples, at full volume
+    std::vector<uint8_t> wav_[4];  // WAV images played by PlaySound
+    std::vector<uint8_t> pcm_[4];  // original samples, at full volume
 };
 static MenuSounds g_sounds;
 
@@ -1669,6 +1681,21 @@ static GameplayStub g_gameplay;
 // gameplay starts.
 // Cutscene -> mission that unlocks it (table 0x7a20e8, {name, mission}, ends
 // with a null name). "stat_sc<id>" asks for the cutscene, "cut <id>" plays it.
+// Front-end cheat codes, table 0x7a20a0: 6 x {u32 cheat index; u8 position;
+// u8 keys[7]} with DirectInput key codes. The index is the {unlocked,
+// enabled} pair at settings +0x19e + 2 x index (0 allmissions, 1 weapons,
+// 2 ammo, 3 invincibility, 4 immunity, 6 vehicle; 5 "tommy" has no code).
+// The position lives in the table, so it is kept for the whole run.
+struct CheatCode { int index; int pos; uint8_t keys[7]; };
+static CheatCode g_cheatCodes[] = {
+    { 1, 0, { 0x14, 0x21, 0x3f, 0x26, 0x08, 0x08, 0x19 } },  // T F F5 L 7 7 P
+    { 2, 0, { 0x14, 0x22, 0x3e, 0x25, 0x07, 0x08, 0x18 } },  // T G F4 K 6 7 O
+    { 3, 0, { 0x13, 0x21, 0x3f, 0x26, 0x08, 0x07, 0x19 } },  // R F F5 L 7 6 P
+    { 4, 0, { 0x13, 0x22, 0x3e, 0x26, 0x07, 0x07, 0x19 } },  // R G F4 L 6 6 P
+    { 0, 0, { 0x30, 0x21, 0x3f, 0x25, 0x06, 0x08, 0x18 } },  // B F F5 K 5 7 O
+    { 6, 0, { 0x30, 0x22, 0x3e, 0x25, 0x06, 0x06, 0x19 } },  // B G F4 K 5 5 P
+};
+
 struct CutsceneUnlock { const char* id; int mission; };
 static const CutsceneUnlock kCutscenes[] = {
     { "01", 2 },   { "5a", 4 },   { "5b", 4 },   { "07", 5 },   { "09", 7 },   { "10b", 8 },
@@ -1836,6 +1863,26 @@ public:
         idleSince_ = GetTickCount();
         if (extra_.IsOpen()) return;
         if (km_.state == 1) CaptureAlt(0x2000 + button);
+    }
+
+    // Cheat codes (0x551e63..0x551f14, every front-end update with a key
+    // from 0x551f50, on any screen). Each table entry keeps its own
+    // position: the key either matches the next one (position + 1) or the
+    // position goes back to 0, so a wrong key is not tried as a first key
+    // again. After 7 keys the cheat is unlocked (settings +0x19e + 2 x
+    // index, only if index < 10 and the runtime byte +0x5 is clear, taken
+    // here as clear) and bank 0 sample 3 is played (only if the previous
+    // one has finished); then the position is reset.
+    void OnKeyPress(int dik) override
+    {
+        for (CheatCode& c : g_cheatCodes) {
+            if (dik != c.keys[c.pos]) { c.pos = 0; continue; }
+            if (++c.pos < 7) continue;
+            c.pos = 0;
+            if (c.index < 10) g_profile.SetFlag(0x19e + 2 * c.index, true);
+            Log("Cheat code %d entered: cheat %d unlocked", int(&c - g_cheatCodes), c.index);
+            g_sounds.Play(MenuSounds::CHEAT);
+        }
     }
 
 private:
@@ -2219,6 +2266,15 @@ private:
             unsigned i = unsigned(atoi(s.c_str() + 10));
             return i < 10 && CheatUnlocked(int(i)) ? st : 2;
         }
+        // "<cheat>_onoff" (0x554b45..0x554ce9): 2 while the cheat is locked,
+        // else 0 when enabled, 1 when not (checked on the original).
+        static const struct { const char* name; int index; } kCheatOnOff[] = {
+            { "allmissions", 0 }, { "weapons", 1 }, { "ammo", 2 },
+            { "invincibility", 3 }, { "immunity", 4 }, { "vehicle", 6 },
+        };
+        for (const auto& c : kCheatOnOff)
+            if (_stricmp(s.c_str(), (std::string(c.name) + "_onoff").c_str()) == 0)
+                return !CheatUnlocked(c.index) ? 2 : g.Toggle(c.name) ? 0 : 1;  // enabled byte +0x19f + 2 x index
         if (StartsWithI(s, "stat_")) {
             std::string key = s.substr(5);
             if (g.toggles.count(key)) return g.Toggle(key) ? 0 : 1;
@@ -2463,6 +2519,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_KEYDOWN:
+        if (g.cur && !(lp & (1 << 30))) {  // bit 30: key was already down (repeat)
+            int sc = int((lp >> 16) & 0x7f), ext = int((lp >> 24) & 1);
+            g.cur->OnKeyPress(sc | (ext ? 0x80 : 0));  // scan code -> DIK_*
+        }
         if (g.cur) g.cur->OnKey(wp);
         return 0;
     case WM_SYSKEYDOWN:
