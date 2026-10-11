@@ -673,6 +673,16 @@ struct App
 };
 static App g;
 
+// Renderer vtbl+0x48. The order is taken from the language pages
+// (0 US, 1 EU, 2 JP, other AS, 0x556660); only Europe ships here.
+static int TerritoryId()
+{
+    if (_stricmp(g.territory.c_str(), "Usa") == 0 || _stricmp(g.territory.c_str(), "America") == 0) return 0;
+    if (_stricmp(g.territory.c_str(), "Europe") == 0) return 1;
+    if (_stricmp(g.territory.c_str(), "Japan") == 0) return 2;
+    return 3;
+}
+
 // A language is offered when its Locale folder exists. The original asks the
 // renderer (vtbl+0x5c text, +0x6c audio), whose list was not traced.
 static bool LanguageAvailable(uint32_t id)
@@ -951,6 +961,45 @@ public:
 
     Profile() : data_(kSize) {}
 
+    // Block defaults (0x5499e0), run by the settings constructor 0x547e90 on
+    // the live and the saved block, so a profile created before any change
+    // holds these. Bytes the original leaves unset (heap fill 0xDEC015A1)
+    // stay 0 here.
+    void SetDefaults()
+    {
+        std::fill(data_.begin(), data_.end(), uint8_t(0));
+        float f = 0.6f;
+        Write(0xc, &f, 4);                                     // motion blur
+        f = 1.0f;
+        Write(0x10, &f, 4);                                    // (not identified)
+        data_[0x14 - 8] = 1;                                   // tc_pressure_slomo; +0x15 single press 0
+        SetInt(0x20, 1);                                       // furthest mission
+        SetInt(0x28, kLanguages[g.audioSetting].id);           // audio language (config vtbl+0x60)
+        SetInt(0x2c, kLanguages[g.textSetting].id);            // text language (config vtbl+0x50)
+        SetInt(0x30, 2);                                       // config vtbl+0x70 (not traced; 2 on the game)
+        SetInt(0x34, 100);                                     // overall, effects, music volume
+        SetInt(0x38, 100);
+        SetInt(0x3c, 60);
+        SetInt(0x150, 44100);                                  // mixer rate; driver +0x14c 0, name +0xcc empty
+        f = 0.25f;
+        Write(0x164, &f, 4);                                   // dead zone
+        data_[0x170 - 8] = 1;                                  // vibration (input vtbl+0x78)
+        data_[0x171 - 8] = TerritoryId() == 2 || TerritoryId() == 3;  // subtitles
+        // 0x549c90 on +0x174: mph, inverted look, brake, auto weapon on, auto-aim
+        // off, look sensitivity 50, every cheat byte 0, +0x1c1 = 1, +0x1d0 = 999.
+        for (int off = 0x174; off <= 0x177; ++off) data_[off - 8] = 1;
+        SetInt(0x17c, 50);
+        data_[0x1c1 - 8] = 1;
+        SetInt(0x1d0, 999);
+        data_[0x204 - 8] = 1;                                  // full joint physics
+        Write(0x208, kDefaultKeyMap, sizeof(kDefaultKeyMap));  // key map (copied from 0x8ac590 vtbl+0x70)
+        f = 1.0f;
+        Write(0xc30, &f, 4);                                   // gamma; mode +0xc34 is set later (0x547fb0)
+        SetInt(0xc88, 1);                                      // draw distance
+        for (int off = 0xc8c; off <= 0xc8e; ++off) data_[off - 8] = 1;  // shadows, sync every frame, particles
+        SetInt(0xc90, 1);                                      // filter; advanced shaders, anti-alias 0
+    }
+
     // Keeps a copy of the original file next to it before the first write.
     bool Save()
     {
@@ -1085,9 +1134,10 @@ static void ApplyProfile()
     g.SetTextLanguage(g.textSetting);
 }
 
-// Live settings -> saved block (0x548300), then the profile file (autosave)
-// when there is one.
-static void SaveProfile(bool toFile = true)
+// The live settings, kept in g, written into the block as they are. The
+// original's settings handlers change the live block directly, so this is
+// what a profile save (0x5422f0) or the copy at Profiles start writes.
+static void StoreLive()
 {
     g_profile.SetInt(0x34, g.vol.overall);
     g_profile.SetInt(0x38, g.vol.effects);
@@ -1096,13 +1146,30 @@ static void SaveProfile(bool toFile = true)
     g_profile.SetInt(0x17c, g.turn);
     g_profile.Write(0xc, &g.motionBlur, 4);
     g_profile.Write(0x208, g.keymap, sizeof(g.keymap));
-    // A resolution missing from the mode list becomes the default (0x548385).
-    if (!g.modes.empty() && FindMode(g.modes, g.res) < 0) g.res = DefaultMode(g.modes);
     g_profile.SetInt(0x160, g.aspect);
     g_profile.Write(0xc30, &g.gamma, 4);
     g_profile.Write(0xc34, &g.res, sizeof(g.res));
     g_profile.SetInt(0xc88, g.drawdist);
     g_profile.SetInt(0xc90, g.filter);
+    g_profile.SetInt(0x14c, g.soundDriver);
+    g_profile.SetInt(0x150, g.mixRate);
+    // The name is copied up to its terminator (0x5420e0); the bytes after it
+    // are left as they are.
+    wchar_t old[64];
+    g_profile.Read(0xcc, old, sizeof(old));
+    old[63] = 0;
+    if (g.soundDriverName != old)
+        g_profile.Write(0xcc, g.soundDriverName.c_str(), (std::min<size_t>(g.soundDriverName.size(), 63) + 1) * 2);
+    g_profile.SetInt(0x28, kLanguages[g.audioSetting].id);
+    g_profile.SetInt(0x2c, kLanguages[g.textSetting].id);
+}
+
+// Live settings -> saved block (0x548300), then the profile file (autosave)
+// when there is one.
+static void SaveProfile(bool toFile = true)
+{
+    // A resolution missing from the mode list becomes the default (0x548385).
+    if (!g.modes.empty() && FindMode(g.modes, g.res) < 0) g.res = DefaultMode(g.modes);
     // Sound driver check on accept (0x54851e): no drivers -> -1; a driver
     // whose name no longer matches is looked up by name (else entry 0); the
     // name is then taken from the list.
@@ -1115,17 +1182,7 @@ static void SaveProfile(bool toFile = true)
             if (g.soundDrivers[i] == g.soundDriverName) { g.soundDriver = i; break; }
     }
     g.soundDriverName = g.DriverName(g.soundDriver);
-    g_profile.SetInt(0x14c, g.soundDriver);
-    g_profile.SetInt(0x150, g.mixRate);
-    // The name is copied up to its terminator (0x5420e0); the bytes after it
-    // are left as they are.
-    wchar_t old[64];
-    g_profile.Read(0xcc, old, sizeof(old));
-    old[63] = 0;
-    if (g.soundDriverName != old)
-        g_profile.Write(0xcc, g.soundDriverName.c_str(), (std::min<size_t>(g.soundDriverName.size(), 63) + 1) * 2);
-    g_profile.SetInt(0x28, kLanguages[g.audioSetting].id);
-    g_profile.SetInt(0x2c, kLanguages[g.textSetting].id);
+    StoreLive();
     // 0x548300 sets the audio (vtbl+0x64) and text (vtbl+0x54) language in use.
     g.SetAudioLanguage(g.audioSetting);
     g.SetTextLanguage(g.textSetting);
@@ -1208,7 +1265,11 @@ public:
         MecScreen& s = mec.screens[screen];
         Log("Menu: enter screen %d '%s'", screen, s.name.c_str());
         for (Element& e : s.items) e.state = 1;
-        SetFocus(s, s.focus);
+        // Go-to-screen 0x467b70 (links, show by name) starts on the default
+        // item; Pop leaves the parent's focus as it was (checked on the game:
+        // Controller Setup opens on Select Controller every time, Options
+        // keeps Settings after backing out of it).
+        SetFocus(s, s.defaultFocus);
         Fire(s.onEnter);
     }
 
@@ -1489,7 +1550,7 @@ public:
         TextTable generic = LoadTxt(g.Resolve("LANG:Text\\generic.txt"));
         auto it = generic.find(m == REPLAYS ? 1 : 0);
         prefix_ = it != generic.end() ? it->second : (m == REPLAYS ? L"D3R_" : L"D3P_");
-        SaveProfile(false);                // the live block holds the current settings
+        StoreLive();                       // the live block holds the current settings
         backup_ = g_profile.Snapshot();    // live -> saved copy (+0x8 -> +0xc98)
         name58_.clear();
         offset_ = count_ = op_ = 0;
@@ -1527,7 +1588,14 @@ public:
     }
 
     void Render(HDC dc, Canvas& cv) { (popup_ == 4 ? name_ : mu_).Render(dc, cv); }
-    void OnKey(WPARAM vk) { (popup_ == 4 ? name_ : mu_).OnKey(vk); }
+    // An Enter that accepted the name is used up: it must not also reach the
+    // popup char_accept opened (FileExists stays up until the next Enter on
+    // the original; checked 2026-10-11).
+    void OnKey(WPARAM vk)
+    {
+        if (nameAccepted_) { nameAccepted_ = false; return; }
+        (popup_ == 4 ? name_ : mu_).OnKey(vk);
+    }
     void OnMouse(int code, float x, float y) { (popup_ == 4 ? name_ : mu_).OnMouse(code, x, y); }
 
     // Name entry (0x5414c0, step 6): newly pressed keys from the table at
@@ -1537,10 +1605,11 @@ public:
     // is not blank (then char_accept). At most 16 characters (0x5414a0).
     void OnKeyPress(int dik)
     {
+        nameAccepted_ = false;
         if (!active_ || popup_ != 4) return;
         if (dik == 0x0e) { if (!name58_.empty()) name58_.pop_back(); return; }
         if (dik == 0x1c || dik == 0x9c) {
-            if (name58_.find_first_not_of(L' ') != std::wstring::npos) Event("char_accept");
+            if (name58_.find_first_not_of(L' ') != std::wstring::npos) { Event("char_accept"); nameAccepted_ = true; }
             return;
         }
         static const char* kDigits = "1234567890";  // DIK 0x02..0x0b
@@ -1656,7 +1725,7 @@ private:
         if (!workDone_) {
             workDone_ = true;
             if (step_ == 12) result_ = g_profile.LoadFolder(sel_);
-            else if (step_ == 13) { SaveProfile(false); result_ = g_profile.SaveFolder(sel_) ? 1 : 2; }
+            else if (step_ == 13) { StoreLive(); result_ = g_profile.SaveFolder(sel_) ? 1 : 2; }
             else result_ = Profile::DeleteFolder(sel_) ? 1 : 2;
             Log("Profiles: %s %s -> %d", step_ == 12 ? "load" : step_ == 13 ? "save" : "delete", sel_.c_str(), result_);
         }
@@ -1821,6 +1890,7 @@ private:
     std::string sel_, replay_;
     std::vector<uint8_t> backup_;
     int step_ = 0, popup_ = 0, op_ = 0, offset_ = 0, count_ = 0, prev_ = 0, result_ = 0;
+    bool nameAccepted_ = false;  // set by OnKeyPress, read by OnKey for the same WM_KEYDOWN
     DWORD shownAt_ = 0;
 };
 static MemoryUnit g_mu;
@@ -2469,7 +2539,7 @@ private:
                 g.toggles["autoaim"] = false;
                 g.toggles["mph"] = true;
                 g.toggles["tc_pressure_slomo"] = true;
-                g.toggles["sub"] = false;  // on only in territories 2 and 3 (renderer vtbl+0x48); Europe is 1
+                g.toggles["sub"] = TerritoryId() == 2 || TerritoryId() == 3;  // renderer vtbl+0x48
                 g.motionBlur = 0.6f;
             }
             if (restorePage_ == 2) {  // 0x549880: vibration (platform default, taken as on), inverted look, 50
@@ -2815,16 +2885,6 @@ private:
     }
     // 0x555b30: level id for StartGame; vehicle 19 has its own level per city.
     int RideLevel() const { return (VehicleId() == 19 ? 0x4e : 0x4d) + 3 * city_; }
-    // Renderer vtbl+0x48. The order is taken from the language pages
-    // (0 US, 1 EU, 2 JP, other AS, 0x556660); only Europe ships here.
-    static int TerritoryId()
-    {
-        if (_stricmp(g.territory.c_str(), "Usa") == 0 || _stricmp(g.territory.c_str(), "America") == 0) return 0;
-        if (_stricmp(g.territory.c_str(), "Europe") == 0) return 1;
-        if (_stricmp(g.territory.c_str(), "Japan") == 0) return 2;
-        return 3;
-    }
-
     std::string Top()
     {
         MecScreen* s = menu_.Top();
@@ -3172,8 +3232,11 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
     g.soundDrivers = EnumSoundDrivers();
     g.res = DefaultMode(g.modes);
     // No profile yet: it is chosen (or created) after the title screen by
-    // the boot profile flow (MemoryUnit::BOOT), as in the original.
-    SaveProfile(false);  // defaults become the live / saved block
+    // the boot profile flow (MemoryUnit::BOOT), as in the original. Until
+    // then the live / saved block holds the constructor's defaults (0x547e90).
+    g_profile.SetDefaults();
+    g_profile.Write(0xc34, &g.res, sizeof(g.res));  // default mode (0x547fb0 -> 0x54a7a0)
+    ApplyProfile();
 
     BootSequencer seq;
     LanguageScreen language;
