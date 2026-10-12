@@ -471,6 +471,9 @@ bool MecFile::Load(const std::string& path)
         const uint8_t* h = r.Take(sizes[1]);
         if (!h || sizes[1] < 81) return false;
         sc.name = FixedString(h, 8);
+        int32_t background;
+        memcpy(&background, h + 8, 4);
+        sc.background = background;
         uint32_t focus;
         memcpy(&focus, h + 12, 4);
         sc.focus = int(focus);

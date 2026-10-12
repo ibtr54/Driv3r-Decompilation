@@ -114,6 +114,11 @@ struct MecScreen
     std::string name, onEnter, onExit;
     int focus = 0;
     int defaultFocus = 0;  // header focus item; screens shown by name start there (0x467730)
+    // Header +8: the screen's background, a full-screen quad drawn by the
+    // screen draw 0x469a40: -2 the current movie (0x8ac3bc vtbl+0x14),
+    // >= 0 a material of the same MEC file (front.MEC: 1 on TAR_Main,
+    // TAR_Start and DG_Main; MUMAIN, NAME, NOCONT: 0), -1 none.
+    int background = -1;
     // Header byte +16. Go-to-screen 0x467b70 does not put a screen with it
     // into the back history; it is not drawn over its parent (only the
     // current screen is drawn).

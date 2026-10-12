@@ -70,6 +70,7 @@ struct BinkApi
     void  (__stdcall* NextFrame)(HBINK) = nullptr;
     int   (__stdcall* CopyToBuffer)(HBINK, void*, int, uint32_t, uint32_t, uint32_t, uint32_t) = nullptr;
     void  (__stdcall* SetSoundTrack)(uint32_t, uint32_t*) = nullptr;
+    void  (__stdcall* SetVolume)(HBINK, uint32_t, int32_t) = nullptr;
     int   (__stdcall* SetSoundSystem)(void*, uint32_t) = nullptr;
     void* (__stdcall* OpenDirectSound)(uint32_t) = nullptr;
 
@@ -89,6 +90,7 @@ struct BinkApi
                   Get(NextFrame, "_BinkNextFrame@4") &
                   Get(CopyToBuffer, "_BinkCopyToBuffer@28") &
                   Get(SetSoundTrack, "_BinkSetSoundTrack@8") &
+                  Get(SetVolume, "_BinkSetVolume@12") &
                   Get(SetSoundSystem, "_BinkSetSoundSystem@8") &
                   Get(OpenDirectSound, "_BinkOpenDirectSound@4");
         if (ok) SetSoundSystem(reinterpret_cast<void*>(OpenDirectSound), 0);
@@ -126,6 +128,7 @@ struct VideoSound
     }
 };
 static VideoSound g_videoSound;
+static float VideoGain();  // after the settings
 
 // Movie player: mirrors Driv3r's Bink wrapper (open @ 0x599590, per-frame
 // update @ 0x599440).
@@ -151,6 +154,10 @@ public:
         if (!h_) h_ = g_bink.Open(path.c_str(), 0);
         if (!h_) return false;
         ++g_videoSound.openVideos;
+        // 0x59962b: volume = category 3 (overall) x category 0 (effects)
+        // x 32768, truncated, on the track index; set once per video. A
+        // category reads 0 with no sound device (0x596e50).
+        g_bink.SetVolume(h_, track, int32_t(VideoGain() * 32768.0f));
 
         const BinkHeader* hdr = static_cast<const BinkHeader*>(h_);
         w_ = hdr->Width;
@@ -726,6 +733,15 @@ struct App
 };
 static App g;
 
+// Video volume (0x59962b): categories 3 (overall) and 0 (effects), each
+// clamped to 0..1 by 0x596e70; 0 with no sound device (0x596e50).
+static float VideoGain()
+{
+    if (g.soundDriver < 0) return 0.0f;
+    auto cat = [](int v) { return std::min(1.0f, std::max(0.0f, v * 0.01f)); };
+    return cat(g.vol.overall) * cat(g.vol.effects);
+}
+
 // Renderer vtbl+0x48. The order is taken from the language pages
 // (0 US, 1 EU, 2 JP, other AS, 0x556660); only Europe ships here.
 static int TerritoryId()
@@ -1195,9 +1211,12 @@ public:
             if (l.out || l.smp.pcm.empty()) continue;
             // The layer at the mixer rate (sound card setting).
             if (l.gen != g_audio.generation) {
-                l.buf = Resample16(l.smp.pcm, l.smp.channels, l.smp.rate, g_audio.rate);
+                l.base = Resample16(l.smp.pcm, l.smp.channels, l.smp.rate, g_audio.rate);
+                l.buf = l.base;
+                l.gain = -1;
                 l.gen = g_audio.generation;
             }
+            Scale(l);
             WAVEFORMATEX wf = {};
             wf.wFormatTag = WAVE_FORMAT_PCM;
             wf.nChannels = WORD(l.smp.channels);
@@ -1220,16 +1239,17 @@ public:
             }
             waveOutWrite(l.out, &l.hdr, sizeof(l.hdr));
         }
-        UpdateVolume();
     }
 
     // Music volume = sound-manager category 2 (and 0x8ac48c+0x40), scaled by
-    // the overall volume (category 3).
+    // the overall volume (category 3). Applied to the samples: on current
+    // Windows waveOutSetVolume sets the volume of the whole process (its
+    // audio session), so it also turned down the videos and menu sounds.
+    // The looping buffer is rewritten in place while it plays.
     void UpdateVolume()
     {
-        DWORD v = DWORD(std::min(1.0f, std::max(0.0f, g.MusicGain())) * 0xffff);
         for (Layer& l : layers_)
-            if (l.out) waveOutSetVolume(l.out, v | (v << 16));
+            if (l.out) Scale(l);
     }
 
     void Stop()
@@ -1247,12 +1267,24 @@ private:
     struct Layer
     {
         GsdSample smp;
-        std::vector<uint8_t> buf;  // smp at the mixer rate
-        int gen = -1;              // g_audio.generation buf was made for
+        std::vector<uint8_t> base;  // smp at the mixer rate
+        std::vector<uint8_t> buf;   // base x the music volume (played)
+        float gain = -1;            // volume buf was made with
+        int gen = -1;               // g_audio.generation base was made for
         HWAVEOUT out = nullptr;
         WAVEHDR hdr = {};
     };
     Layer layers_[2];
+
+    static void Scale(Layer& l)
+    {
+        float gain = std::min(1.0f, std::max(0.0f, g.MusicGain()));
+        if (gain == l.gain || l.buf.size() != l.base.size()) return;
+        const int16_t* src = reinterpret_cast<const int16_t*>(l.base.data());
+        int16_t* dst = reinterpret_cast<int16_t*>(l.buf.data());
+        for (size_t i = 0; i < l.base.size() / 2; ++i) dst[i] = int16_t(src[i] * gain);
+        l.gain = gain;
+    }
 
 public:
     bool Playing() const { return layers_[0].out || layers_[1].out; }
@@ -1336,8 +1368,14 @@ static void ApplySound()
 // ramp[i] = 65535 x ((i + 1) / 256) ^ (1 / gamma), clamped.
 // Code switch (not a game option): true keeps a window of the chosen size,
 // without a mode change and without gamma.
-static const bool kWindowed = false;
+static const bool kWindowed = true;
 
+//=============================
+//=============================
+//=============================
+//=============================
+//=============================
+//=============================
 struct DisplayState
 {
     bool applied = false, active = true;
@@ -1916,8 +1954,22 @@ public:
         sprites_.clear();
         for (size_t i = first; i < stack.size(); ++i)
             for (Element& e : mec.screens[stack[i]].items) DrawElement(dc, cv, e, 0);
+        // The screen's background material (header +8 >= 0) is added to the
+        // same render list after the items (0x469a85..0x469bb8, key
+        // (slot << 16) | material): it lands above the video panes, which are
+        // drawn first (the grid of TAR_Main's picture crosses the preview,
+        // whose box is transparent), and below sprites of higher materials.
+        // A movie background (-2) is drawn by the owner of the movie.
+        // On the game the back arrow (material 0, inside a list) stays above
+        // TAR_Main's opaque picture, so the background is drawn under every
+        // sprite here (the list's layer byte was not traced yet).
         std::stable_sort(sprites_.begin(), sprites_.end(),
                          [](const Element* a, const Element* b) { return a->material < b->material; });
+        int bg = mec.screens[stack.back()].background;
+        if (bg >= 0) {
+            backdrop_.material = bg;
+            sprites_.insert(sprites_.begin(), &backdrop_);
+        }
         for (const Element* e : sprites_) {
             if (e->material < 0 || e->material >= int(mec.materials.size())) continue;
             const Texture& t = mec.materials[e->material];
@@ -2002,6 +2054,13 @@ private:
     }
 
     std::vector<const Element*> sprites_;
+    Element backdrop_ = FullScreen();  // the screen background quad (UV 0..1)
+    static Element FullScreen()
+    {
+        Element e;
+        e.w = e.h = 1;
+        return e;
+    }
 
     // "$^a".."$^d" in the text files select the icon glyphs U+2480..U+2483
     // (down, up, right, left arrows) of FONT.BNK.
@@ -2912,7 +2971,11 @@ public:
         // While Profiles / Replays is open only its popup is drawn: the
         // original shows it on black, without the front end (observed).
         if (g_mu.Active()) return g_mu.Render(dc, cv);
-        bg_.Draw(dc, 0, 0, kWidth, kHeight, false);
+        // The movie fills the screen only on screens whose background is
+        // the movie (header +8 = -2); TAR_Main, TAR_Start and DG_Main show
+        // the picture of material 1 instead (drawn by the menu).
+        MecScreen* top = menu_.Top();
+        if (!top || top->background == -2) bg_.Draw(dc, 0, 0, kWidth, kHeight, false);
         menu_.Render(dc, cv);
     }
 
