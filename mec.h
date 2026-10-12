@@ -27,8 +27,13 @@
 struct Texture
 {
     int w = 0, h = 0;
-    std::vector<uint32_t> px;
+    std::vector<uint32_t> px;  // ARGB, straight (not premultiplied) colour
     bool additive = false;
+    // Smaller levels (1, 2, ...): the original loads its textures with D3DX,
+    // which builds a full box-filtered chain even when the DDS has none.
+    struct Level { int w, h; std::vector<uint32_t> px; };
+    std::vector<Level> mips;
+    void BuildMips();
 };
 
 bool DecodeDds(const uint8_t* dds, size_t size, Texture& out);
@@ -39,7 +44,12 @@ struct Canvas
     int w = 0, h = 0;
 
     // Draws texture region (u0,v0)-(u1,v1) into the destination rectangle,
-    // modulated by rgba (bilinear filtering).
+    // modulated by rgba, as Direct3D draws the original's sprites and
+    // glyphs. Colour and alpha are filtered separately (transparent texels
+    // still lend their colour to the edge of the opaque ones), the mip
+    // level follows the larger texel-per-pixel ratio (linear between
+    // levels), and pixels are sampled at +0.15 / +0.25 (x / y): measured on
+    // the game's screenshots, not derived.
     void Draw(const Texture& t, float u0, float v0, float u1, float v1, float dx, float dy,
               float dw, float dh, const float rgba[4], bool additive = false);
     void Fill(float dx, float dy, float dw, float dh, uint32_t bgra);
@@ -59,7 +69,9 @@ public:
     int TopOffset() const { return topOffset_; }
 
 private:
-    struct Glyph { int x, y, w, h, page, yoff; };
+    // bear: left bearing (record +6 bits 0..4): the glyph is drawn that far
+    // right and the pen advances width + bearing (0x575038, 0x5754b1).
+    struct Glyph { int x, y, w, h, page, yoff, bear; };
     int Kern(wchar_t a, wchar_t b) const;
 
     std::vector<Texture> pages_;
@@ -106,6 +118,9 @@ struct MecScreen
     // into the back history; it is not drawn over its parent (only the
     // current screen is drawn).
     bool overlay = false;
+    // Header byte +81: entering the screen clears the back history
+    // (0x467c65 -> 0x468590). Set only on Main in FRONT.MEC.
+    bool clearsHistory = false;
     std::vector<Element> items;
     // Runtime (screen object +0x134): set by a mouse move, cleared by
     // keyboard navigation; while set the focus follows the pointer.

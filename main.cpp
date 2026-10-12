@@ -1457,8 +1457,20 @@ public:
     void Push(int screen)
     {
         if (screen < 0 || screen >= int(mec.screens.size())) return;
+        // Back history (go-to-screen 0x467b70; stack = history + current).
+        // A current screen without the +16 byte is kept in the history. One
+        // with it is not, and the history's top entry is dropped too unless
+        // it is that same screen (0x467bb7..0x467bef): UC_Repl 5 -> popup
+        // 7 -> 5 leaves 22 under 5, so Back from 5 goes to 22.
+        if (!stack.empty() && mec.screens[stack.back()].overlay) {
+            int cur = stack.back();
+            stack.pop_back();
+            if (!stack.empty() && stack.back() != cur) stack.pop_back();
+        }
         stack.push_back(screen);
         MecScreen& s = mec.screens[screen];
+        // +81 byte (Main): the history is cleared (0x467c65).
+        if (s.clearsHistory) stack.erase(stack.begin(), stack.end() - 1);
         Log("Menu: enter screen %d '%s'", screen, s.name.c_str());
         for (Element& e : s.items) e.state = 1;
         // Go-to-screen 0x467b70 (links, show by name) starts on the default
@@ -1678,13 +1690,22 @@ private:
             // is the top of the capitals, as for the subtitles. Text wider
             // than the element wraps inside it, lines LinePitch x sy apart
             // (MUMAIN ASOffQ: 22 and 19 px for sy 0.7 and 0.6, measured).
+            // The glyphs go through the same Direct3D sampling as the sprites,
+            // 0.5 px lower (measured against the original's screenshots: the
+            // vertical offset was the only one left, the same on every text).
             float hs = e.sy * (480.0f / 512.0f);
-            float ly = y - g.font.TopOffset() * hs;
+            float ly = y + 0.5f - g.font.TopOffset() * hs;
+            // The text box is kept in whole pixels (int fields read with fild
+            // by the line placement 0x575300), so x and the width are cut
+            // before the alignment (247.9999 -> 247 moved some centred
+            // texts 1 px left in the original).
+            float bx = float(int(x)), bw = float(int(w));
             for (const std::wstring& line : WrapText(s, w, e.sx)) {
                 float tw = g.font.Width(line, e.sx);
-                // 0 left, 1 right, 2 centre: the game's text API (the same
-                // values as the FMV subtitles, 0x5992ac).
-                float tx = e.align == 1 ? x + w - tw : e.align == 2 ? x + (w - tw) / 2 : x;
+                // 0 left, 1 right (x + w - line width), 2 centre (x + (w -
+                // line width) / 2): 0x575305..0x5753d4, the same values as
+                // the FMV subtitles (0x5992ac).
+                float tx = e.align == 1 ? bx + bw - tw : e.align == 2 ? bx + (bw - tw) / 2 : bx;
                 g.font.Draw(cv, line, tx, ly, e.sx, hs, e.rgba);
                 ly += g.font.LinePitch() * e.sy;
             }
@@ -2198,8 +2219,14 @@ public:
             // The text object gets the box (x, y, width) through vtbl+0x20
             // (0x5761ca), so long lines wrap inside it, downwards.
             // y is the top of the capitals (measured: 351 for y 0.73 x 480).
-            y -= g.font.TopOffset() * r.sy;
-            float x0 = 0.1f * kWidth, w = 0.8f * kWidth;
+            // Drawn like the menu text (same text object): glyphs sampled as
+            // sprites, box in whole pixels (section 28). The vertical
+            // correction is -0.5 px here, not the menu's +0.5: measured on
+            // the making-of lines and the attract "DEMO" (both 1 px low with
+            // +0.5); the two y formulas differ (top offset x sy here, x the
+            // 480/512 height there).
+            y += -0.5f - g.font.TopOffset() * r.sy;
+            float x0 = float(int(0.1f * kWidth)), w = float(int(0.8f * kWidth));
             int align = (r.flags & 0x3000) == 0x1000 ? 1 : (r.flags & 0x3000) == 0x2000 ? 2 : 0;
             for (const std::wstring& line : Wrap(it->second, w, r.sx)) {
                 float tw = g.font.Width(line, r.sx);

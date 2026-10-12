@@ -79,7 +79,7 @@ std::vector<Texture> LoadMaterials(const std::vector<uint8_t>& d, size_t mdpc, s
             uint32_t entry = U32(d, pc + texRefs);
             uint32_t off = U32(d, pc + entry + 8), size = U32(d, pc + entry + 12);
             size_t p = pc + dataOff + off;
-            if (p + size <= d.size()) DecodeDds(&d[p], size, t);
+            if (p + size <= d.size() && DecodeDds(&d[p], size, t)) t.BuildMips();
         }
         t.additive = flags == 11;
         out.push_back(std::move(t));
@@ -243,48 +243,113 @@ bool DecodeDds(const uint8_t* d, size_t size, Texture& out)
                 if (px >= w || py >= h) continue;
                 int i = (bits >> (2 * k)) & 3;
                 uint32_t a = (!four && i == 3) ? 0 : alpha[k];
-                out.px[py * w + px] = (a << 24) | ((r[i] * a / 255) << 16) | ((g[i] * a / 255) << 8) |
-                                      (b[i] * a / 255);
+                out.px[py * w + px] = (a << 24) | (r[i] << 16) | (g[i] << 8) | b[i];
             }
         }
     return true;
 }
 
 // --------------------------------------------------------------- Canvas ----
+// D3DX box filter: each level averages 2x2 texels of the one above, colour
+// and alpha separately (straight colour).
+void Texture::BuildMips()
+{
+    mips.clear();
+    int lw = w, lh = h;
+    const std::vector<uint32_t>* src = &px;
+    while (lw > 1 || lh > 1) {
+        int nw = std::max(1, lw / 2), nh = std::max(1, lh / 2);
+        Level l{ nw, nh, std::vector<uint32_t>(size_t(nw) * nh) };
+        for (int y = 0; y < nh; ++y)
+            for (int x = 0; x < nw; ++x) {
+                uint32_t sum[4] = {};
+                for (int k = 0; k < 4; ++k) {
+                    int sx = std::min(lw - 1, 2 * x + (k & 1)), sy = std::min(lh - 1, 2 * y + (k >> 1));
+                    uint32_t p = (*src)[size_t(sy) * lw + sx];
+                    for (int c = 0; c < 4; ++c) sum[c] += p >> (8 * c) & 255;
+                }
+                uint32_t q = 0;
+                for (int c = 0; c < 4; ++c) q |= ((sum[c] + 2) / 4) << (8 * c);
+                l.px[size_t(y) * nw + x] = q;
+            }
+        mips.push_back(std::move(l));
+        src = &mips.back().px;
+        lw = nw;
+        lh = nh;
+    }
+}
+
 void Canvas::Draw(const Texture& t, float u0, float v0, float u1, float v1, float dx, float dy,
                   float dw, float dh, const float rgba[4], bool additive)
 {
     if (t.px.empty() || dw <= 0 || dh <= 0) return;
-    int x0 = std::max(0, int(std::floor(dx))), y0 = std::max(0, int(std::floor(dy)));
-    int x1 = std::min(w, int(std::ceil(dx + dw))), y1 = std::min(h, int(std::ceil(dy + dh)));
+    // Sample position inside a pixel (measured); a pixel is drawn when that
+    // point is in [d, d + size).
+    const float cx = 0.15f, cy = 0.25f;
+    int x0 = std::max(0, int(std::ceil(dx - cx))), y0 = std::max(0, int(std::ceil(dy - cy)));
+    int x1 = std::min(w, int(std::ceil(dx + dw - cx))), y1 = std::min(h, int(std::ceil(dy + dh - cy)));
     const float ta = std::clamp(rgba[3], 0.f, 1.f);
     const int mr = int(std::clamp(rgba[0], 0.f, 1.f) * ta * 256);
     const int mg = int(std::clamp(rgba[1], 0.f, 1.f) * ta * 256);
     const int mb = int(std::clamp(rgba[2], 0.f, 1.f) * ta * 256);
     const int ma = int(ta * 256);
+
+    // Mip level: log2 of the larger texels-per-pixel ratio, linear between
+    // the two nearest levels; magnified sprites use level 0.
+    int lvA = 0, lvB = 0;
+    int wB = 0;  // weight of level B, 0..256
+    if (!t.mips.empty()) {
+        float rho = std::max(std::fabs(u1 - u0) * t.w / dw, std::fabs(v1 - v0) * t.h / dh);
+        float lod = rho > 1.f ? std::log2(rho) : 0.f;
+        lod = std::min(lod, float(t.mips.size()));
+        lvA = int(lod);
+        lvB = std::min(lvA + 1, int(t.mips.size()));
+        wB = int((lod - lvA) * 256);
+    }
+    auto level = [&](int i, int& lw, int& lh) -> const std::vector<uint32_t>& {
+        if (i == 0) { lw = t.w; lh = t.h; return t.px; }
+        const Texture::Level& l = t.mips[size_t(i - 1)];
+        lw = l.w; lh = l.h;
+        return l.px;
+    };
+    // Bilinear sample of one level at (u, v), channels 0..255 (b, g, r, a),
+    // straight colour.
+    auto sample = [&](int lv, float u, float v, int out[4]) {
+        int lw, lh;
+        const std::vector<uint32_t>& p = level(lv, lw, lh);
+        float fx = u * lw - 0.5f, fy = v * lh - 0.5f;
+        int tx = int(std::floor(fx)), ty = int(std::floor(fy));
+        int wx = int((fx - tx) * 256), wy = int((fy - ty) * 256);
+        int tx0 = std::clamp(tx, 0, lw - 1), tx1 = std::clamp(tx + 1, 0, lw - 1);
+        int ty0 = std::clamp(ty, 0, lh - 1), ty1 = std::clamp(ty + 1, 0, lh - 1);
+        uint32_t q[4] = { p[size_t(ty0) * lw + tx0], p[size_t(ty0) * lw + tx1], p[size_t(ty1) * lw + tx0],
+                          p[size_t(ty1) * lw + tx1] };
+        int ch[4][4];
+        for (int n = 0; n < 4; ++n)
+            for (int k = 0; k < 4; ++k) ch[n][k] = int(q[n] >> (8 * k) & 255);
+        for (int k = 0; k < 4; ++k) {
+            int top = ch[0][k] * (256 - wx) + ch[1][k] * wx;
+            int bot = ch[2][k] * (256 - wx) + ch[3][k] * wx;
+            out[k] = (top * (256 - wy) + bot * wy) >> 16;
+        }
+    };
+
     for (int y = y0; y < y1; ++y) {
-        float v = v0 + (v1 - v0) * ((y + 0.5f - dy) / dh);
-        float fy = v * t.h - 0.5f;
-        int ty = int(std::floor(fy));
-        int wy = int((fy - ty) * 256);
-        int ty0 = std::clamp(ty, 0, t.h - 1), ty1 = std::clamp(ty + 1, 0, t.h - 1);
+        float v = v0 + (v1 - v0) * ((y + cy - dy) / dh);
         uint32_t* row = px + size_t(y) * w;
         for (int x = x0; x < x1; ++x) {
-            float u = u0 + (u1 - u0) * ((x + 0.5f - dx) / dw);
-            float fx = u * t.w - 0.5f;
-            int tx = int(std::floor(fx));
-            int wx = int((fx - tx) * 256);
-            int tx0 = std::clamp(tx, 0, t.w - 1), tx1 = std::clamp(tx + 1, 0, t.w - 1);
-            uint32_t s00 = t.px[size_t(ty0) * t.w + tx0], s01 = t.px[size_t(ty0) * t.w + tx1];
-            uint32_t s10 = t.px[size_t(ty1) * t.w + tx0], s11 = t.px[size_t(ty1) * t.w + tx1];
-            uint32_t s[4];
-            for (int c = 0; c < 4; ++c) {
-                int sh = c * 8;
-                int top = int(s00 >> sh & 255) * (256 - wx) + int(s01 >> sh & 255) * wx;
-                int bot = int(s10 >> sh & 255) * (256 - wx) + int(s11 >> sh & 255) * wx;
-                s[c] = uint32_t((top * (256 - wy) + bot * wy) >> 16);
+            float u = u0 + (u1 - u0) * ((x + cx - dx) / dw);
+            int s[4];
+            sample(lvA, u, v, s);
+            if (wB > 0) {
+                int sB[4];
+                sample(lvB, u, v, sB);
+                for (int k = 0; k < 4; ++k) s[k] = (s[k] * (256 - wB) + sB[k] * wB) >> 8;
             }
-            uint32_t sb = s[0] * mb >> 8, sg = s[1] * mg >> 8, sr = s[2] * mr >> 8, sa = s[3] * ma >> 8;
+            // Straight colour is premultiplied after filtering (SRCALPHA blend).
+            for (int k = 0; k < 3; ++k) s[k] = s[k] * s[3] / 255;
+            uint32_t sb = uint32_t(s[0]) * mb >> 8, sg = uint32_t(s[1]) * mg >> 8, sr = uint32_t(s[2]) * mr >> 8,
+                     sa = uint32_t(s[3]) * ma >> 8;
             uint32_t dpx = row[x];
             uint32_t db = dpx & 255, dg = dpx >> 8 & 255, dr = dpx >> 16 & 255;
             if (additive) {
@@ -326,21 +391,29 @@ bool Font::Load(const std::string& path)
         memcpy(&ch, &d[p], 2);
         memcpy(&a, &d[p + 2], 2);
         memcpy(&b, &d[p + 6], 2);
-        glyphs_[wchar_t(ch)] = { d[p + 4], d[p + 5], a & 63, (a >> 6) & 63, a >> 12, (b >> 5) & 255 };
+        // +6: bits 0..4 left bearing, 5..9 and 10..14 the y offset's two
+        // parts (a - b, 0x5754b1; b is 8 in every glyph and is the FBNK
+        // top offset subtracted by the callers).
+        glyphs_[wchar_t(ch)] = { d[p + 4], d[p + 5], a & 63, (a >> 6) & 63, a >> 12, (b >> 5) & 31, b & 31 };
     }
     if (p + 52 * 52 <= d.size()) kern_.assign(d.begin() + p, d.begin() + p + 52 * 52);
     return !pages_.empty();
 }
 
+// Kerning (0x575750): both characters are first reduced to a plain letter
+// (0x5757f0: accented Latin-1 letters to their base letter), then the table
+// gives table[previous][current] for A-Z / a-z; any other pair is 0.
 int Font::Kern(wchar_t a, wchar_t b) const
 {
+    static const char kBase[] = "AAAAAA.CEEEEIIIIDNOOOOO.OUUUUY..aaaaaa.ceeeeiiii.nooooo.ouuuuy.y";  // 0xC0..0xFF
     auto idx = [](wchar_t c) {
+        if (c >= 0xC0 && c <= 0xFF && kBase[c - 0xC0] != '.') c = wchar_t(kBase[c - 0xC0]);
         if (c >= L'A' && c <= L'Z') return int(c - L'A');
         if (c >= L'a' && c <= L'z') return int(c - L'a') + 26;
         return -1;
     };
     int i = idx(a), j = idx(b);
-    if (i < 0 || j < 0 || kern_.empty()) return 2;
+    if (i < 0 || j < 0 || kern_.empty()) return 0;
     return kern_[size_t(i) * 52 + j];
 }
 
@@ -352,7 +425,7 @@ float Font::Width(const std::wstring& s, float sx) const
         auto it = glyphs_.find(c);
         if (it == glyphs_.end()) { x += spaceWidth_; prev = 0; continue; }
         if (prev) x -= Kern(prev, c);
-        x += it->second.w;
+        x += it->second.w + it->second.bear;
         prev = c;
     }
     return x * sx;
@@ -371,9 +444,9 @@ void Font::Draw(Canvas& cv, const std::wstring& s, float x, float y, float sx, f
         if (g.page < int(pages_.size())) {
             const Texture& t = pages_[g.page];
             cv.Draw(t, float(g.x) / t.w, float(g.y) / t.h, float(g.x + g.w) / t.w, float(g.y + g.h) / t.h,
-                    pen, y + g.yoff * sy, g.w * sx, g.h * sy, rgba);
+                    pen + g.bear * sx, y + g.yoff * sy, g.w * sx, g.h * sy, rgba);
         }
-        pen += g.w * sx;
+        pen += (g.w + g.bear) * sx;
         prev = c;
     }
 }
@@ -402,6 +475,7 @@ bool MecFile::Load(const std::string& path)
         memcpy(&focus, h + 12, 4);
         sc.focus = int(focus);
         sc.overlay = h[16] != 0;
+        sc.clearsHistory = sizes[1] > 81 && h[81] != 0;
         sc.onEnter = FixedString(h + 17, 32);
         sc.onExit = FixedString(h + 49, 32);
         uint32_t groups = r.U32();
