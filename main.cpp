@@ -97,6 +97,36 @@ struct BinkApi
 };
 static BinkApi g_bink;
 
+// Video sound. The original's player (created by 0x599890) calls
+// BinkSetSoundSystem(BinkOpenDirectSound, sound system 0x8ac2b0 +0x75c):
+// Bink plays through the game's own DirectSound object, opened on the
+// chosen driver (0x5976b0). Here that object is made by ApplySound and
+// handed to Bink before every BinkOpen; "No Sound" opens the video with
+// no sound track. Bink keeps using the object it got while any video is
+// open (the menu background loops), so a replaced object is released only
+// once no video is open; released at once, the next BinkOpen hung.
+struct VideoSound
+{
+    IDirectSound8* ds = nullptr;  // nullptr: Bink opens the default device itself
+    bool mute = false;
+    int openVideos = 0;
+    std::vector<IDirectSound8*> retired;
+
+    void Retire()
+    {
+        if (ds) retired.push_back(ds);
+        ds = nullptr;
+        ReleaseRetired();
+    }
+    void ReleaseRetired()
+    {
+        if (openVideos > 0) return;
+        for (IDirectSound8* r : retired) r->Release();
+        retired.clear();
+    }
+};
+static VideoSound g_videoSound;
+
 // Movie player: mirrors Driv3r's Bink wrapper (open @ 0x599590, per-frame
 // update @ 0x599440).
 class Movie
@@ -109,15 +139,18 @@ public:
         Close();
         // Open once to count audio tracks, fall back to track 0 if the
         // language track is missing, then reopen with that track.
+        g_bink.SetSoundSystem(reinterpret_cast<void*>(g_bink.OpenDirectSound),
+                              uint32_t(reinterpret_cast<uintptr_t>(g_videoSound.ds)));
         HBINK probe = g_bink.Open(path.c_str(), 0);
         if (!probe) { Log("Movie: cannot open %s", path.c_str()); return false; }
         uint32_t tracks = *reinterpret_cast<uint32_t*>(static_cast<char*>(probe) + BINK_NUMTRACKS);
         uint32_t track = tracks > langTrack ? langTrack : 0;
         g_bink.Close(probe);
-        g_bink.SetSoundTrack(1, &track);
+        g_bink.SetSoundTrack(g_videoSound.mute ? 0 : 1, &track);  // 0 tracks: no sound
         h_ = g_bink.Open(path.c_str(), BINKSNDTRACK);
         if (!h_) h_ = g_bink.Open(path.c_str(), 0);
         if (!h_) return false;
+        ++g_videoSound.openVideos;
 
         const BinkHeader* hdr = static_cast<const BinkHeader*>(h_);
         w_ = hdr->Width;
@@ -127,14 +160,18 @@ public:
         done_ = false;
         first_ = true;
         path_ = path;
-        Log("Movie: %s %ux%u, %u frames, audio track %u/%u%s", path.c_str(), w_, hgt_,
-            hdr->Frames, track, tracks, loop ? " (loop)" : "");
+        Log("Movie: %s %ux%u, %u frames, audio track %u/%u%s%s", path.c_str(), w_, hgt_,
+            hdr->Frames, track, tracks, loop ? " (loop)" : "", g_videoSound.mute ? ", no sound" : "");
         return true;
     }
 
     void Close()
     {
-        if (h_) g_bink.Close(h_);
+        if (h_) {
+            g_bink.Close(h_);
+            --g_videoSound.openVideos;
+            g_videoSound.ReleaseRetired();
+        }
         h_ = nullptr;
         path_.clear();
     }
@@ -483,6 +520,8 @@ static DisplayMode DefaultMode(const std::vector<DisplayMode>& list)
 // GetCaps reports 16-bit primary and secondary buffers and mono secondary
 // buffers (flags & 0x908), and stores the device description as a wide name
 // of 64 characters; at most 8 devices.
+static std::vector<GUID> g_soundGuids;  // per driver (GUID_NULL: primary), for the video sound
+
 static BOOL CALLBACK OnSoundDevice(LPGUID guid, LPCSTR desc, LPCSTR, LPVOID ctx)
 {
     auto* list = static_cast<std::vector<std::wstring>*>(ctx);
@@ -500,6 +539,7 @@ static BOOL CALLBACK OnSoundDevice(LPGUID guid, LPCSTR desc, LPCSTR, LPVOID ctx)
     MultiByteToWideChar(CP_ACP, 0, desc, -1, name, 64);
     name[63] = 0;
     list->push_back(name);
+    g_soundGuids.push_back(guid ? *guid : GUID_NULL);
     Log("Sound: driver %u = %s", unsigned(list->size() - 1), desc);  // cf. "Found device: " (0x78d708)
     return list->size() < 8;
 }
@@ -923,6 +963,62 @@ static bool LoadGsdSample(int bank, int sample, GsdSample& out)
     return ok;
 }
 
+// ========================================================= sound output ====
+// Sound card settings in use (sound manager 0x8ac2ac, set by 0x594920 from
+// the settings commit 0x548655): driver index (+0x20), mixer rate (+0x24),
+// EAX (+0x28). When one of them changes the manager stops everything
+// (0x594a90), opens DirectSound again on that driver with the primary
+// buffer at the mixer rate (0x597d90) and reloads its banks (0x594ad0);
+// driver -1 ("No Sound") opens nothing. Here the sounds go through waveOut:
+// the driver is matched to a waveOut device by name (the primary driver is
+// the default device), and every sound is resampled to the mixer rate, as
+// a primary buffer at that rate would. EAX has no waveOut equivalent.
+struct AudioOut
+{
+    int driver = 0;  // sound driver index of the settings
+    UINT device = WAVE_MAPPER;
+    bool mute = false;
+    uint32_t rate = 44100;
+    int generation = 0;  // bumped on every change; players reopen their devices
+};
+static AudioOut g_audio;
+
+// Linear resampling of 16-bit PCM (interleaved channels).
+static std::vector<uint8_t> Resample16(const std::vector<uint8_t>& pcm, int channels, uint32_t from, uint32_t to)
+{
+    if (from == to || from == 0 || to == 0 || pcm.empty()) return pcm;
+    const int16_t* src = reinterpret_cast<const int16_t*>(pcm.data());
+    size_t n = pcm.size() / (2 * size_t(channels));
+    size_t m = size_t(double(n) * to / from);
+    std::vector<uint8_t> out(m * 2 * channels);
+    int16_t* dst = reinterpret_cast<int16_t*>(out.data());
+    for (size_t i = 0; i < m; ++i) {
+        double p = double(i) * from / to;
+        size_t a = size_t(p), b = std::min(a + 1, n - 1);
+        double t = p - double(a);
+        for (int c = 0; c < channels; ++c)
+            dst[i * channels + c] = int16_t(src[a * channels + c] * (1 - t) + src[b * channels + c] * t);
+    }
+    return out;
+}
+
+// waveOut device for a DirectSound driver name: the primary driver (index 0,
+// "Primary Sound Driver") is the default device; others by name (waveOut
+// names are cut to 31 characters).
+static UINT WaveDeviceFor(int index, const std::wstring& name)
+{
+    if (index <= 0) return WAVE_MAPPER;
+    UINT n = waveOutGetNumDevs();
+    for (UINT i = 0; i < n; ++i) {
+        WAVEOUTCAPSW caps = {};
+        if (waveOutGetDevCapsW(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
+        std::wstring p = caps.szPname;
+        if (!p.empty() && name.compare(0, p.size(), p) == 0) return i;
+    }
+    Log("Sound: no waveOut device named like driver %d, using the default", index);
+    return WAVE_MAPPER;
+}
+
 // ========================================================== menu sounds ====
 // Menu sound object (global 0x8ac3b8, vtbl 0x781f60, created by 0x46a6c0).
 // Load (0x46a4f0 / 0x46a580): SOUNDS\MENU.DAT = "01SM", u8 bank, u8 sample[3].
@@ -949,6 +1045,7 @@ public:
     {
         for (Voice& v : voices_) v.Close();  // stop before freeing the samples
         for (auto& p : pcm_) p.clear();
+        gen_ = -1;  // resample again
 
         uint8_t dat[8] = {};
         FILE* f = fopen("SOUNDS\\MENU.DAT", "rb");
@@ -979,12 +1076,17 @@ public:
     // original sets sound-manager categories 0/1 and 3).
     void Play(int id)
     {
-        if (id < 0 || id >= 4 || pcm_[id].empty()) return;
+        if (id < 0 || id >= 4 || pcm_[id].empty() || g_audio.mute) return;
+        if (gen_ != g_audio.generation) {  // sound card changed: reopen, resample
+            for (Voice& v : voices_) v.Close();
+            for (int i = 0; i < 4; ++i) out_[i] = Resample16(pcm_[i], 1, rate_[i], g_audio.rate);
+            gen_ = g_audio.generation;
+        }
         Voice* v = nullptr;
         for (Voice& x : voices_)
             if (!x.Busy()) { v = &x; break; }
         if (!v) { Log("Sound: all %d voices busy, menu id %d dropped", kVoices, id); return; }
-        v->Start(pcm_[id], rate_[id], g.EffectsGain());
+        v->Start(out_[id], g_audio.rate, g.EffectsGain());
         if (int n = Busy(); n > 1) Log("Sound: menu id %d on voice %d, %d playing", id, int(v - voices_), n);
     }
     int Busy() const  // voices playing (for the log / tests)
@@ -1015,7 +1117,7 @@ private:
                 wf.wBitsPerSample = 16;
                 wf.nBlockAlign = 2;
                 wf.nAvgBytesPerSec = r * 2;
-                if (waveOutOpen(&out, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
+                if (waveOutOpen(&out, g_audio.device, &wf, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
                     out = nullptr;
                     Log("Sound: waveOutOpen failed");
                     return;
@@ -1044,6 +1146,8 @@ private:
 
     std::vector<uint8_t> pcm_[4];  // original samples, at full volume
     uint32_t rate_[4] = {};
+    std::vector<uint8_t> out_[4];  // the same at the mixer rate
+    int gen_ = -1;                 // g_audio.generation they were made for
     Voice voices_[kVoices];
 };
 static MenuSounds g_sounds;
@@ -1086,23 +1190,29 @@ public:
 
     void Play()  // starts the layers that are not already playing
     {
+        if (g_audio.mute) return;  // "No Sound"
         for (Layer& l : layers_) {
             if (l.out || l.smp.pcm.empty()) continue;
+            // The layer at the mixer rate (sound card setting).
+            if (l.gen != g_audio.generation) {
+                l.buf = Resample16(l.smp.pcm, l.smp.channels, l.smp.rate, g_audio.rate);
+                l.gen = g_audio.generation;
+            }
             WAVEFORMATEX wf = {};
             wf.wFormatTag = WAVE_FORMAT_PCM;
             wf.nChannels = WORD(l.smp.channels);
-            wf.nSamplesPerSec = l.smp.rate;
+            wf.nSamplesPerSec = g_audio.rate;
             wf.wBitsPerSample = 16;
             wf.nBlockAlign = WORD(wf.nChannels * 2);
             wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
-            if (waveOutOpen(&l.out, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
+            if (waveOutOpen(&l.out, g_audio.device, &wf, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
                 Log("Music: waveOutOpen failed");
                 l.out = nullptr;
                 continue;
             }
             l.hdr = WAVEHDR();
-            l.hdr.lpData = reinterpret_cast<LPSTR>(l.smp.pcm.data());
-            l.hdr.dwBufferLength = DWORD(l.smp.pcm.size() / wf.nBlockAlign * wf.nBlockAlign);
+            l.hdr.lpData = reinterpret_cast<LPSTR>(l.buf.data());
+            l.hdr.dwBufferLength = DWORD(l.buf.size() / wf.nBlockAlign * wf.nBlockAlign);
             waveOutPrepareHeader(l.out, &l.hdr, sizeof(l.hdr));
             if (l.smp.loop) {
                 l.hdr.dwFlags |= WHDR_BEGINLOOP | WHDR_ENDLOOP;
@@ -1137,12 +1247,173 @@ private:
     struct Layer
     {
         GsdSample smp;
+        std::vector<uint8_t> buf;  // smp at the mixer rate
+        int gen = -1;              // g_audio.generation buf was made for
         HWAVEOUT out = nullptr;
         WAVEHDR hdr = {};
     };
     Layer layers_[2];
+
+public:
+    bool Playing() const { return layers_[0].out || layers_[1].out; }
+    bool Loaded() const { return !layers_[0].smp.pcm.empty() || !layers_[1].smp.pcm.empty(); }
 };
 static FrontEndMusic g_music;
+
+// Sound card settings -> output (0x594920): only when driver, rate or mute
+// changed. Playing music restarts on the new device / rate, as the
+// original reloads its banks; the menu sounds reopen on their next play.
+// DirectSound object for the videos, as the sound system makes it in
+// 0x5976b0: created on the driver's GUID, cooperative level 3
+// (DSSCL_EXCLUSIVE, the same as priority since DirectX 8) and a primary
+// buffer of 16-bit stereo at the mixer rate. driver -1: none, videos muted.
+static void OpenVideoSound(int driver, uint32_t rate)
+{
+    g_videoSound.Retire();
+    g_videoSound.mute = driver < 0;
+    if (driver < 0 || !g.hwnd) return;
+    typedef HRESULT(WINAPI * CreateFn)(LPCGUID, LPDIRECTSOUND8*, LPUNKNOWN);
+    HMODULE dll = GetModuleHandleA("dsound.dll");
+    auto create = dll ? reinterpret_cast<CreateFn>(GetProcAddress(dll, "DirectSoundCreate8")) : nullptr;
+    const GUID* guid = size_t(driver) < g_soundGuids.size() && g_soundGuids[driver] != GUID_NULL ? &g_soundGuids[driver] : nullptr;
+    IDirectSound8* ds = nullptr;
+    if (!create || FAILED(create(guid, &ds, nullptr))) {
+        Log("Sound: video DirectSound on driver %d failed, default device", driver);
+        return;
+    }
+    if (FAILED(ds->SetCooperativeLevel(g.hwnd, DSSCL_EXCLUSIVE))) {
+        Log("Sound: video SetCooperativeLevel failed, default device");
+        ds->Release();
+        return;
+    }
+    DSBUFFERDESC desc = {};
+    desc.dwSize = sizeof(desc);
+    desc.dwFlags = DSBCAPS_PRIMARYBUFFER;
+    IDirectSoundBuffer* primary = nullptr;
+    if (SUCCEEDED(ds->CreateSoundBuffer(&desc, &primary, nullptr))) {
+        WAVEFORMATEX wf = {};
+        wf.wFormatTag = WAVE_FORMAT_PCM;
+        wf.nChannels = 2;
+        wf.nSamplesPerSec = rate;
+        wf.wBitsPerSample = 16;
+        wf.nBlockAlign = 4;
+        wf.nAvgBytesPerSec = rate * 4;
+        primary->SetFormat(&wf);
+        primary->Release();
+    }
+    g_videoSound.ds = ds;
+}
+
+static void ApplySound()
+{
+    bool mute = g.soundDriver < 0;
+    UINT dev = mute ? WAVE_MAPPER : WaveDeviceFor(g.soundDriver, g.soundDriverName);
+    uint32_t rate = g.mixRate == 11025 || g.mixRate == 22050 || g.mixRate == 48000 ? uint32_t(g.mixRate) : 44100u;
+    if (g.soundDriver == g_audio.driver && dev == g_audio.device && mute == g_audio.mute && rate == g_audio.rate &&
+        g_audio.generation > 0)
+        return;
+    // Playing music moves to the new output; music silenced by "No Sound"
+    // starts again when a driver is chosen (it is loaded only in the front end).
+    bool music = g_music.Playing() || (g_audio.mute && !mute && g_music.Loaded());
+    g_music.Stop();
+    g_audio.device = dev;
+    g_audio.mute = mute;
+    g_audio.rate = rate;
+    g_audio.driver = g.soundDriver;
+    ++g_audio.generation;
+    OpenVideoSound(mute ? -1 : g.soundDriver, rate);
+    Log("Sound: driver %d (%s), mixer %u Hz%s", g.soundDriver, dev == WAVE_MAPPER ? "default device" : "by name",
+        rate, mute ? ", no sound" : "");
+    if (music) g_music.Play();
+}
+
+// ============================================================== display ====
+// Display settings -> screen (settings commit 0x5483a9 / 0x5483cd): the
+// renderer gets the mode (vtbl+0x88: width, height, mode index) and the
+// gamma (vtbl+0x70). The original runs fullscreen, so the monitor switches
+// to the chosen mode; the 640x480 frame is stretched to it here. Gamma
+// (0x5c8a40): device gamma ramp, the same for R, G and B,
+// ramp[i] = 65535 x ((i + 1) / 256) ^ (1 / gamma), clamped.
+// Code switch (not a game option): true keeps a window of the chosen size,
+// without a mode change and without gamma.
+static const bool kWindowed = false;
+
+struct DisplayState
+{
+    bool applied = false, active = true;
+    uint32_t w = 0, h = 0, hz = 0, bpp = 0;
+    float gamma = 0;
+    WORD desktopRamp[3][256];
+    bool haveDesktopRamp = false;
+};
+static DisplayState g_display;
+
+static void SetGamma(float gamma)
+{
+    HDC dc = GetDC(nullptr);
+    if (!g_display.haveDesktopRamp)
+        g_display.haveDesktopRamp = GetDeviceGammaRamp(dc, g_display.desktopRamp) != FALSE;
+    WORD ramp[3][256];
+    for (int i = 0; i < 256; ++i) {
+        double v = 65535.0 * std::pow((i + 1) / 256.0, 1.0 / std::max(0.01f, gamma));
+        ramp[0][i] = ramp[1][i] = ramp[2][i] = WORD(std::min(65535.0, std::max(0.0, v)));
+    }
+    if (!SetDeviceGammaRamp(dc, ramp)) Log("Display: SetDeviceGammaRamp failed (gamma %.2f)", gamma);
+    ReleaseDC(nullptr, dc);
+}
+
+// Desktop mode and gamma back (exit, or switching away from the program).
+static void RestoreDisplay()
+{
+    if (kWindowed || !g_display.applied) return;
+    ChangeDisplaySettingsExA(nullptr, nullptr, nullptr, 0, nullptr);
+    if (g_display.haveDesktopRamp) {
+        HDC dc = GetDC(nullptr);
+        SetDeviceGammaRamp(dc, g_display.desktopRamp);
+        ReleaseDC(nullptr, dc);
+    }
+}
+
+// Mode and gamma of the settings; force = set them again (after Alt-Tab).
+static void ApplyDisplay(bool force = false)
+{
+    if (!g.hwnd || g.res.w == 0 || g.res.h == 0) return;
+    uint32_t bpp = g.res.fmt == 23 || g.res.fmt == 24 || g.res.fmt == 25 ? 16 : 32;  // R5G6B5, X1R5G5B5, A1R5G5B5
+    bool same = g_display.applied && g_display.w == g.res.w && g_display.h == g.res.h && g_display.hz == g.res.hz &&
+                g_display.bpp == bpp && g_display.gamma == g.gamma;
+    if (same && !force) return;
+    if (kWindowed) {
+        RECT wa;
+        SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
+        int w = std::min<int>(g.res.w, wa.right - wa.left), h = std::min<int>(g.res.h, wa.bottom - wa.top);
+        SetWindowPos(g.hwnd, nullptr, wa.left + (wa.right - wa.left - w) / 2, wa.top + (wa.bottom - wa.top - h) / 2,
+                     w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    } else {
+        DEVMODEA dm = {};
+        dm.dmSize = sizeof(dm);
+        dm.dmPelsWidth = g.res.w;
+        dm.dmPelsHeight = g.res.h;
+        dm.dmBitsPerPel = bpp;
+        dm.dmDisplayFrequency = g.res.hz;
+        dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
+        LONG r = ChangeDisplaySettingsExA(nullptr, &dm, nullptr, CDS_FULLSCREEN, nullptr);
+        if (r != DISP_CHANGE_SUCCESSFUL) {  // try without the refresh rate
+            dm.dmFields &= ~DM_DISPLAYFREQUENCY;
+            r = ChangeDisplaySettingsExA(nullptr, &dm, nullptr, CDS_FULLSCREEN, nullptr);
+        }
+        if (r != DISP_CHANGE_SUCCESSFUL) Log("Display: mode %ux%u %uHz %ubit failed (%ld)", g.res.w, g.res.h, g.res.hz, bpp, r);
+        SetWindowPos(g.hwnd, HWND_TOP, 0, 0, int(g.res.w), int(g.res.h), SWP_SHOWWINDOW);
+        SetGamma(g.gamma);
+    }
+    g_display.applied = true;
+    g_display.w = g.res.w;
+    g_display.h = g.res.h;
+    g_display.hz = g.res.hz;
+    g_display.bpp = bpp;
+    g_display.gamma = g.gamma;
+    Log("Display: %ux%u %uHz %ubit, gamma %.2f%s", g.res.w, g.res.h, g.res.hz, bpp, g.gamma,
+        kWindowed ? " (window)" : "");
+}
 
 // ============================================================ profile ======
 // Settings are saved per player in Saves\D3P_<name>\ProfileData: a raw dump
@@ -1328,6 +1599,10 @@ static void ApplyProfile()
     if (text >= 0) g.textSetting = text;
     g.SetAudioLanguage(g.audioSetting);
     g.SetTextLanguage(g.textSetting);
+    // 0x548840 ends in the commit 0x548300(this, 1), which applies the
+    // display and the sound card settings.
+    ApplyDisplay();
+    ApplySound();
 }
 
 // The live settings, kept in g, written into the block as they are. The
@@ -1379,9 +1654,13 @@ static void SaveProfile(bool toFile = true)
     }
     g.soundDriverName = g.DriverName(g.soundDriver);
     StoreLive();
-    // 0x548300 sets the audio (vtbl+0x64) and text (vtbl+0x54) language in use.
+    // 0x548300 sets the audio (vtbl+0x64) and text (vtbl+0x54) language in
+    // use, the display mode and gamma (0x5483b9, 0x5483ce) and the sound
+    // card (0x54866e).
     g.SetAudioLanguage(g.audioSetting);
     g.SetTextLanguage(g.textSetting);
+    ApplyDisplay();
+    ApplySound();
     if (!toFile) return;
     if (!g_profile.HasFile()) { Log("Settings: no profile in Saves\\, not written"); return; }
     bool ok = g_profile.Save();
@@ -3075,11 +3354,18 @@ private:
                                      "stat_dg survival", "stat_dg check", "stat_dg gate" };
         for (int i = 0; i < 6; ++i)
             if (s == kDg[i]) return dg_ == i ? 0 : 1;
-        for (int i = 0; i < kLanguageCount; ++i) {
-            std::string l = std::string("stat_") + kLanguages[i].stat;
-            // Stat_<Language>Text / Audio (0x554374.., 0x55416e..): +0x2c / +0x28.
-            if (s == l + "text") return g.textSetting == i ? 0 : 1;
-            if (s == l + "audio") return g.audioSetting == i ? 0 : 1;
+        // Stat_<Language>Text / Audio (0x554374.., 0x55416e..): row 0 when
+        // the text (+0x2c) / audio (+0x28) setting is that language id, else
+        // row 1. The exe has all nine; only the five European ones can be
+        // chosen with this game's Locale folders.
+        static const struct { const char* name; uint32_t id; } kLangStat[] = {
+            { "english", 0 }, { "french", 1 }, { "german", 2 }, { "spanish", 3 }, { "italian", 4 },
+            { "japanese", 5 }, { "chinese", 6 }, { "korean", 8 }, { "portuguese", 9 },
+        };
+        for (const auto& l : kLangStat) {
+            std::string n = std::string("stat_") + l.name;
+            if (s == n + "text") return kLanguages[g.textSetting].id == l.id ? 0 : 1;
+            if (s == n + "audio") return kLanguages[g.audioSetting].id == l.id ? 0 : 1;
         }
         // Progress (0x553680..0x553e4b): a locked item shows row 2 ("Locked"
         // or a dimmed copy), an unlocked one keeps its state.
@@ -3471,7 +3757,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CLOSE:
         g.Quit();
         return 0;
+    // Fullscreen: switching away gives the desktop its mode and gamma back
+    // and minimises the window; coming back sets them again.
+    case WM_ACTIVATEAPP:
+        if (!kWindowed && g_display.applied) {
+            if (!wp && g_display.active) {
+                g_display.active = false;
+                RestoreDisplay();
+                ShowWindow(hwnd, SW_MINIMIZE);
+            } else if (wp && !g_display.active) {
+                g_display.active = true;
+                ShowWindow(hwnd, SW_RESTORE);
+                ApplyDisplay(true);
+            }
+        }
+        break;
     case WM_DESTROY:
+        RestoreDisplay();
         g.running = false;
         g.hwnd = nullptr;
         PostQuitMessage(0);
@@ -3537,7 +3839,15 @@ static void Present()
     if (g.cur) g.cur->Render(g.backDC, g.canvas);
     GdiFlush();
     HDC dc = GetDC(g.hwnd);
-    BitBlt(dc, 0, 0, kWidth, kHeight, g.backDC, 0, 0, SRCCOPY);
+    RECT rc;
+    GetClientRect(g.hwnd, &rc);
+    if (rc.right == kWidth && rc.bottom == kHeight) {
+        BitBlt(dc, 0, 0, kWidth, kHeight, g.backDC, 0, 0, SRCCOPY);
+    } else {  // the display setting's resolution: the frame is stretched to it
+        SetStretchBltMode(dc, HALFTONE);
+        SetBrushOrgEx(dc, 0, 0, nullptr);
+        StretchBlt(dc, 0, 0, rc.right, rc.bottom, g.backDC, 0, 0, kWidth, kHeight, SRCCOPY);
+    }
     ReleaseDC(g.hwnd, dc);
 }
 
@@ -3579,8 +3889,17 @@ static std::string ReadTerritory()
     return t;
 }
 
+// A crash would leave the monitor in the menu's mode: give the desktop its
+// mode and gamma back first. (A process killed from outside cannot do this.)
+static LONG WINAPI OnCrash(EXCEPTION_POINTERS*)
+{
+    RestoreDisplay();
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
 {
+    SetUnhandledExceptionFilter(OnCrash);
     char logPath[MAX_PATH];
     GetModuleFileNameA(nullptr, logPath, MAX_PATH);
     strcpy(strrchr(logPath, '\\') + 1, "Driv3rMenu.log");
@@ -3686,6 +4005,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
 
     if (g.cur) g.cur->Leave();
     if (g.hwnd) DestroyWindow(g.hwnd);
+    RestoreDisplay();
     UnregisterClassA("HamsterMainWnd", inst);
     DeleteDC(g.backDC);
     DeleteObject(g.backBmp);
