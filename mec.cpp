@@ -72,7 +72,6 @@ std::vector<Texture> LoadMaterials(const std::vector<uint8_t>& d, size_t mdpc, s
         Texture t;
         uint32_t subRefs = U32(d, pc + matOff + m * 0x18);
         uint32_t substance = U32(d, pc + subRefs);
-        uint32_t flags = U32(d, pc + substance);
         uint32_t texRefs = U32(d, pc + substance + 0x10);
         uint32_t texCount = U32(d, pc + substance + 0x14);
         if (texCount) {
@@ -81,7 +80,9 @@ std::vector<Texture> LoadMaterials(const std::vector<uint8_t>& d, size_t mdpc, s
             size_t p = pc + dataOff + off;
             if (p + size <= d.size() && DecodeDds(&d[p], size, t)) t.BuildMips();
         }
-        t.additive = flags == 11;
+        // Substance flags 11 (front.MEC 6 and 7, the start point dots) were
+        // drawn additively here once; the game shows them alpha-blended
+        // (solid grey and gold dots on the map), like the other materials.
         out.push_back(std::move(t));
     }
     return out;
