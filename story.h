@@ -46,8 +46,8 @@ public:
     // (path, 1, 2 s before Skip works, stop time or -1) and the screen
     // manager to 0xD1. The program calls VideoDone() when it ends.
     virtual void PlayVideo(const char* path, float stopSeconds) = 0;
-    // Phase 4 (0x557ce3): 0x4d92e0(0), the player's context back to 0 (the
-    // front end's; a replay runs in context 2).
+    // Phase 4 (0x557ce3): 0x4d92e0(0), the play context back to 0 (playing;
+    // a replay runs in 1 or 2).
     virtual void MissionFinished() = 0;
     virtual void GotoSequencer() = 0;  // manager vtbl+0x2c(0xB3)
     virtual void GotoFrontEnd() = 0;   // manager vtbl+0x2c(0xAD)

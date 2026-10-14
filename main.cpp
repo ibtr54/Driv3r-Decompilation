@@ -739,6 +739,26 @@ struct App
     // no progress and cheat codes unlock nothing.
     bool replayRunning = false;
 
+    // The play context (0x4d92e0: table 0x586790, 0xffff until first set).
+    // 0 = playing (front-end Enter, sequencer phase 4, message "restart"),
+    // 1 = message "replay", 2 = message "fd" or a replay started from the
+    // menu (0x4d929b). A change runs the callbacks registered for the old
+    // and the new value (0x571310 / 0x5712b0, registry 0x5867c0); they only
+    // choose which class the object registry builds for object 0xBC when
+    // state 0xB8 starts the level (0x55051b): 0 the driving class (vtbl
+    // 0x78a2e0, creator 0x550430), 1 and 2 the replay class (vtbl 0x789df0,
+    // creator 0x54d240). Those set a second context (0x54d1e0) to 1 / 2,
+    // which picks the class of object 0x8A: it records (0x8ac440 vtbl+4) or
+    // plays back (vtbl+8) the replay.
+    int playContext = 0xffff;
+
+    void SetPlayContext(int n)
+    {
+        if (n == playContext) return;
+        Log("Play context %d -> %d (%s)", playContext, n, n == 0 ? "play" : n == 1 ? "replay" : "film director");
+        playContext = n;
+    }
+
     void Goto(int id)
     {
         Log("State -> 0x%02X", id);
@@ -1640,6 +1660,24 @@ static const SettingFlag kSettingFlags[] = {
     { "antialias", 0xc95 },
 };
 
+// Sound driver check of the commit 0x548300 (0x54851e), on accept and when a
+// profile is applied: no drivers -> -1; an index (also -1, name "-") whose
+// name differs from the saved name +0xcc is replaced by the driver with that
+// name, else entry 0; the name is then taken from the list. So a profile
+// with -1 but a real driver's name plays on that driver.
+static void CheckSoundDriver()
+{
+    int n = int(g.soundDrivers.size());
+    if (n == 0) {
+        g.soundDriver = -1;
+    } else if (g.soundDriver >= n || g.DriverName(g.soundDriver) != g.soundDriverName) {
+        g.soundDriver = 0;
+        for (int i = 1; i < n; ++i)
+            if (g.soundDrivers[i] == g.soundDriverName) { g.soundDriver = i; break; }
+    }
+    g.soundDriverName = g.DriverName(g.soundDriver);
+}
+
 // Saved block -> live settings (startup, and 0x548840 on settings_restore).
 static void ApplyProfile()
 {
@@ -1672,8 +1710,9 @@ static void ApplyProfile()
     if (text >= 0) g.textSetting = text;
     g.SetAudioLanguage(g.audioSetting);
     g.SetTextLanguage(g.textSetting);
-    // 0x548840 ends in the commit 0x548300(this, 1), which applies the
-    // display and the sound card settings.
+    // 0x548840 ends in the commit 0x548300(this, 1), which checks the sound
+    // driver and applies the display and the sound card settings.
+    CheckSoundDriver();
     ApplyDisplay();
     ApplySound();
 }
@@ -1714,18 +1753,7 @@ static void SaveProfile(bool toFile = true)
 {
     // A resolution missing from the mode list becomes the default (0x548385).
     if (!g.modes.empty() && FindMode(g.modes, g.res) < 0) g.res = DefaultMode(g.modes);
-    // Sound driver check on accept (0x54851e): no drivers -> -1; a driver
-    // whose name no longer matches is looked up by name (else entry 0); the
-    // name is then taken from the list.
-    int n = int(g.soundDrivers.size());
-    if (n == 0) {
-        g.soundDriver = -1;
-    } else if (g.soundDriver >= n || g.DriverName(g.soundDriver) != g.soundDriverName) {
-        g.soundDriver = 0;
-        for (int i = 1; i < n; ++i)
-            if (g.soundDrivers[i] == g.soundDriverName) { g.soundDriver = i; break; }
-    }
-    g.soundDriverName = g.DriverName(g.soundDriver);
+    CheckSoundDriver();
     StoreLive();
     // 0x548300 sets the audio (vtbl+0x64) and text (vtbl+0x54) language in
     // use, the display mode and gamma (0x5483b9, 0x5483ce) and the sound
@@ -1745,8 +1773,12 @@ static void SaveProfile(bool toFile = true)
 // the FMV subtitles and by MEC texts wider than their element. The original's
 // code was not traced; the making-of subtitle line 0 and the MUMAIN popup
 // "ASOffQ" broke at the same words as the original (compared on screen).
+// A text that fits on one line is kept as it is: the original centres
+// "Miscellaneous " (front.TXT 183) with its trailing space (2.6 px further
+// left than without it, measured on the key list).
 static std::vector<std::wstring> WrapText(const std::wstring& s, float width, float sx)
 {
+    if (s.find(L'\n') == std::wstring::npos && g.font.Width(s, sx) <= width) return { s };
     std::vector<std::wstring> lines;
     std::wstring cur, word;
     auto flushWord = [&] {
@@ -2974,7 +3006,7 @@ public:
     }
     void StartGameplay(const uint8_t*, size_t) override { g.Goto(ST_MISSION); }
     void PlayVideo(const char* path, float stopSeconds) override;
-    void MissionFinished() override {}
+    void MissionFinished() override { g.SetPlayContext(0); }
     void GotoSequencer() override { g.Goto(ST_STORY); }
     void GotoFrontEnd() override { g.Goto(ST_FRONTEND); }
     void Log(const char* text) override { ::Log("%s", text); }
@@ -2998,7 +3030,7 @@ public:
 static StoryScreen g_storyScreen;
 
 // State 0xBB (creator 0x54db30, vtbl 0x789ef4), entered when a level ends.
-// Update 0x54dab0: in context 0 (0x4d92e0; a replay runs in context 2),
+// Update 0x54dab0: in play context 0 (0x4d92e0; a replay runs in 1 or 2),
 // after "complete" (phase 4) and when the level has a next part (0xCC
 // vtbl+0x20), state 0xCC; otherwise 0xCD (end screen, not implemented: here
 // straight back to the sequencer). 0xCC Enter 0x5573c0 -> 0x557a60: game
@@ -3010,7 +3042,7 @@ static StoryScreen g_storyScreen;
 static void EndOfPart()
 {
     int level = g_mission.mission;
-    if (!g.replayRunning && g_story.Phase() == StorySequencer::FINISHED && StoryHasNextPart(level)) {
+    if (g.playContext == 0 && g_story.Phase() == StorySequencer::FINISHED && StoryHasNextPart(level)) {
         bool endState = false;
         int next = StoryNextPart(level, &endState);
         Log("State 0xCC: level 0x%02x -> next part 0x%02x", level, next);
@@ -3159,6 +3191,7 @@ public:
         };
         LoadControlsText();
         menu_.Reset(0);  // "Main"
+        g.SetPlayContext(0);      // 0x55251c
         g.replayRunning = false;  // 0x55252c (then the commit 0x548300, not repeated here)
         g_music.Load();  // SOUNDS\FEMUSIC.DAT (FUN_00552480), started at 0x551ca0
         g_music.Play();
@@ -3979,7 +4012,7 @@ private:
     // vtbl+0x78 = 0x4642e0: level 0x4d..0x54) the ride settings follow from
     // the header: weather +0x38 (vtbl+0x18), time +0x3a (+0x14), vehicle
     // +0x3c (+0x10), start point +0x40 (+0xc), cops +0x39 != 0 (+0x1c).
-    // Then 0x4d92e0(2) (not traced).
+    // Then 0x4d92e0(2): the level runs as a replay (playContext).
     void StartReplay(const std::vector<uint8_t>& d)
     {
         g.replayRunning = true;
@@ -3995,6 +4028,7 @@ private:
         if (level >= 0x4d && level <= 0x54)
             Log("Replay: Take A Ride weather %d, time %d, vehicle %d, start point %d, cops %d",
                 d[0x38], time, vehicle, start, d[0x39] != 0 ? 1 : 0);
+        g.SetPlayContext(2);
     }
 
     MecMenu menu_;
@@ -4340,8 +4374,13 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
     g_mission.onMessage = [](const char* msg) {
         g_story.OnMessage(msg);
         // "restart" only marks gameplay as running again (phase 3); the
-        // level restarts inside gameplay, so the stand-in stays.
-        if (_stricmp(msg, "restart") == 0) return;
+        // level restarts inside gameplay, so the stand-in stays. Its own
+        // handler (0x54d8e0) restarts the level from state 0xB6 in context
+        // 0 (0x54d890 -> 0x4d92e0).
+        if (_stricmp(msg, "restart") == 0) {
+            g.SetPlayContext(0);
+            return;
+        }
         EndOfPart();
     };
 
