@@ -799,7 +799,17 @@ static int StepLanguage(int index, bool next)
     return index;
 }
 
-static bool IsSkipKey(WPARAM vk) { return vk == VK_RETURN || vk == VK_ESCAPE || vk == VK_SPACE; }
+// Skip Sequence (key-map control 0x21, scheme 0x162 of the movie player
+// 0x558260) reads only the record's first key (DIK_*, Space by default);
+// Enter and Escape do not skip (checked on the game, also with a profile
+// whose first key is Left Shift: Space, kept in the unused second half of
+// the record, did not skip, Left Shift did).
+static bool IsSkipKey(int dik)
+{
+    for (const KeyRecord& r : g.keymap)
+        if (r.id == 0x21) return r.bind[0].key == dik;
+    return false;
+}
 
 // ============================================================ joystick =====
 // DirectInput game controllers (input object 0x8ac2b8, joystick part at
@@ -1437,6 +1447,9 @@ static void RestoreDisplay()
 // Mode and gamma of the settings; force = set them again (after Alt-Tab).
 static void ApplyDisplay(bool force = false)
 {
+    // Texture filter (0x548451: renderer vtbl+0x6c -> 0x57f280 -> 0x5c9710).
+    if (g.canvas.filter != g.filter) Log("Display: texture filter %d", g.filter);
+    g.canvas.filter = g.filter;
     if (!g.hwnd || g.res.w == 0 || g.res.h == 0) return;
     uint32_t bpp = g.res.fmt == 23 || g.res.fmt == 24 || g.res.fmt == 25 ? 16 : 32;  // R5G6B5, X1R5G5B5, A1R5G5B5
     bool same = g_display.applied && g_display.w == g.res.w && g_display.h == g.res.h && g_display.hz == g.res.hz &&
@@ -2232,7 +2245,7 @@ public:
 
 private:
     static const int kExit = 99;
-    static const DWORD kCheckingMs = 333;  // 40 updates (~120 per second, as the attract counter)
+    static const DWORD kCheckingMs = 333;  // 40 updates (120 per second, fixed: 0x52b351)
     static const DWORD kWorkMs = 1000;     // 120 updates: shortest time "Saving..." etc. stays up
     static const size_t kReplaySize = 0xc800;  // Replays Start 0x543e91
 
@@ -2661,9 +2674,9 @@ class IntroFmvScreen : public Screen
 public:
     void SetIndex(int i) { index_ = i; }                    // vtbl+0x20 (0x5507f0)
     void SetFile(const std::string& f) { custom_ = f; }     // vtbl+0x24 (0x556380)
-    // The attract video (0x551dc0) comes back to the front end and could not
-    // be skipped with a key in the original (observed, see Update below).
-    void SetReturn(int state, bool skippable) { returnTo_ = state; skippable_ = skippable; }
+    // Started from the front end (attract 0x551dc0, extras 0x5561f0): the
+    // video comes back to the front end, the state it left.
+    void SetReturn(int state) { returnTo_ = state; }
     // Story videos (0x557c74): the player 0xD1 gets (path, 1, 2, stop time).
     // SetMovie 0x5582d0 keeps the third argument as updates before Skip
     // Sequence is read (x 120, +0x5c, counted down by 0x558260); the movie
@@ -2724,9 +2737,9 @@ public:
     }
     // Skip (vtbl+0x10 = 0x5514b0) only moves a playing video (state 2) to the
     // fade; a key during the fade does nothing.
-    void OnKey(WPARAM vk) override
+    void OnKeyPress(int dik) override
     {
-        if (CanSkip() && IsSkipKey(vk)) StartFade();
+        if (CanSkip() && IsSkipKey(dik)) StartFade();
     }
     // The player (state 0xD1, 0x558260) has no GUI; the joystick skips only
     // when Skip Sequence has a joystick alternative.
@@ -2739,7 +2752,7 @@ public:
     }
 
 private:
-    bool CanSkip() const { return skippable_ && !fading_ && GetTickCount() - started_ >= skipDelay_; }
+    bool CanSkip() const { return !fading_ && GetTickCount() - started_ >= skipDelay_; }
     void StartFade()
     {
         fading_ = true;
@@ -2748,14 +2761,13 @@ private:
         Log("Movie: fade out at frame %u", movie_.Frame());
     }
 
-    // At boot the original returns to the sequencer. After the attract video
-    // it returned to the main menu (observed; the static path through manager
-    // vtbl+0x28, whose "home" is the first state created, was not resolved).
+    // Manager vtbl+0x28 (0x54c470) goes back to the previous state: the
+    // switch 0x571400 keeps the state it leaves in +0xb0. That is the boot
+    // sequencer at boot and the front end after the attract video.
     void Finish()
     {
         int to = returnTo_;
         returnTo_ = ST_BOOT_SEQ;
-        skippable_ = true;
         stopAt_ = -1.0f;
         skipDelay_ = 2000;
         fading_ = false;
@@ -2771,7 +2783,6 @@ private:
     int index_ = 0;
     std::string custom_;
     int returnTo_ = ST_BOOT_SEQ;
-    bool skippable_ = true;
     float stopAt_ = -1.0f;
     DWORD skipDelay_ = 2000, started_ = 0, fadeStart_ = 0;
     bool fading_ = false;
@@ -2789,7 +2800,7 @@ public:
     void Enter() override  // FUN_005564c0: one step per activation
     {
         int step = step_++;
-        if (step == 0) step = step_++;  // case 0: engine warm-up (0x8ac270 vtbl+0x18), no screen
+        if (step == 0) step = step_++;  // case 0: hide the pointer (0x8ac270 vtbl+0x18, see WndProc), no screen
         switch (step) {
         case 1: g_introFmv.SetIndex(0); g.Goto(ST_INTRO_FMV); break;  // TERR:FMV\LEGAL.XMV
         case 2: g_introFmv.SetIndex(1); g.Goto(ST_INTRO_FMV); break;  // FMV\ATARI.XMV
@@ -3158,16 +3169,10 @@ public:
         g_music.Stop();  // 0x552c6c releases the music object
         bg_.Close();
         pane_.Close();
-        extra_.Close();
     }
 
     void Update() override
     {
-        if (extra_.IsOpen()) {
-            extra_.Update();
-            if (extra_.Done()) EndExtra();
-            return;
-        }
         bg_.Update();
         pane_.Update();
         // Profiles / Replays (states 0xB2 / 0xB1, 0x541d10): the profile object
@@ -3193,11 +3198,6 @@ public:
 
     void Render(HDC dc, Canvas& cv) override
     {
-        if (extra_.IsOpen()) {
-            extra_.Draw(dc, 0, 0, kWidth, kHeight, true);
-            extraSubs_.Draw(cv, extra_.Frame());
-            return;
-        }
         // While Profiles / Replays is open only its popup is drawn: the
         // original shows it on black, without the front end (observed).
         if (g_mu.Active()) return g_mu.Render(dc, cv);
@@ -3212,7 +3212,6 @@ public:
     void OnKey(WPARAM vk) override
     {
         idleSince_ = GetTickCount();  // any input clears the counter (0x551e00 -> +0x18 = 0)
-        if (extra_.IsOpen()) { if (IsSkipKey(vk)) EndExtra(); return; }
         if (km_.state == 1) return CaptureKey(vk);
         if (g_mu.Active()) return g_mu.OnKey(vk);
         menu_.OnKey(vk);
@@ -3220,7 +3219,6 @@ public:
 
     void OnMouse(int code, float x, float y) override
     {
-        if (extra_.IsOpen()) return;
         if (g_mu.Active()) g_mu.OnMouse(code, x, y);
         else menu_.OnMouse(code, x, y);
     }
@@ -3230,7 +3228,6 @@ public:
     void OnMouseButton(int button) override
     {
         idleSince_ = GetTickCount();
-        if (extra_.IsOpen()) return;
         if (km_.state == 1) CaptureAlt(0x2000 + button);
     }
 
@@ -3240,25 +3237,20 @@ public:
     bool OnJoyButton(int code) override
     {
         idleSince_ = GetTickCount();
-        if (extra_.IsOpen()) {
-            if (!IsSkipJoy(code)) return false;
-            EndExtra();
-            return true;
-        }
         if (km_.state != 1) return false;
         CaptureAlt(code);
         return true;
     }
     bool OnJoyAxis(int axis, bool dir) override
     {
-        if (km_.state != 1 || extra_.IsOpen()) return false;
+        if (km_.state != 1) return false;
         CaptureAxis(axis, dir);
         return true;
     }
-    // While a video plays or the editor waits, the menu does not move.
+    // While the editor waits, the menu does not move.
     void OnPad(WPARAM vk) override
     {
-        if (extra_.IsOpen() || km_.state == 1) return;
+        if (km_.state == 1) return;
         OnKey(vk);
     }
 
@@ -3285,24 +3277,24 @@ public:
 
 private:
     // ---- attract mode ----------------------------------------------------
-    // 0x551e00, once per front-end update: input or a GUI query that is
-    // non-zero away from the Main screen (0x8ac3b0 vtbl+0x38(1)) clears the
-    // counter +0x18; otherwise it counts up to +0x14 = 3600 (set at
-    // 0x551d29) and then calls 0x551dc0, which plays FMV\ATTRACT.XMV
-    // through the intro-video state. The original reached 3600 in about
-    // 30 s (measured), so the count is kept here in real time.
+    // 0x551e00, once per front-end update: input, or a non-zero depth of
+    // the FRONT screen stack (0x8ac3b0 vtbl+0x38(1) -> GUI vtbl+0x34
+    // 0x467420 = +0x42ac, screens to go back through), clears the counter
+    // +0x18; otherwise it counts up to +0x14 = 3600 (set at 0x551d29) and
+    // then calls 0x551dc0, which plays FMV\ATTRACT.XMV through the
+    // intro-video state. 3600 updates at the fixed 120 per second are 30 s.
     static const DWORD kAttractMs = 30000;
     void UpdateAttract()
     {
         DWORD now = GetTickCount();
         bool onMain = menu_.stack.size() == 1 && menu_.stack[0] == 0;
-        if (extra_.IsOpen() || km_.state != 0 || !onMain) { idleSince_ = now; return; }
+        if (km_.state != 0 || !onMain) { idleSince_ = now; return; }
         if (now - idleSince_ < kAttractMs) return;
         idleSince_ = now;
         Log("Attract mode: no input for %lu ms on the Main screen", kAttractMs);
         g_introFmv.SetFile("FMV\\ATTRACT.XMV");  // 0x551dc0: vtbl+0x24, then index 3
         g_introFmv.SetIndex(3);
-        g_introFmv.SetReturn(ST_FRONTEND, false);
+        g_introFmv.SetReturn(ST_FRONTEND);
         g.Goto(ST_INTRO_FMV);
     }
     DWORD idleSince_ = 0;
@@ -3955,22 +3947,17 @@ private:
         PlayPane(std::string("FMV\\") + city[city_] + game[dg_] + ".XMV");
     }
 
+    // Extras and cutscenes (0x5561f0): like the attract video, the intro
+    // state 0xAA plays the file (index 3: Skip Sequence after 2 s, fade),
+    // so the front end is left (0x552c30 releases the music and the GUI)
+    // and entered again afterwards: Main screen, music from the start
+    // (checked on the game with Boiling Point).
     void PlayExtra(const std::string& file)
     {
-        bg_.Close();
-        pane_.Close();
-        g_music.Stop();  // assumption: not traced, but the extras have their own soundtrack
-        if (!extra_.Open(g.Resolve(file), g.AudioTrack(), false)) return EndExtra();
-        extraSubs_.Load(file);  // cutscenes, recap, making-of, ... (0x551220)
-    }
-    void EndExtra()
-    {
-        extra_.Close();
-        extraSubs_.Clear();
-        g_music.Play();  // like 0x54b9a0: restart the music if it is not playing
-        // Re-run the screen's enter action to restore its background video.
-        if (MecScreen* s = menu_.Top()) Action(s->onEnter.empty() ? "Movie=FMV\\FRONTEND.XMV" : s->onEnter);
-        if (!bg_.IsOpen()) PlayBackground("FMV\\FRONTEND.XMV");
+        g_introFmv.SetFile(file);
+        g_introFmv.SetIndex(3);
+        g_introFmv.SetReturn(ST_FRONTEND);
+        g.Goto(ST_INTRO_FMV);
     }
 
     // Driving Games level (0x556030): a base per city (+0xd0 = the city)
@@ -4011,8 +3998,7 @@ private:
     }
 
     MecMenu menu_;
-    Movie bg_, pane_, extra_;
-    Subtitles extraSubs_;
+    Movie bg_, pane_;
     // City +0x10 (also used by Driving Games), time +0x14, weather +0x18,
     // vehicle = index into the city's list (node pointer +0x75c), start point +0xc8.
     int city_ = 0, time_ = 1, weather_ = 0, vehicle_ = 0, startPoint_ = 0;
@@ -4029,8 +4015,8 @@ private:
 // GUI direction inputs 2..5 (screen input 0x469d20): the menu reads key OR
 // POV through one mapper input, so both share one repeat counter: act on a
 // new press (counter 30), then while held every 5 updates (value 1.0 >
-// 0.7). At ~120 updates per second: 250 ms, then 42 ms. Select and back
-// never repeat, so Windows' own key repeat is not used.
+// 0.7). At 120 updates per second (fixed, 0x52b351): 250 ms, then 42 ms.
+// Select and back never repeat, so Windows' own key repeat is not used.
 // Times in ms from the performance counter: GetTickCount steps by ~15.6 ms,
 // which made the 42 ms repeat run slow. Repeats keep a fixed cadence (next
 // += kNext), like the original's per-update counter.
@@ -4085,11 +4071,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SYSKEYDOWN:
         if (wp == VK_F4) { g.Quit(); return 0; }
         break;
-    // NOTE: deliberate difference. In the original the GUI mouse path is
-    // dead: the input object's +0x28 is zeroed at init (0x581060) and never
-    // set, so 0x581560 posts nothing; the pointer is hidden (WM_SETCURSOR ->
-    // SetCursor(NULL)) and hover / click do nothing (checked on the game).
-    // Here the dormant path is enabled and the arrow cursor is kept.
+    // NOTE: deliberate difference. In the original the GUI mouse path never
+    // runs: the DirectInput mouse is acquired exclusive + foreground
+    // (0x582558 -> 0x583773, flags 1 | 4), so Windows sends the window no
+    // mouse messages and hides the pointer. Boot step 0 also hides it
+    // (0x5564ec: input vtbl+0x18 0x581130, a ShowCursor-like count; at -1
+    // the display's listener 0x576620 clears 0x8ac278+8, and WM_SETCURSOR
+    // then calls SetCursor(NULL)). Hover / click do nothing (checked on
+    // the game). Here the path is enabled and the arrow cursor is kept.
     // Mouse (0x576650): position / client size, then the input object
     // 0x8ac270 posts a GUI event: move 11 (only if the position changed),
     // left / middle / right down 0 / 1 / 2, up 3 / 4 / 5, wheel 9 (no
@@ -4162,7 +4151,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 // half is fed here as the same keys. Screen input 0x469d20: a direction
 // acts when newly pressed and then, while held, after 30 updates and every
 // 5 updates after that (10 for an analogue value <= 0.7, never the case
-// for a POV); select and back act only when newly pressed. At ~120 updates
+// for a POV); select and back act only when newly pressed. At 120 updates
 // per second that is 250 ms, then 42 ms. The analogue stick is not bound,
 // so it does not move the menu.
 static void DispatchJoystick()

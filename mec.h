@@ -42,14 +42,18 @@ struct Canvas
 {
     uint32_t* px = nullptr;
     int w = 0, h = 0;
+    // Texture filter setting (+0xc90), applied by 0x5c9710 to stages 0-3:
+    // 0 point (min, mag and mip), 1 bilinear with the nearest mip level,
+    // 2 bilinear with linear mip blending.
+    int filter = 1;
 
     // Draws texture region (u0,v0)-(u1,v1) into the destination rectangle,
     // modulated by rgba, as Direct3D draws the original's sprites and
     // glyphs. Colour and alpha are filtered separately (transparent texels
     // still lend their colour to the edge of the opaque ones), the mip
-    // level follows the larger texel-per-pixel ratio (linear between
-    // levels), and pixels are sampled at +0.15 / +0.25 (x / y): measured on
-    // the game's screenshots, not derived.
+    // level follows the larger texel-per-pixel ratio, and pixels are
+    // sampled at +0.15 / +0.25 (x / y): measured on the game's screenshots,
+    // not derived.
     void Draw(const Texture& t, float u0, float v0, float u1, float v1, float dx, float dy,
               float dw, float dh, const float rgba[4], bool additive = false);
     void Fill(float dx, float dy, float dw, float dh, uint32_t bgra);

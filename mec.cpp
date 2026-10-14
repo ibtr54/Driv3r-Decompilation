@@ -295,17 +295,22 @@ void Canvas::Draw(const Texture& t, float u0, float v0, float u1, float v1, floa
     const int mb = int(std::clamp(rgba[2], 0.f, 1.f) * ta * 256);
     const int ma = int(ta * 256);
 
-    // Mip level: log2 of the larger texels-per-pixel ratio, linear between
-    // the two nearest levels; magnified sprites use level 0.
+    // Mip level: log2 of the larger texels-per-pixel ratio; magnified
+    // sprites use level 0. Filter 2 blends the two nearest levels, 0 and 1
+    // take the nearest one (D3DTEXF_POINT mip filter).
     int lvA = 0, lvB = 0;
     int wB = 0;  // weight of level B, 0..256
     if (!t.mips.empty()) {
         float rho = std::max(std::fabs(u1 - u0) * t.w / dw, std::fabs(v1 - v0) * t.h / dh);
         float lod = rho > 1.f ? std::log2(rho) : 0.f;
         lod = std::min(lod, float(t.mips.size()));
-        lvA = int(lod);
-        lvB = std::min(lvA + 1, int(t.mips.size()));
-        wB = int((lod - lvA) * 256);
+        if (filter == 2) {
+            lvA = int(lod);
+            lvB = std::min(lvA + 1, int(t.mips.size()));
+            wB = int((lod - lvA) * 256);
+        } else {
+            lvA = lvB = std::min(int(lod + 0.5f), int(t.mips.size()));
+        }
     }
     auto level = [&](int i, int& lw, int& lh) -> const std::vector<uint32_t>& {
         if (i == 0) { lw = t.w; lh = t.h; return t.px; }
@@ -313,11 +318,17 @@ void Canvas::Draw(const Texture& t, float u0, float v0, float u1, float v1, floa
         lw = l.w; lh = l.h;
         return l.px;
     };
-    // Bilinear sample of one level at (u, v), channels 0..255 (b, g, r, a),
-    // straight colour.
+    // Bilinear (filter 0: nearest texel) sample of one level at (u, v),
+    // channels 0..255 (b, g, r, a), straight colour.
     auto sample = [&](int lv, float u, float v, int out[4]) {
         int lw, lh;
         const std::vector<uint32_t>& p = level(lv, lw, lh);
+        if (filter == 0) {
+            int tx = std::clamp(int(std::floor(u * lw)), 0, lw - 1), ty = std::clamp(int(std::floor(v * lh)), 0, lh - 1);
+            uint32_t q = p[size_t(ty) * lw + tx];
+            for (int k = 0; k < 4; ++k) out[k] = int(q >> (8 * k) & 255);
+            return;
+        }
         float fx = u * lw - 0.5f, fy = v * lh - 0.5f;
         int tx = int(std::floor(fx)), ty = int(std::floor(fy));
         int wx = int((fx - tx) * 256), wy = int((fy - ty) * 256);
