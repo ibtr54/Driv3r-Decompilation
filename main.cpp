@@ -4,9 +4,9 @@
 // Covered: WinMain window setup, boot sequencer (state 0xA9), intro FMVs
 // (0xAA), language select (0xAB), "Press ENTER" title (0xAC) and the
 // front-end menu. Undercover -> New Game runs the story sequencer (state
-// 0xB3, story.cpp) for New Game, Continue and Replay Mission; gameplay
-// itself (0xB4) is a stand-in screen. The other ways into the game (Take A
-// Ride, Driving Games, replays) still close the program.
+// 0xB3, story.cpp) for New Game, Continue, Replay Mission, Take A Ride,
+// Driving Games and loaded replays; gameplay itself (0xB4) is a stand-in
+// screen.
 //
 // Menus are drawn from the game's own .MEC layout files and FONT.BNK (see
 // mec.h). Uses the game's binkw32.dll for the .XMV files (they are Bink
@@ -580,8 +580,6 @@ enum StateId
     ST_TITLE     = 0xAC,  // GUI\BOOTUP         vtbl 0x7891e8, Update @ 0x541a70
     ST_STORY     = 0xB3,  // story sequencer    vtbl 0x78ba28, creator 0x5580e0 (story.cpp)
     ST_MISSION   = 0xB4,  // gameplay           Enter 0x54d680 -> stand-in (MissionScreen)
-    ST_GAMEPLAY  = 0x1B3, // not an original id: the old "close the program" stub, still
-                          // used by Take A Ride, Driving Games and replays
 };
 
 class Screen
@@ -722,6 +720,11 @@ struct App
     }
 
     bool audioSet_ = false;
+
+    // Settings byte +0x5: set when a replay starts (0x547e1f), cleared by
+    // the front-end Enter (0x55252c). While set, the story sequencer stores
+    // no progress and cheat codes unlock nothing.
+    bool replayRunning = false;
 
     void Goto(int id)
     {
@@ -2107,8 +2110,9 @@ class MemoryUnit
 public:
     enum Mode { BOOT, PROFILES, REPLAYS };
     bool Active() const { return active_; }
-    // Replay folder chosen with Load in REPLAYS mode (empty if none).
-    std::string TakeReplay() { std::string r; r.swap(replay_); return r; }
+    // ReplayData of a replay the user started (LSDok -> mu_continue);
+    // empty if none. The front end hands it to the game (0x547e10).
+    std::vector<uint8_t> TakeReplay() { std::vector<uint8_t> r; r.swap(replay_); return r; }
 
     void Start(Mode m)  // 0x5428b0 / 0x544910 / 0x543df0
     {
@@ -2217,6 +2221,7 @@ private:
     static const int kExit = 99;
     static const DWORD kCheckingMs = 333;  // 40 updates (~120 per second, as the attract counter)
     static const DWORD kWorkMs = 1000;     // 120 updates: shortest time "Saving..." etc. stays up
+    static const size_t kReplaySize = 0xc800;  // Replays Start 0x543e91
 
     std::string ScreenName(int p) const
     {
@@ -2291,13 +2296,44 @@ private:
         ApplyProfile();
     }
 
+    // Replays (Busy 0x543f10, load step 0x5440bc): Saves\<folder>\ReplayData
+    // (0x7894d0) must be exactly 0xc800 bytes (0x542460 with the size from
+    // Start, +0x10); it is read into the replay object 0x8ac444. Same
+    // results as a profile load: 1 ok, 2 read error, 3 missing or wrong size.
+    int LoadReplay(const std::string& folder)
+    {
+        std::string p = Profile::SavesDir() + folder + "\\ReplayData";
+        WIN32_FILE_ATTRIBUTE_DATA a;
+        if (!GetFileAttributesExA(p.c_str(), GetFileExInfoStandard, &a) || a.nFileSizeHigh || a.nFileSizeLow != kReplaySize)
+            return 3;
+        FILE* f = fopen(p.c_str(), "rb");
+        if (!f) return 2;
+        std::vector<uint8_t> d(kReplaySize);
+        bool ok = fread(d.data(), 1, kReplaySize, f) == kReplaySize;
+        fclose(f);
+        if (!ok) return 2;
+        replayData_.swap(d);
+        return 1;
+    }
+
     // Steps 12 load / 13 save / 14 delete (0x5421f0 / 0x5422f0 / 0x5423c0).
     // Done once; on success the popup stays for at least 120 updates.
     void Work(DWORD el)
     {
-        if (mode_ == REPLAYS && step_ == 12) {  // a replay plays in the game: gameplay boundary
-            replay_ = sel_;
-            step_ = kExit;
+        if (mode_ == REPLAYS && step_ == 12) {
+            // Replays: no profile is touched. Ok -> LSDok after the wait
+            // (0x54416c); 3 -> Corrupt; 2 -> LSDfailed (Corrupt on device
+            // error 0x14, not reproduced).
+            if (!workDone_) {
+                workDone_ = true;
+                result_ = LoadReplay(sel_);
+                Log("Replays: load %s -> %d", sel_.c_str(), result_);
+            }
+            if (result_ == 1 && el < kWorkMs) return;
+            workDone_ = false;
+            if (result_ == 1) { step_ = 15; Show(13); }
+            else if (result_ == 3) { step_ = 17; Show(19); }
+            else { step_ = 16; Show(16); }
             return;
         }
         if (!workDone_) {
@@ -2415,6 +2451,12 @@ private:
         case 13: case 14: case 15: case 16: case 17: case 18: case 19:  // results
             if (!is("mu_continue")) break;
             if (mode_ == BOOT && (popup_ == 13 || popup_ == 14)) step_ = kExit;  // 0x5439a8
+            else if (mode_ == REPLAYS && popup_ == 13) {
+                // Replays' LSDok (0x5445c3): step 13, whose Busy runs 0x547e10
+                // (the replay starts) and ends the flow.
+                replay_.swap(replayData_);
+                step_ = kExit;
+            }
             else { step_ = 0; Show(0); }
             break;
         case 20:  // ASOffQ (boot): carry on without a profile?
@@ -2465,8 +2507,8 @@ private:
     std::wstring prefix_, name58_;  // +0x58: the chosen or typed name
     std::vector<std::wstring> names_;
     std::vector<std::string> folders_;
-    std::string sel_, replay_;
-    std::vector<uint8_t> backup_;
+    std::string sel_;
+    std::vector<uint8_t> backup_, replayData_, replay_;
     int step_ = 0, popup_ = 0, op_ = 0, offset_ = 0, count_ = 0, prev_ = 0, result_ = 0;
     bool nameAccepted_ = false;  // set by OnKeyPress, read by OnKey for the same WM_KEYDOWN
     DWORD shownAt_ = 0;
@@ -2813,18 +2855,6 @@ private:
     bool profiles_ = false;
 };
 
-// --------------------------------------------------- 0xB3 gameplay (stub) -
-class GameplayStub : public Screen
-{
-public:
-    std::string request;
-    void Enter() override
-    {
-        Log("Gameplay requested (%s) - not implemented, closing.", request.c_str());
-        g.Quit();
-    }
-};
-static GameplayStub g_gameplay;
 
 // --------------------------------------------------- 0xB4 gameplay (stand-in)
 // Gameplay is not implemented. This screen stands for one mission: it names
@@ -2865,7 +2895,7 @@ public:
     int32_t ProfileInt(int off) const override { return g_profile.Int(off); }
     void SetProfileInt(int off, int32_t v) override { g_profile.SetInt(off, v); }
     void SetProfileByte(int off, uint8_t v) override { g_profile.Write(off, &v, 1); }
-    bool ProgressLocked() const override { return false; }  // +0x5 is never set here
+    bool ProgressLocked() const override { return g.replayRunning; }  // settings +0x5
     bool MissionPassed() const override { return true; }
     // The live settings (g) into the block, which here is both copies. The
     // file is written by the next save (Accept), as in the original.
@@ -2968,6 +2998,10 @@ static const RideCity kRideCities[] = {
 
 // 0x549d70: vehicles that must be unlocked, and their byte in the settings
 // object (+0x174 + 0x3e..0x4c). Any other id is always available.
+// Sub-games per Driving Game (front-end constructor 0x552305, +0xec..
+// +0x100): chase, getaway, trailblazer, survival, checkpoint, gate race.
+static const int kDgVariants[6] = { 2, 3, 2, 1, 3, 2 };
+
 struct VehicleLock { int id, off; };
 static const VehicleLock kVehicleLocks[] = {
     { 37, 0x1b2 }, { 35, 0x1b3 }, { 33, 0x1b4 }, { 66, 0x1b5 }, { 80, 0x1b6 }, { 43, 0x1b7 }, { 51, 0x1b8 },
@@ -3037,6 +3071,7 @@ public:
         };
         LoadControlsText();
         menu_.Reset(0);  // "Main"
+        g.replayRunning = false;  // 0x55252c (then the commit 0x548300, not repeated here)
         g_music.Load();  // SOUNDS\FEMUSIC.DAT (FUN_00552480), started at 0x551ca0
         g_music.Play();
         idleSince_ = GetTickCount();  // 0x551d22: attract counter +0x18 = 0
@@ -3067,8 +3102,8 @@ public:
                 // Back in the front end the Options screen has its default
                 // focus again (Extras, observed on the original).
                 menu_.ResetFocus();
-                std::string replay = g_mu.TakeReplay();
-                if (!replay.empty()) LaunchGameplay("LoadReplay " + replay);
+                std::vector<uint8_t> replay = g_mu.TakeReplay();
+                if (!replay.empty()) StartReplay(replay);
             }
             return;
         }
@@ -3155,8 +3190,8 @@ public:
     // position: the key either matches the next one (position + 1) or the
     // position goes back to 0, so a wrong key is not tried as a first key
     // again. After 7 keys the cheat is unlocked (settings +0x19e + 2 x
-    // index, only if index < 10 and the runtime byte +0x5 is clear, taken
-    // here as clear) and bank 0 sample 3 is played (only if the previous
+    // index, only if index < 10 and the runtime byte +0x5 is clear, which
+    // it always is in the front end) and bank 0 sample 3 is played (only if the previous
     // one has finished); then the position is reset.
     void OnKeyPress(int dik) override
     {
@@ -3165,7 +3200,7 @@ public:
             if (dik != c.keys[c.pos]) { c.pos = 0; continue; }
             if (++c.pos < 7) continue;
             c.pos = 0;
-            if (c.index < 10) g_profile.SetFlag(0x19e + 2 * c.index, true);
+            if (c.index < 10 && !g.replayRunning) g_profile.SetFlag(0x19e + 2 * c.index, true);
             Log("Cheat code %d entered: cheat %d unlocked", int(&c - g_cheatCodes), c.index);
             g_sounds.Play(MenuSounds::CHEAT);
         }
@@ -3234,9 +3269,24 @@ private:
         }
         // "ReplayMission2" (Down on Mission 4) has no handler in the
         // executable: like any unknown message it does nothing.
-        static const char* kGameplay[] = { "StartGame", "fe_dgstart" };
-        for (const char* gp : kGameplay)
-            if (_stricmp(a.c_str(), gp) == 0) return LaunchGameplay(a);
+        // Take A Ride (StartGame 0x55368d -> 0x555920) and Driving Games
+        // (fe_dgstart 0x553a65 -> 0x556030) also clear the block and call
+        // 0x557d70 with a level id. No level id is in the story table, so
+        // the sequencer sends it straight to gameplay.
+        if (_stricmp(a.c_str(), "StartGame") == 0) {
+            Log("Take A Ride: city %d, time %d, weather %d, vehicle %d (car %d), cops %d, start point %d, level 0x%x",
+                city_, time_, weather_, VehicleId(), kRideCities[city_].list[vehicle_].car, cops_ ? 1 : 0,
+                startPoint_, RideLevel());
+            g_story.ClearBlock();
+            g_story.RunMission(RideLevel());
+            return;
+        }
+        if (_stricmp(a.c_str(), "fe_dgstart") == 0) {
+            Log("Driving Games: city %d, game %d, sub-game %d, level 0x%x", city_, dg_, subgame_, DgLevel());
+            g_story.ClearBlock();
+            g_story.RunMission(DgLevel());
+            return;
+        }
         if (a == "fe_quitgame") { g.Quit(); return; }  // 0x8ac258 vtbl+0x10
         // Back on the root screen (0x554e71): GUI vtbl+0x30(1, "QuitCon"),
         // "Quit DRIV3R?" over the main menu (Enter quits, Escape returns).
@@ -3273,8 +3323,16 @@ private:
 
         // Driving Games
         if (a == "fe_setupdg" || a == "fe_playdg") return PreviewDg();
-        if (a == "nextdg" || a == "prevdg") { Changed(); Step(dg_, 6, a[0] == 'n'); return PreviewDg(); }
-        if (a == "nextsubgame" || a == "prevsubgame") { Changed(); Step(subgame_, 3, a[0] == 'n'); return; }
+        // nextdg / prevdg (0x5537ff / 0x55377e): game +0x1c steps through
+        // 0..5 and the sub-game +0x28 goes back to 0 (0x5537e0).
+        if (a == "nextdg" || a == "prevdg") {
+            Changed();
+            Step(dg_, 6, a[0] == 'n');
+            subgame_ = 0;
+            return PreviewDg();
+        }
+        // next/prevsubgame (0x5539c5 / 0x553986): wraps at the game's count.
+        if (a == "nextsubgame" || a == "prevsubgame") { Changed(); Step(subgame_, kDgVariants[dg_], a[0] == 'n'); return; }
 
         // Options: Sound (settings handler 0x548b77..0x5492fb)
         if (a == "volup" || a == "voldown") return StepVolume(g.vol.effects, a == "volup");
@@ -3507,7 +3565,7 @@ private:
                 return startPoint_ == atoi(s.c_str() + (isBoat ? boat : land).size()) - 1 ? 0 : 1;
             }
         }
-        if (s == "stat_subgame") return subgame_;
+        if (s == "stat_subgame") return std::min(subgame_, 2);  // 0x553a08: rows 0, 1, 2 for 2 and up
         // stat_restoretitle1..4 (0x55581f..): title n shows row 0 for page
         // 2(n-1), row 1 for page 2(n-1)+1, and nothing (empty row 2) otherwise.
         if (StartsWithI(s, "stat_restoretitle") && s.size() == 18) {
@@ -3838,16 +3896,41 @@ private:
         if (!bg_.IsOpen()) PlayBackground("FMV\\FRONTEND.XMV");
     }
 
-    // FUN_00557d70: setup object (0x8ac3ac) vtbl+8, then state 0xB3.
-    void LaunchGameplay(const std::string& what)
+    // Driving Games level (0x556030): a base per city (+0xd0 = the city)
+    // and game (+0xdc), jump tables 0x55616c / 0x556154 / 0x55613c, plus
+    // the sub-game (+0xe8).
+    int DgLevel() const
     {
-        // StartGame (0x555920) hands these to the setup object 0x8ac3ac.
-        if (_stricmp(what.c_str(), "StartGame") == 0)
-            Log("Take A Ride: city %d, time %d, weather %d, vehicle %d (car %d), cops %d, start point %d, level 0x%x",
-                city_, time_, weather_, VehicleId(), kRideCities[city_].list[vehicle_].car, cops_ ? 1 : 0,
-                startPoint_, RideLevel());
-        g_gameplay.request = what;
-        g.Goto(ST_GAMEPLAY);
+        static const int kBase[3][6] = {
+            { 0x20, 0x26, 0x32, 0x38, 0x3b, 0x47 },  // Miami
+            { 0x22, 0x2a, 0x34, 0x39, 0x3e, 0x49 },  // Nice
+            { 0x24, 0x2e, 0x36, 0x3a, 0x41, 0x4b },  // Istanbul
+        };
+        return kBase[city_][dg_] + subgame_;
+    }
+
+    // A replay starts (0x547e10): settings +0x5 = 1, commit (0x548300),
+    // then 0x4d9230 on the replay data: 0x557d70 with the level at +0x36
+    // (the block +0x18 is not cleared). For a Take A Ride level (setup
+    // vtbl+0x78 = 0x4642e0: level 0x4d..0x54) the ride settings follow from
+    // the header: weather +0x38 (vtbl+0x18), time +0x3a (+0x14), vehicle
+    // +0x3c (+0x10), start point +0x40 (+0xc), cops +0x39 != 0 (+0x1c).
+    // Then 0x4d92e0(2) (not traced).
+    void StartReplay(const std::vector<uint8_t>& d)
+    {
+        g.replayRunning = true;
+        SaveProfile(false);
+        uint16_t level = 0, time = 0;
+        int32_t vehicle = 0, start = 0;
+        memcpy(&level, &d[0x36], 2);
+        memcpy(&time, &d[0x3a], 2);
+        memcpy(&vehicle, &d[0x3c], 4);
+        memcpy(&start, &d[0x40], 4);
+        Log("Replay: level 0x%x", level);
+        g_story.RunMission(level);
+        if (level >= 0x4d && level <= 0x54)
+            Log("Replay: Take A Ride weather %d, time %d, vehicle %d, start point %d, cops %d",
+                d[0x38], time, vehicle, start, d[0x39] != 0 ? 1 : 0);
     }
 
     MecMenu menu_;
@@ -4186,7 +4269,6 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
     g.screens[ST_LANGUAGE] = &language;
     g.screens[ST_TITLE] = &title;
     g.screens[ST_FRONTEND] = &frontEnd;
-    g.screens[ST_GAMEPLAY] = &g_gameplay;
     g.screens[ST_STORY] = &g_storyScreen;
     g.screens[ST_MISSION] = &g_mission;
     g_mission.onMessage = [](const char* msg) {

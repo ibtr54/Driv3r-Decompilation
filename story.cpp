@@ -121,6 +121,7 @@ void StorySequencer::RunMission(int id)
         return Step();
     }
     Logf("Story: level 0x%x (not in the story)", id);
+    setupId_ = id;
     host_.SetupMission(id);
     phase_ = MISSION;
     host_.GotoSequencer();
@@ -152,6 +153,7 @@ void StorySequencer::Step()
     default:  // T_MISSION
         phase_ = MISSION;
         host_.FreeSlots(s.value);  // 0x558080: only for missions 5, 11, 15, 17, 22, 28
+        setupId_ = s.value;
         host_.SetupMission(s.value);
         host_.GotoSequencer();
         return;
@@ -197,7 +199,7 @@ void StorySequencer::Update()
 {
     switch (phase_) {
     case MISSION:
-        Logf("Story: mission %d -> gameplay", CurrentMission());
+        Logf("Story: mission %d -> gameplay", setupId_);
         host_.StartGameplay(block_, sizeof(block_));
         return;
     case RECAP:
@@ -231,8 +233,13 @@ void StorySequencer::OnMessage(const char* msg)
             // +0x1c = index of the entry after the mission, if higher.
             int next = pos_ + 1;
             if (!host_.ProgressLocked()) {
-                if (uint32_t(host_.ProfileInt(0x1c)) < uint32_t(next)) host_.SetProfileInt(0x1c, next);
+                if (uint32_t(host_.ProfileInt(0x1c)) < uint32_t(next)) {
+                    host_.SetProfileInt(0x1c, next);
+                    Logf("Story: position %d", next);
+                }
                 host_.CopyProfileBlock();
+            } else {
+                Logf("Story: progress locked (+0x5), nothing stored");
             }
             // Progress and city entries up to the next mission.
             for (int i = next; kStory[i].type != T_MISSION && kStory[i].type != T_END; ++i) {

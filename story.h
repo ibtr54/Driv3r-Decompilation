@@ -82,5 +82,6 @@ private:
     StoryHost& host_;
     int phase_ = MISSION;
     int pos_ = 0;                      // +0x14 as an index into the table
+    int setupId_ = 0;                  // last id given to the game setup (for the log)
     uint8_t block_[0x1000] = {};       // +0x18
 };
