@@ -202,9 +202,22 @@ public:
     }
 
     // Stretched into (x,y,w,h), or letterboxed into it when 'fit' is set.
-    void Draw(HDC dc, int x, int y, int w, int h, bool fit) const
+    // 'alpha' < 1 darkens the picture: the movie quad is drawn with colour
+    // (1, 1, 1, alpha) over the black screen (0x5516ba).
+    void Draw(HDC dc, int x, int y, int w, int h, bool fit, float alpha = 1.0f) const
     {
         if (!h_ || px_.empty()) return;
+        const std::vector<uint32_t>* px = &px_;
+        std::vector<uint32_t> dim;
+        if (alpha < 1.0f) {
+            uint32_t a = uint32_t(std::max(0.0f, alpha) * 256.0f);
+            dim.resize(px_.size());
+            for (size_t i = 0; i < px_.size(); ++i) {
+                uint32_t c = px_[i];
+                dim[i] = ((((c & 0xff00ff) * a) >> 8) & 0xff00ff) | ((((c & 0xff00) * a) >> 8) & 0xff00);
+            }
+            px = &dim;
+        }
         BITMAPINFO bi = {};
         bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
         bi.bmiHeader.biWidth = LONG(w_);
@@ -220,7 +233,7 @@ public:
             h = fh;
         }
         SetStretchBltMode(dc, COLORONCOLOR);
-        StretchDIBits(dc, x, y, w, h, 0, 0, w_, hgt_, px_.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
+        StretchDIBits(dc, x, y, w, h, 0, 0, w_, hgt_, px->data(), &bi, DIB_RGB_COLORS, SRCCOPY);
         GdiFlush();  // the canvas is drawn into the same DIB right after
     }
 
@@ -2655,7 +2668,7 @@ public:
     // SetMovie 0x5582d0 keeps the third argument as updates before Skip
     // Sequence is read (x 120, +0x5c, counted down by 0x558260); the movie
     // object (0x5514c0) stops once its frame count x 0.04 s reaches the
-    // stop time (-1: the whole video), then fades out over 24 updates. The
+    // stop time (-1: the whole video), then fades out (see Update). The
     // listener (here a callback) is called at the end instead of returning
     // to a state.
     void PlayStory(const std::string& file, float stopSeconds, DWORD skipDelayMs, std::function<void()> done)
@@ -2671,27 +2684,49 @@ public:
     {
         static const char* kFiles[] = { "TERR:FMV\\LEGAL.XMV", "FMV\\ATARI.XMV", "FMV\\REFLECT.XMV" };
         std::string file = index_ <= 2 ? kFiles[index_] : custom_;
+        // SetMovie(path, 0, n, -1.0f): n = 5 for LEGAL (case 0), 2 for the
+        // others (cases 1-3), x 120 updates before Skip Sequence is read.
+        if (index_ <= 2) skipDelay_ = index_ == 0 ? 5000 : 2000;
         started_ = GetTickCount();
+        fading_ = false;
         if (!movie_.Open(g.Resolve(file), g.AudioTrack(), false))
             return Finish();  // missing file: carry on
         subs_.Load(file);
     }
     void Leave() override { movie_.Close(); subs_.Clear(); }
+    // Movie object states (+0x44): 2 playing, 3 fading, 4 stopped. Each
+    // update the player 0xD1 (0x558260) reads Skip, then calls the fade step
+    // (vtbl+0xc = 0x551480) and the update (vtbl+0x14 = 0x5514c0).
+    // Fade step: alpha +0x14 (1.0 at the start) -= 0.05 per update; the
+    // picture is drawn with max(alpha, 0). The step also sets the streamed
+    // music's volume (0x8ac2b4, 0x5986c0) to alpha x the music volume and
+    // the end restores it; no music plays under these videos here (the front
+    // end stops it on leaving), so only the picture fades. The update stops
+    // when alpha < -0.2 (float steps: on the 24th update, 0.2 s) or the
+    // video ends; a video that ends while playing stops at once, unfaded.
     void Update() override
     {
         movie_.Update();
+        if (fading_) {
+            DWORD steps = (GetTickCount() - fadeStart_) * 120 / 1000;
+            alpha_ = 1.0f - 0.05f * float(steps);
+            if (steps >= 24 || movie_.Done()) Finish();
+            return;
+        }
         if (movie_.Done()) return Finish();  // listener 0x556470 -> manager vtbl+0x28
         // 0x551539: frames x 0.04 >= stop time (all story videos are 25 fps).
-        if (stopAt_ > 0.0f && float(movie_.Frame()) * 0.04f >= stopAt_) Finish();
+        if (stopAt_ > 0.0f && float(movie_.Frame()) * 0.04f >= stopAt_) StartFade();
     }
     void Render(HDC dc, Canvas& cv) override
     {
-        movie_.Draw(dc, 0, 0, kWidth, kHeight, true);
-        subs_.Draw(cv, movie_.Frame());
+        movie_.Draw(dc, 0, 0, kWidth, kHeight, true, fading_ ? alpha_ : 1.0f);
+        subs_.Draw(cv, movie_.Frame());  // 0x5990c0, drawn after the movie, not faded
     }
+    // Skip (vtbl+0x10 = 0x5514b0) only moves a playing video (state 2) to the
+    // fade; a key during the fade does nothing.
     void OnKey(WPARAM vk) override
     {
-        if (CanSkip() && IsSkipKey(vk)) Finish();
+        if (CanSkip() && IsSkipKey(vk)) StartFade();
     }
     // The player (state 0xD1, 0x558260) has no GUI; the joystick skips only
     // when Skip Sequence has a joystick alternative.
@@ -2699,12 +2734,19 @@ public:
     bool OnJoyButton(int code) override
     {
         if (!CanSkip() || !IsSkipJoy(code)) return false;
-        Finish();
+        StartFade();
         return true;
     }
 
 private:
-    bool CanSkip() const { return skippable_ && GetTickCount() - started_ >= skipDelay_; }
+    bool CanSkip() const { return skippable_ && !fading_ && GetTickCount() - started_ >= skipDelay_; }
+    void StartFade()
+    {
+        fading_ = true;
+        alpha_ = 1.0f;
+        fadeStart_ = GetTickCount();
+        Log("Movie: fade out at frame %u", movie_.Frame());
+    }
 
     // At boot the original returns to the sequencer. After the attract video
     // it returned to the main menu (observed; the static path through manager
@@ -2715,7 +2757,8 @@ private:
         returnTo_ = ST_BOOT_SEQ;
         skippable_ = true;
         stopAt_ = -1.0f;
-        skipDelay_ = 0;
+        skipDelay_ = 2000;
+        fading_ = false;
         if (listener_) {
             std::function<void()> done;
             done.swap(listener_);
@@ -2730,7 +2773,9 @@ private:
     int returnTo_ = ST_BOOT_SEQ;
     bool skippable_ = true;
     float stopAt_ = -1.0f;
-    DWORD skipDelay_ = 0, started_ = 0;
+    DWORD skipDelay_ = 2000, started_ = 0, fadeStart_ = 0;
+    bool fading_ = false;
+    float alpha_ = 1.0f;
     std::function<void()> listener_;
     Movie movie_;
     Subtitles subs_;
@@ -2857,10 +2902,11 @@ private:
 
 
 // --------------------------------------------------- 0xB4 gameplay (stand-in)
-// Gameplay is not implemented. This screen stands for one mission: it names
-// it and lets the user send the messages gameplay sends to the story
-// sequencer (handler 0x557de0), then goes back to 0xB3. How gameplay itself
-// gets back to 0xB3 was not traced.
+// Gameplay is not implemented. This screen stands for one level (a story
+// mission is played in parts, see StoryNextPart): it names it and lets the
+// user send the messages gameplay sends to the story sequencer (handler
+// 0x557de0). Where gameplay goes after a message is decided by state 0xBB
+// (EndOfPart below); the end screens 0xCD / 0xCF are not implemented.
 class MissionScreen : public Screen
 {
 public:
@@ -2870,13 +2916,16 @@ public:
     void Render(HDC, Canvas& cv) override
     {
         static const float kWhite[4] = { 1, 1, 1, 1 }, kGrey[4] = { 0.6f, 0.6f, 0.6f, 1 };
-        char buf[128];
-        snprintf(buf, sizeof(buf), "Mission %d  (Missions\\Mission%.2d.mpc)", mission, mission);
-        const wchar_t* lines[] = { L"Gameplay is not implemented.", L"Enter: complete    F: fail",
+        char buf[128], file[64];
+        snprintf(buf, sizeof(buf), "Level %d (0x%02x)%s", mission, mission,
+                 StoryLastPart(mission) ? ", last part" : StoryHasNextPart(mission) ? ", more parts" : "");
+        snprintf(file, sizeof(file), "Missions\\Mission%.2d.mpc", mission);
+        std::string title(buf), path(file);
+        std::wstring wpath(path.begin(), path.end());
+        const wchar_t* lines[] = { wpath.c_str(), L"Gameplay is not implemented.", L"Enter: complete    F: fail",
                                    L"R: restart    Escape: frontend" };
-        std::string title(buf);
         g.font.Draw(cv, std::wstring(title.begin(), title.end()), 48, 160, 0.75f, 0.75f, kWhite);
-        for (int i = 0; i < 3; ++i) g.font.Draw(cv, lines[i], 48, 220.0f + 30 * i, 0.6f, 0.6f, kGrey);
+        for (int i = 0; i < 4; ++i) g.font.Draw(cv, lines[i], 48, 200.0f + 30 * i, 0.6f, 0.6f, kGrey);
     }
     void OnKey(WPARAM vk) override
     {
@@ -2896,7 +2945,7 @@ public:
     void SetProfileInt(int off, int32_t v) override { g_profile.SetInt(off, v); }
     void SetProfileByte(int off, uint8_t v) override { g_profile.Write(off, &v, 1); }
     bool ProgressLocked() const override { return g.replayRunning; }  // settings +0x5
-    bool MissionPassed() const override { return true; }
+    int SetupLevel() const override { return g_mission.mission; }
     // The live settings (g) into the block, which here is both copies. The
     // file is written by the next save (Accept), as in the original.
     void CopyProfileBlock() override { StoreLive(); }
@@ -2936,6 +2985,34 @@ public:
     void Update() override { g_story.Update(); }
 };
 static StoryScreen g_storyScreen;
+
+// State 0xBB (creator 0x54db30, vtbl 0x789ef4), entered when a level ends.
+// Update 0x54dab0: in context 0 (0x4d92e0; a replay runs in context 2),
+// after "complete" (phase 4) and when the level has a next part (0xCC
+// vtbl+0x20), state 0xCC; otherwise 0xCD (end screen, not implemented: here
+// straight back to the sequencer). 0xCC Enter 0x5573c0 -> 0x557a60: game
+// setup vtbl+8(next part), 0x4d9080 (replay recording of the new part),
+// 0x8ac238 vtbl+0x1c(4) and the message "restart" (phase 3, gameplay goes
+// on); after 0xb1 it loads 0xb2 and goes to 0xCF instead (not implemented:
+// here the sequencer, whose next entry is 0xb2). How 0xCC returns to 0xB4
+// was not traced.
+static void EndOfPart()
+{
+    int level = g_mission.mission;
+    if (!g.replayRunning && g_story.Phase() == StorySequencer::FINISHED && StoryHasNextPart(level)) {
+        bool endState = false;
+        int next = StoryNextPart(level, &endState);
+        Log("State 0xCC: level 0x%02x -> next part 0x%02x", level, next);
+        g_storyHost.SetupMission(next);
+        if (!endState) {
+            g_story.OnMessage("restart");
+            g.Goto(ST_MISSION);
+            return;
+        }
+        Log("State 0xCF (not implemented) -> sequencer");
+    }
+    g.Goto(ST_STORY);
+}
 
 // --------------------------------------------------- front end -------------
 // FUN_00552480 loads GUI\FRONT; the screens, layout, textures and text come
@@ -4273,7 +4350,10 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
     g.screens[ST_MISSION] = &g_mission;
     g_mission.onMessage = [](const char* msg) {
         g_story.OnMessage(msg);
-        g.Goto(ST_STORY);
+        // "restart" only marks gameplay as running again (phase 3); the
+        // level restarts inside gameplay, so the stand-in stays.
+        if (_stricmp(msg, "restart") == 0) return;
+        EndOfPart();
     };
 
     ShowWindow(g.hwnd, showCmd);

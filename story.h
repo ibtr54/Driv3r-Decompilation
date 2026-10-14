@@ -23,11 +23,12 @@ public:
     virtual int32_t ProfileInt(int off) const = 0;
     virtual void SetProfileInt(int off, int32_t v) = 0;
     virtual void SetProfileByte(int off, uint8_t v) = 0;
-    // Settings byte +0x5: while set, no progress is stored (not traced; the
-    // cheat codes test the same byte).
+    // Settings byte +0x5, set while a replay runs (0x547e10): no progress is
+    // stored (the cheat codes test the same byte).
     virtual bool ProgressLocked() const = 0;
-    // 0x8ac560 vtbl+0x24, asked before "complete" stores progress (not traced).
-    virtual bool MissionPassed() const = 0;
+    // Game setup 0x8ac3ac vtbl+0x24 (0x481720): the level id it was last
+    // given (+4), asked by "complete" (through 0x8ac560 vtbl+0x24).
+    virtual int SetupLevel() const = 0;
     // 0x557e45: the 0xc90-byte block +0x8 copied to +0xc98.
     virtual void CopyProfileBlock() = 0;
     // 0x558080: missions 5, 11, 15, 17, 22 and 28 run 0x5949d0 on 0x8ac2ac
@@ -36,14 +37,17 @@ public:
     // Game setup 0x8ac3ac vtbl+8 (0x463480): mission id -> level, loads
     // Missions\Mission%.2d.mpc.
     virtual void SetupMission(int mission) = 0;
-    // Phase 0 (0x557c37): 0x8ac584 vtbl+8, the 0x1000-byte block to 0x8ac444
-    // (0x4d9080), then state 0xB4 (gameplay).
+    // Phase 0 (0x557c37): 0x8ac584 vtbl+8; 0x4d9080 starts the replay
+    // recording 0x8ac444 for the level (header: level id, Take A Ride
+    // options; the 0x1000-byte block; settings +0x174..+0x207); then state
+    // 0xB4 (gameplay).
     virtual void StartGameplay(const uint8_t* block, size_t size) = 0;
     // Phases 1 / 2 (0x557c74 / 0x557cb3): movie player 0x8ac574 vtbl+0x20
     // (path, 1, 2 s before Skip works, stop time or -1) and the screen
     // manager to 0xD1. The program calls VideoDone() when it ends.
     virtual void PlayVideo(const char* path, float stopSeconds) = 0;
-    // Phase 4 (0x557ce3): 0x4d92e0(0) (not traced).
+    // Phase 4 (0x557ce3): 0x4d92e0(0), the player's context back to 0 (the
+    // front end's; a replay runs in context 2).
     virtual void MissionFinished() = 0;
     virtual void GotoSequencer() = 0;  // manager vtbl+0x2c(0xB3)
     virtual void GotoFrontEnd() = 0;   // manager vtbl+0x2c(0xAD)
@@ -54,7 +58,9 @@ class StorySequencer
 {
 public:
     // +0x10 phase; Update (vtbl+4, 0x557c20) switches on it.
-    enum Phase { MISSION = 0, RECAP = 1, VIDEO = 2, RESTART = 3, FINISHED = 4, QUIT = 5 };
+    // PLAYING (3) is set once gameplay has started (0x557c6a) and again by
+    // "restart"; if the sequencer runs again in it, it goes to the front end.
+    enum Phase { MISSION = 0, RECAP = 1, VIDEO = 2, PLAYING = 3, FINISHED = 4, QUIT = 5 };
 
     explicit StorySequencer(StoryHost& host) : host_(host) {}
 
@@ -85,3 +91,17 @@ private:
     int setupId_ = 0;                  // last id given to the game setup (for the log)
     uint8_t block_[0x1000] = {};       // +0x18
 };
+
+// Story missions are played in parts: level ids 0x65..0xb6 are the later
+// parts of missions 1..31 (0x4636b0 maps them to the mission's city level).
+// Tables of state 0xCC (creator 0x557ad0, object 0x8ac560, vtbl 0x78b9f0):
+// vtbl+0x24 0x5579e0: the level is the last part of its mission ("complete"
+// stores progress only then; table 0x557a10 for ids 0x66..0xb5).
+bool StoryLastPart(int level);
+// vtbl+0x20 0x5578f0: the level is followed by another part (table 0x557924
+// for ids 1..0xb4); state 0xBB (Update 0x54dab0) then goes to 0xCC.
+bool StoryHasNextPart(int level);
+// 0xCC Enter 0x5573c0: the next part (jump table 0x557758). toEndState is
+// set for 0xb1 -> 0xb2, which goes to state 0xCF instead of back to
+// gameplay. Returns 0 when there is none (0x557743: state 0xCF).
+int StoryNextPart(int level, bool* toEndState);

@@ -59,7 +59,48 @@ const StoryStep kStory[] = {
 };
 const int kStoryCount = int(sizeof(kStory) / sizeof(kStory[0]));
 
+// Last parts of the story missions (0x5579e0, byte table 0x557a10).
+const uint8_t kLastParts[] = {
+    0x66, 0x67, 0x69, 0x6b, 0x6d, 0x6f, 0x72, 0x73, 0x75, 0x78, 0x7a, 0x83, 0x86, 0x87,
+    0x88, 0x8a, 0x8b, 0x8e, 0x90, 0x94, 0x98, 0xa1, 0xa5, 0xac, 0xae, 0xb0, 0xb2, 0xb5,
+};
+
+// Level -> next part (0x5573c0, jump table 0x557758). The levels listed are
+// exactly the ones 0x5578f0 (table 0x557924) reports as having a next part.
+struct NextPart { uint8_t level, next; };
+const NextPart kNextParts[] = {
+    {0x01, 0x65}, {0x02, 0x67}, {0x03, 0x69}, {0x04, 0x6a}, {0x05, 0x6c}, {0x06, 0x6e},
+    {0x07, 0x70}, {0x08, 0x71}, {0x09, 0x74}, {0x0a, 0x76}, {0x0b, 0x82}, {0x0d, 0x86},
+    {0x0e, 0x96}, {0x0f, 0x88}, {0x10, 0x95}, {0x11, 0x8c}, {0x12, 0x8d}, {0x13, 0x8f},
+    {0x15, 0x92}, {0x16, 0xa0}, {0x18, 0xb4}, {0x19, 0xa8}, {0x1b, 0xab}, {0x1c, 0xad},
+    {0x1e, 0xb0}, {0x1f, 0xb1}, {0x65, 0x66}, {0x6a, 0x6b}, {0x6c, 0x79}, {0x6e, 0x6f},
+    {0x70, 0x7a}, {0x71, 0x72}, {0x74, 0x75}, {0x76, 0x78}, {0x79, 0x6d}, {0x82, 0x83},
+    {0x89, 0x8a}, {0x8c, 0x97}, {0x8d, 0x8e}, {0x8f, 0x90}, {0x92, 0x93}, {0x93, 0x94},
+    {0x95, 0x8b}, {0x96, 0x87}, {0x97, 0x98}, {0xa0, 0xa2}, {0xa2, 0xa1}, {0xa4, 0xa5},
+    {0xa8, 0xb5}, {0xab, 0xac}, {0xad, 0xae}, {0xb1, 0xb2}, {0xb4, 0xa4},
+};
+
 }  // namespace
+
+bool StoryLastPart(int level)
+{
+    for (uint8_t id : kLastParts)
+        if (id == level) return true;
+    return false;
+}
+
+bool StoryHasNextPart(int level)
+{
+    return StoryNextPart(level, nullptr) != 0;
+}
+
+int StoryNextPart(int level, bool* toEndState)
+{
+    if (toEndState) *toEndState = level == 0xb1;  // 0x55772f: byte 1 -> 0x557a60 goes to 0xCF
+    for (const NextPart& p : kNextParts)
+        if (p.level == level) return p.next;
+    return 0;
+}
 
 void StorySequencer::Logf(const char* fmt, ...)
 {
@@ -201,6 +242,7 @@ void StorySequencer::Update()
     case MISSION:
         Logf("Story: mission %d -> gameplay", setupId_);
         host_.StartGameplay(block_, sizeof(block_));
+        phase_ = PLAYING;  // 0x557c6a
         return;
     case RECAP:
         host_.PlayVideo("FMV\\RECAP.XMV", kStory[pos_].time);
@@ -208,7 +250,7 @@ void StorySequencer::Update()
     case VIDEO:
         host_.PlayVideo(kStory[pos_].path, -1.0f);
         return;
-    case RESTART:
+    case PLAYING:  // back here while gameplay was running
     case QUIT:
         host_.GotoFrontEnd();
         return;
@@ -229,7 +271,12 @@ void StorySequencer::OnMessage(const char* msg)
 {
     Logf("Story: message %s", msg);
     if (_stricmp(msg, "complete") == 0) {
-        if (host_.MissionPassed()) {
+        // 0x8ac560 vtbl+0x24: only the last part of a story mission stores
+        // progress; earlier parts, Take A Ride and Driving Games levels only
+        // finish (phase 4).
+        int level = host_.SetupLevel();
+        Logf("Story: level 0x%02x %s", level, StoryLastPart(level) ? "is a last part: progress" : "is not a last part");
+        if (StoryLastPart(level)) {
             // +0x1c = index of the entry after the mission, if higher.
             int next = pos_ + 1;
             if (!host_.ProgressLocked()) {
@@ -251,6 +298,7 @@ void StorySequencer::OnMessage(const char* msg)
     } else if (_stricmp(msg, "fail") == 0 || _stricmp(msg, "frontend") == 0) {
         phase_ = QUIT;
     } else if (_stricmp(msg, "restart") == 0) {
-        phase_ = RESTART;
+        // Gameplay goes on (0xCC posts it after loading the next part).
+        phase_ = PLAYING;
     }
 }
