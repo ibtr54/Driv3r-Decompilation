@@ -17,7 +17,13 @@
     <ClCompile Include="mec.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="story.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClInclude Include="mec.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="story.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

@@ -1,0 +1,86 @@
+// Undercover story sequencer: state 0xB3 of Driv3r.exe (creator 0x5580e0,
+// registered at 0x6df275; object 0x1018 bytes, global 0x8ac4fc).
+//
+// The front end's "NewGame" (0x553a8f), "ContinueGame" (0x553ac8) and
+// "runmission=" / StartGame / fe_dgstart (0x557d70) start it. It walks the
+// story table 0x7a5878 (missions, recap stops, progress steps, end videos)
+// and sends each mission to gameplay (state 0xB4). Gameplay answers with the
+// messages "complete", "fail", "frontend" or "restart" (handler 0x557de0).
+//
+// This file has no dependency on main.cpp: everything the sequencer does to
+// the rest of the program goes through StoryHost.
+
+#pragma once
+#include <cstddef>
+#include <cstdint>
+
+// What the sequencer needs from the program. Offsets are settings offsets
+// (the profile block starts at settings +0x8).
+class StoryHost
+{
+public:
+    virtual ~StoryHost() {}
+    virtual int32_t ProfileInt(int off) const = 0;
+    virtual void SetProfileInt(int off, int32_t v) = 0;
+    virtual void SetProfileByte(int off, uint8_t v) = 0;
+    // Settings byte +0x5: while set, no progress is stored (not traced; the
+    // cheat codes test the same byte).
+    virtual bool ProgressLocked() const = 0;
+    // 0x8ac560 vtbl+0x24, asked before "complete" stores progress (not traced).
+    virtual bool MissionPassed() const = 0;
+    // 0x557e45: the 0xc90-byte block +0x8 copied to +0xc98.
+    virtual void CopyProfileBlock() = 0;
+    // 0x558080: missions 5, 11, 15, 17, 22 and 28 run 0x5949d0 on 0x8ac2ac
+    // (slots marked 3 of its 128 freed).
+    virtual void FreeSlots(int mission) = 0;
+    // Game setup 0x8ac3ac vtbl+8 (0x463480): mission id -> level, loads
+    // Missions\Mission%.2d.mpc.
+    virtual void SetupMission(int mission) = 0;
+    // Phase 0 (0x557c37): 0x8ac584 vtbl+8, the 0x1000-byte block to 0x8ac444
+    // (0x4d9080), then state 0xB4 (gameplay).
+    virtual void StartGameplay(const uint8_t* block, size_t size) = 0;
+    // Phases 1 / 2 (0x557c74 / 0x557cb3): movie player 0x8ac574 vtbl+0x20
+    // (path, 1, 2 s before Skip works, stop time or -1) and the screen
+    // manager to 0xD1. The program calls VideoDone() when it ends.
+    virtual void PlayVideo(const char* path, float stopSeconds) = 0;
+    // Phase 4 (0x557ce3): 0x4d92e0(0) (not traced).
+    virtual void MissionFinished() = 0;
+    virtual void GotoSequencer() = 0;  // manager vtbl+0x2c(0xB3)
+    virtual void GotoFrontEnd() = 0;   // manager vtbl+0x2c(0xAD)
+    virtual void Log(const char* text) = 0;
+};
+
+class StorySequencer
+{
+public:
+    // +0x10 phase; Update (vtbl+4, 0x557c20) switches on it.
+    enum Phase { MISSION = 0, RECAP = 1, VIDEO = 2, RESTART = 3, FINISHED = 4, QUIT = 5 };
+
+    explicit StorySequencer(StoryHost& host) : host_(host) {}
+
+    void ClearBlock();                 // front end: +0x18, 0x1000 bytes, zeroed
+    void NewGame();                    // 0x557d10
+    void ContinueGame();               // 0x557d30
+    void RunMission(int id);           // 0x557d70 (edx = mission or level id)
+
+    void Update();                     // 0x557c20, while state 0xB3 is current
+    void OnMessage(const char* msg);   // 0x557de0
+    void VideoDone();                  // movie listener 0x557f00
+
+    int Phase() const { return phase_; }
+    int Position() const { return pos_; }
+    // Mission id of the current table entry (0 when it is not a mission).
+    int CurrentMission() const;
+
+private:
+    void Step();                       // 0x557f20
+    void Advance();                    // 0x558000
+    void RaiseProgress(int value);     // type 3
+    void CityStep(int value);          // type 2
+    void Logf(const char* fmt, ...);
+
+    StoryHost& host_;
+    int phase_ = MISSION;
+    int pos_ = 0;                      // +0x14 as an index into the table
+    uint8_t block_[0x1000] = {};       // +0x18
+};

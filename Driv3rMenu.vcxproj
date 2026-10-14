@@ -80,9 +80,11 @@
   <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="mec.cpp" />
+    <ClCompile Include="story.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="mec.h" />
+    <ClInclude Include="story.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="build.bat" />

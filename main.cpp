@@ -3,8 +3,10 @@
 //
 // Covered: WinMain window setup, boot sequencer (state 0xA9), intro FMVs
 // (0xAA), language select (0xAB), "Press ENTER" title (0xAC) and the
-// front-end menu. Gameplay is NOT implemented: where the original calls
-// FUN_00557d70 -> state 0xB3 (load game), this program closes itself.
+// front-end menu. Undercover -> New Game runs the story sequencer (state
+// 0xB3, story.cpp) for New Game, Continue and Replay Mission; gameplay
+// itself (0xB4) is a stand-in screen. The other ways into the game (Take A
+// Ride, Driving Games, replays) still close the program.
 //
 // Menus are drawn from the game's own .MEC layout files and FONT.BNK (see
 // mec.h). Uses the game's binkw32.dll for the .XMV files (they are Bink
@@ -31,6 +33,7 @@
 #include <vector>
 
 #include "mec.h"
+#include "story.h"
 
 #pragma comment(lib, "winmm.lib")  // waveOut (menu sounds, music)
 #pragma comment(lib, "dinput8.lib")  // joystick (DirectInput8Create, c_dfDIJoystick2)
@@ -575,7 +578,10 @@ enum StateId
     ST_INTRO_FMV = 0xAA,  // intro movie        vtbl 0x78b7d8, Enter @ 0x5563a0
     ST_LANGUAGE  = 0xAB,  // GUI\LANGUAGE       vtbl 0x78b878, Enter @ 0x5565f0
     ST_TITLE     = 0xAC,  // GUI\BOOTUP         vtbl 0x7891e8, Update @ 0x541a70
-    ST_GAMEPLAY  = 0xB3,  // game load, pushed by FUN_00557d70 -> not implemented
+    ST_STORY     = 0xB3,  // story sequencer    vtbl 0x78ba28, creator 0x5580e0 (story.cpp)
+    ST_MISSION   = 0xB4,  // gameplay           Enter 0x54d680 -> stand-in (MissionScreen)
+    ST_GAMEPLAY  = 0x1B3, // not an original id: the old "close the program" stub, still
+                          // used by Take A Ride, Driving Games and replays
 };
 
 class Screen
@@ -2603,11 +2609,27 @@ public:
     // The attract video (0x551dc0) comes back to the front end and could not
     // be skipped with a key in the original (observed, see Update below).
     void SetReturn(int state, bool skippable) { returnTo_ = state; skippable_ = skippable; }
+    // Story videos (0x557c74): the player 0xD1 gets (path, 1, 2, stop time).
+    // SetMovie 0x5582d0 keeps the third argument as updates before Skip
+    // Sequence is read (x 120, +0x5c, counted down by 0x558260); the movie
+    // object (0x5514c0) stops once its frame count x 0.04 s reaches the
+    // stop time (-1: the whole video), then fades out over 24 updates. The
+    // listener (here a callback) is called at the end instead of returning
+    // to a state.
+    void PlayStory(const std::string& file, float stopSeconds, DWORD skipDelayMs, std::function<void()> done)
+    {
+        index_ = 3;
+        custom_ = file;
+        stopAt_ = stopSeconds;
+        skipDelay_ = skipDelayMs;
+        listener_ = std::move(done);
+    }
 
     void Enter() override                                    // 0x5563a0
     {
         static const char* kFiles[] = { "TERR:FMV\\LEGAL.XMV", "FMV\\ATARI.XMV", "FMV\\REFLECT.XMV" };
         std::string file = index_ <= 2 ? kFiles[index_] : custom_;
+        started_ = GetTickCount();
         if (!movie_.Open(g.Resolve(file), g.AudioTrack(), false))
             return Finish();  // missing file: carry on
         subs_.Load(file);
@@ -2616,7 +2638,9 @@ public:
     void Update() override
     {
         movie_.Update();
-        if (movie_.Done()) Finish();  // listener 0x556470 -> manager vtbl+0x28
+        if (movie_.Done()) return Finish();  // listener 0x556470 -> manager vtbl+0x28
+        // 0x551539: frames x 0.04 >= stop time (all story videos are 25 fps).
+        if (stopAt_ > 0.0f && float(movie_.Frame()) * 0.04f >= stopAt_) Finish();
     }
     void Render(HDC dc, Canvas& cv) override
     {
@@ -2625,19 +2649,21 @@ public:
     }
     void OnKey(WPARAM vk) override
     {
-        if (skippable_ && IsSkipKey(vk)) Finish();
+        if (CanSkip() && IsSkipKey(vk)) Finish();
     }
     // The player (state 0xD1, 0x558260) has no GUI; the joystick skips only
     // when Skip Sequence has a joystick alternative.
     void OnPad(WPARAM) override {}
     bool OnJoyButton(int code) override
     {
-        if (!skippable_ || !IsSkipJoy(code)) return false;
+        if (!CanSkip() || !IsSkipJoy(code)) return false;
         Finish();
         return true;
     }
 
 private:
+    bool CanSkip() const { return skippable_ && GetTickCount() - started_ >= skipDelay_; }
+
     // At boot the original returns to the sequencer. After the attract video
     // it returned to the main menu (observed; the static path through manager
     // vtbl+0x28, whose "home" is the first state created, was not resolved).
@@ -2646,6 +2672,14 @@ private:
         int to = returnTo_;
         returnTo_ = ST_BOOT_SEQ;
         skippable_ = true;
+        stopAt_ = -1.0f;
+        skipDelay_ = 0;
+        if (listener_) {
+            std::function<void()> done;
+            done.swap(listener_);
+            done();  // the story goes on (0x557f00)
+            return;
+        }
         g.Goto(to);
     }
 
@@ -2653,6 +2687,9 @@ private:
     std::string custom_;
     int returnTo_ = ST_BOOT_SEQ;
     bool skippable_ = true;
+    float stopAt_ = -1.0f;
+    DWORD skipDelay_ = 0, started_ = 0;
+    std::function<void()> listener_;
     Movie movie_;
     Subtitles subs_;
 };
@@ -2788,6 +2825,87 @@ public:
     }
 };
 static GameplayStub g_gameplay;
+
+// --------------------------------------------------- 0xB4 gameplay (stand-in)
+// Gameplay is not implemented. This screen stands for one mission: it names
+// it and lets the user send the messages gameplay sends to the story
+// sequencer (handler 0x557de0), then goes back to 0xB3. How gameplay itself
+// gets back to 0xB3 was not traced.
+class MissionScreen : public Screen
+{
+public:
+    std::function<void(const char*)> onMessage;
+    int mission = 0;
+
+    void Render(HDC, Canvas& cv) override
+    {
+        static const float kWhite[4] = { 1, 1, 1, 1 }, kGrey[4] = { 0.6f, 0.6f, 0.6f, 1 };
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Mission %d  (Missions\\Mission%.2d.mpc)", mission, mission);
+        const wchar_t* lines[] = { L"Gameplay is not implemented.", L"Enter: complete    F: fail",
+                                   L"R: restart    Escape: frontend" };
+        std::string title(buf);
+        g.font.Draw(cv, std::wstring(title.begin(), title.end()), 48, 160, 0.75f, 0.75f, kWhite);
+        for (int i = 0; i < 3; ++i) g.font.Draw(cv, lines[i], 48, 220.0f + 30 * i, 0.6f, 0.6f, kGrey);
+    }
+    void OnKey(WPARAM vk) override
+    {
+        const char* msg = vk == VK_RETURN ? "complete" : vk == 'F' ? "fail" : vk == 'R' ? "restart"
+                        : vk == VK_ESCAPE ? "frontend" : nullptr;
+        if (msg && onMessage) onMessage(msg);
+    }
+};
+static MissionScreen g_mission;
+
+// --------------------------------------------------- 0xB3 story sequencer --
+// StorySequencer (story.cpp) acting on this program.
+class StoryHostImpl : public StoryHost
+{
+public:
+    int32_t ProfileInt(int off) const override { return g_profile.Int(off); }
+    void SetProfileInt(int off, int32_t v) override { g_profile.SetInt(off, v); }
+    void SetProfileByte(int off, uint8_t v) override { g_profile.Write(off, &v, 1); }
+    bool ProgressLocked() const override { return false; }  // +0x5 is never set here
+    bool MissionPassed() const override { return true; }
+    // The live settings (g) into the block, which here is both copies. The
+    // file is written by the next save (Accept), as in the original.
+    void CopyProfileBlock() override { StoreLive(); }
+    void FreeSlots(int mission) override
+    {
+        if (mission == 5 || mission == 11 || mission == 15 || mission == 17 || mission == 22 || mission == 28)
+            Log("Story: 0x5949d0 frees the slots of 0x8ac2ac (not implemented)");
+    }
+    void SetupMission(int mission) override
+    {
+        char path[64];
+        snprintf(path, sizeof(path), "Missions\\Mission%.2d.mpc", mission);
+        ::Log("Game setup: mission %d, %s%s", mission, path, FileExists(path) ? "" : " (missing)");
+        g_mission.mission = mission;
+    }
+    void StartGameplay(const uint8_t*, size_t) override { g.Goto(ST_MISSION); }
+    void PlayVideo(const char* path, float stopSeconds) override;
+    void MissionFinished() override {}
+    void GotoSequencer() override { g.Goto(ST_STORY); }
+    void GotoFrontEnd() override { g.Goto(ST_FRONTEND); }
+    void Log(const char* text) override { ::Log("%s", text); }
+};
+static StoryHostImpl g_storyHost;
+static StorySequencer g_story(g_storyHost);
+
+void StoryHostImpl::PlayVideo(const char* path, float stopSeconds)
+{
+    if (stopSeconds > 0) ::Log("Story: %s up to %.2f s", path, stopSeconds);
+    g_introFmv.PlayStory(path, stopSeconds, 2000, [] { g_story.VideoDone(); });
+    g.Goto(ST_INTRO_FMV);
+}
+
+// State 0xB3 itself draws nothing; each update acts on the phase.
+class StoryScreen : public Screen
+{
+public:
+    void Update() override { g_story.Update(); }
+};
+static StoryScreen g_storyScreen;
 
 // --------------------------------------------------- front end -------------
 // FUN_00552480 loads GUI\FRONT; the screens, layout, textures and text come
@@ -3087,11 +3205,38 @@ private:
         // Options -> Profiles / Replays (0x553f08 / 0x553f3b): states 0xB2 / 0xB1.
         if (_stricmp(a.c_str(), "LoadSave") == 0) return g_mu.Start(MemoryUnit::PROFILES);
         if (_stricmp(a.c_str(), "LoadReplay") == 0) return g_mu.Start(MemoryUnit::REPLAYS);
-        static const char* kGameplay[] = { "StartGame", "NewGame", "ContinueGame", "fe_dgstart",
-                                           "ReplayMission2" };
+        // Undercover: the story sequencer (story.cpp). Each clears the block
+        // +0x18 first. New Game (0x553a8f) -> 0x557d10, Continue (0x553ac8)
+        // -> 0x557d30.
+        if (_stricmp(a.c_str(), "NewGame") == 0) {
+            g_story.ClearBlock();
+            g_story.NewGame();
+            return;
+        }
+        if (_stricmp(a.c_str(), "ContinueGame") == 0) {
+            g_story.ClearBlock();
+            g_story.ContinueGame();
+            return;
+        }
+        // Replay Mission (0x553b4a): _strnicmp 11 with "runmission=", then
+        // sscanf "runmission=mission%d.mps" must read 1 value, else nothing
+        // happens; then 0x557d70. The message bus lowercases every message
+        // (post 0x5715d0: tolower per character), which is why the
+        // case-sensitive format matches "RunMission=Mission01.mps".
+        if (StartsWithI(a, "RunMission=")) {
+            std::string lower = a;
+            for (char& c : lower) c = char(tolower(static_cast<unsigned char>(c)));
+            int id = 0;
+            if (sscanf(lower.c_str(), "runmission=mission%d.mps", &id) != 1) return;
+            g_story.ClearBlock();
+            g_story.RunMission(id);
+            return;
+        }
+        // "ReplayMission2" (Down on Mission 4) has no handler in the
+        // executable: like any unknown message it does nothing.
+        static const char* kGameplay[] = { "StartGame", "fe_dgstart" };
         for (const char* gp : kGameplay)
             if (_stricmp(a.c_str(), gp) == 0) return LaunchGameplay(a);
-        if (StartsWithI(a, "RunMission=")) return LaunchGameplay(a);
         if (a == "fe_quitgame") { g.Quit(); return; }  // 0x8ac258 vtbl+0x10
         // Back on the root screen (0x554e71): GUI vtbl+0x30(1, "QuitCon"),
         // "Quit DRIV3R?" over the main menu (Enter quits, Escape returns).
@@ -4042,6 +4187,12 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
     g.screens[ST_TITLE] = &title;
     g.screens[ST_FRONTEND] = &frontEnd;
     g.screens[ST_GAMEPLAY] = &g_gameplay;
+    g.screens[ST_STORY] = &g_storyScreen;
+    g.screens[ST_MISSION] = &g_mission;
+    g_mission.onMessage = [](const char* msg) {
+        g_story.OnMessage(msg);
+        g.Goto(ST_STORY);
+    };
 
     ShowWindow(g.hwnd, showCmd);
     UpdateWindow(g.hwnd);
