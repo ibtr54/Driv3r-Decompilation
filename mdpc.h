@@ -72,6 +72,18 @@ struct MdpcVertexBuffer
 struct MdpcSubstance
 {
     uint8_t bytes[8] = {};
+    // +0x10 / +0x14: offsets of its texture entries (index into
+    // MdpcPackage::textures); 0x5e0af0 binds the first as the diffuse
+    // texture, 0x5e0e70 the second as the normal map.
+    std::vector<int> textures;
+};
+
+// A PCMP texture entry (0x20 bytes: +4 hash, +8 data offset from PCMP +0x30,
+// +0xc size, +0x10 type, +0x14 / +0x16 width / height): its DDS file.
+struct MdpcTexture
+{
+    uint32_t hash = 0;
+    std::vector<uint8_t> dds;
 };
 
 // Offset and size of every MDPC chunk in a CHNK file, depth first (a
@@ -92,6 +104,7 @@ public:
     std::vector<MdpcModel> models;
     // Per material index (group material & 0xffff), its substances.
     std::vector<std::vector<MdpcSubstance>> materials;
+    std::vector<MdpcTexture> textures;  // the PCMP texture table, in order
 
     // Triangles of a group as vertex indices into its model's vertex
     // buffer (strips unrolled with alternating winding, degenerate ones

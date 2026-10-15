@@ -3004,6 +3004,9 @@ public:
                     mission, city_.effects, city_.failedEffects.empty() ? "" : " (not created:",
                     city_.failedEffects.empty() ? "" : (city_.failedEffects + ")").c_str(), city_.groupsDrawn,
                     city_.groupsSkipped);
+            if (city_.effects)
+                Log("Level 0x%02x: %zu textures created, %zu not, %zu drawn groups without a texture", mission,
+                    city_.textures, city_.texturesSkipped, city_.groupsUntextured);
             else
                 Log("Level 0x%02x: Direct3D 9 view (black), city not drawn: %s", mission, city_.Error().c_str());
             drawn_ = 0;

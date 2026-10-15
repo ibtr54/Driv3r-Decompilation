@@ -128,11 +128,24 @@ bool MdpcPackage::Load(const std::vector<uint8_t>& file, size_t mdpc, size_t siz
     // Materials (PCMP at header +0x2c): +0x08 count, +0x0c table of 0x18
     // entries {+0 offset of the substance offsets, +4 count}; offsets are
     // from the PCMP. A substance's bytes +0 / +4 / +5 / +6 choose the effect
-    // in 0x5d68e0 (table 0x8accc8), +0x10 / +0x14 its textures.
+    // in 0x5d68e0 (table 0x8accc8), +0x10 / +0x14 its textures: a list of
+    // offsets of texture entries. Texture table: PCMP +0x28 count, +0x2c
+    // offset (0x20 bytes each); the data starts at PCMP +0x30.
     materials.clear();
+    textures.clear();
     uint32_t pcmp = h.U32(0x2c);
-    if (pcmp && h.Has(pcmp, 0x10) && memcmp(&file[mdpc + pcmp], "PCMP", 4) == 0) {
+    if (pcmp && h.Has(pcmp, 0x34) && memcmp(&file[mdpc + pcmp], "PCMP", 4) == 0) {
         uint32_t mCount = h.U32(pcmp + 8), mTable = h.U32(pcmp + 0xc);
+        uint32_t tCount = h.U32(pcmp + 0x28), tTable = h.U32(pcmp + 0x2c), tData = h.U32(pcmp + 0x30);
+        for (uint32_t t = 0; t < tCount && h.Has(pcmp + tTable + size_t(t) * 0x20, 0x20); ++t) {
+            size_t te = pcmp + tTable + size_t(t) * 0x20;
+            MdpcTexture tex;
+            tex.hash = h.U32(te + 4);
+            size_t off = pcmp + size_t(tData) + h.U32(te + 8), bytes = h.U32(te + 0xc);
+            if (h.Has(off, bytes) && bytes >= 128 && memcmp(&file[mdpc + off], "DDS ", 4) == 0)
+                tex.dds.assign(file.begin() + long(mdpc + off), file.begin() + long(mdpc + off + bytes));
+            textures.push_back(std::move(tex));
+        }
         for (uint32_t m = 0; m < mCount && h.Has(pcmp + mTable + size_t(m) * 0x18, 0x18); ++m) {
             size_t e = pcmp + mTable + size_t(m) * 0x18;
             uint32_t list = h.U32(e), n = h.U32(e + 4);
@@ -141,6 +154,12 @@ bool MdpcPackage::Load(const std::vector<uint8_t>& file, size_t mdpc, size_t siz
                 size_t so = pcmp + h.U32(pcmp + list + s * 4);
                 MdpcSubstance sub;
                 if (h.Has(so, 8)) memcpy(sub.bytes, &file[mdpc + so], 8);
+                uint32_t refs = h.U32(so + 0x10), refCount = h.U32(so + 0x14);
+                for (uint32_t r = 0; r < refCount && r < 16; ++r) {
+                    uint32_t te = h.U32(pcmp + refs + r * 4);
+                    if (te < tTable || (te - tTable) % 0x20 || (te - tTable) / 0x20 >= tCount) break;
+                    sub.textures.push_back(int((te - tTable) / 0x20));
+                }
                 subs.push_back(sub);
             }
             materials.push_back(std::move(subs));

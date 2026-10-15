@@ -11,9 +11,12 @@
 // technique (0x5d5790), "World" = transpose(instance matrix) x submesh
 // matrix (0x5de4e0), "ViewProjection" = transpose(camera matrix) (0x5dc4b0),
 // g_fBrightness 0.651 (0x5de330), and the group's DrawIndexedPrimitive
-// (0x5dfe20). Not done yet: textures (a white texture stands in for every
-// texture parameter), the mood's light and fog (the effects' defaults are
-// kept), draw distances, and the game's camera.
+// (0x5dfe20). Textures (0x5e0970 for ordinary objects): g_TextureDiffuse
+// = the first texture of the group's substance (0x5e0af0), g_TextureNormalMap
+// = the second when substance +6 is 1 or 4 (0x5e0e70); the other texture
+// parameters keep a white texture. Not done yet: the render-state presets
+// (alpha test / blend, 0x5d48d0), the mood's light and fog (the effects'
+// defaults are kept), draw distances, and the game's camera.
 #pragma once
 
 #define WIN32_LEAN_AND_MEAN
@@ -55,6 +58,9 @@ public:
     int effects = 0;
     std::string failedEffects;  // ids that D3DX did not create
     size_t groupsDrawn = 0, groupsSkipped = 0, frameInstances = 0, frameDraws = 0;
+    // Textures created from the packages' DDS data, and those left out
+    // (a format not handled, or no DDS); groups without a texture.
+    size_t textures = 0, texturesSkipped = 0, groupsUntextured = 0;
 
 private:
     struct Package
@@ -62,8 +68,15 @@ private:
         const MdpcPackage* data = nullptr;
         std::vector<IDirect3DVertexBuffer9*> vbs;
         IDirect3DIndexBuffer9* ib = nullptr;
-        // Per model, per slot 0 submesh, per group: the effect id (-1: not drawn).
-        std::vector<std::vector<std::vector<int>>> effectOf;
+        std::vector<IDirect3DTexture9*> textures;  // per PCMP texture entry
+        struct Group
+        {
+            int fx = -1;  // effect id (-1: not drawn)
+            IDirect3DTexture9* diffuse = nullptr;
+            IDirect3DTexture9* normal = nullptr;
+        };
+        // Per model, per slot 0 submesh, per group.
+        std::vector<std::vector<std::vector<Group>>> groupOf;
     };
     struct Instance
     {
@@ -78,6 +91,8 @@ private:
         const char* world = nullptr;  // D3DXHANDLEs
         const char* alpha = nullptr;
         const char* brightness = nullptr;
+        const char* diffuse = nullptr;  // 0x5e1080
+        const char* normalMap = nullptr;
     };
 
     HMODULE dll_ = nullptr;

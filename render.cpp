@@ -115,6 +115,44 @@ void SetTextures(ID3DXEffect* fx, IDirect3DTexture9* tex)
     }
 }
 
+// A texture from a PCMP entry's DDS file, as stored: DXT1 / DXT3 / DXT5 or
+// 32-bit (A8R8G8B8 / X8R8G8B8), all its mip levels. How the game creates
+// its textures was not traced.
+IDirect3DTexture9* CreateDds(IDirect3DDevice9* device, const std::vector<uint8_t>& dds)
+{
+    if (dds.size() < 128) return nullptr;
+    auto u32 = [&](size_t o) { uint32_t v; memcpy(&v, &dds[o], 4); return v; };
+    UINT height = u32(12), width = u32(16), levels = std::max<UINT>(1, u32(28));
+    uint32_t pfFlags = u32(80), fourcc = u32(84), bits = u32(88), amask = u32(104);
+    D3DFORMAT fmt;
+    UINT block = 0;  // bytes per 4 x 4 block, 0: 4 bytes per pixel
+    if (pfFlags & 4) {  // DDPF_FOURCC
+        if (fourcc == MAKEFOURCC('D', 'X', 'T', '1')) { fmt = D3DFMT_DXT1; block = 8; }
+        else if (fourcc == MAKEFOURCC('D', 'X', 'T', '3')) { fmt = D3DFMT_DXT3; block = 16; }
+        else if (fourcc == MAKEFOURCC('D', 'X', 'T', '5')) { fmt = D3DFMT_DXT5; block = 16; }
+        else return nullptr;
+    } else if (bits == 32 && u32(92) == 0xff0000 && u32(96) == 0xff00 && u32(100) == 0xff) {
+        fmt = amask ? D3DFMT_A8R8G8B8 : D3DFMT_X8R8G8B8;
+    } else {
+        return nullptr;
+    }
+    IDirect3DTexture9* tex = nullptr;
+    if (FAILED(device->CreateTexture(width, height, levels, 0, fmt, D3DPOOL_MANAGED, &tex, nullptr))) return nullptr;
+    size_t off = 128;
+    for (UINT l = 0; l < levels; ++l) {
+        UINT w = std::max<UINT>(1, width >> l), h = std::max<UINT>(1, height >> l);
+        UINT rows = block ? (h + 3) / 4 : h, rowBytes = block ? (w + 3) / 4 * block : w * 4;
+        if (off + size_t(rows) * rowBytes > dds.size()) break;
+        D3DLOCKED_RECT lr;
+        if (FAILED(tex->LockRect(l, &lr, nullptr, 0))) break;
+        for (UINT r = 0; r < rows; ++r)
+            memcpy(static_cast<uint8_t*>(lr.pBits) + size_t(r) * lr.Pitch, &dds[off + size_t(r) * rowBytes], rowBytes);
+        tex->UnlockRect(l);
+        off += size_t(rows) * rowBytes;
+    }
+    return tex;
+}
+
 }  // namespace
 
 void CameraMatrix(const float eye[3], const float at[3], float fovY, float aspect, float zNear, float zFar, float out[16])
@@ -195,6 +233,8 @@ bool CityRenderer::Init(IDirect3DDevice9* device, const std::string& exePath)
         f.world = fx->GetParameterBySemantic(nullptr, "World");
         f.alpha = fx->GetParameterByName(nullptr, "g_fAlpha");
         f.brightness = fx->GetParameterByName(nullptr, "g_fBrightness");
+        f.diffuse = fx->GetParameterByName(nullptr, "g_TextureDiffuse");
+        f.normalMap = fx->GetParameterByName(nullptr, "g_TextureNormalMap");
         // 0x5de330: g_fBrightness 0x3f26a6a7; g_fAlpha comes from the drawn
         // object (+0x64, not traced): 1 here.
         uint32_t bits = 0x3f26a6a7;
@@ -234,12 +274,18 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
                 p.ib->Unlock();
             }
         }
+        for (const MdpcTexture& t : p.data->textures) {
+            IDirect3DTexture9* tex = CreateDds(device_, t.dds);
+            (tex ? textures : texturesSkipped)++;
+            p.textures.push_back(tex);
+        }
         byUid[p.data->uid] = int(packages_.size());
         packages_.push_back(std::move(p));
     }
-    // The effect of every group of slot 0 (0x5d68e0, first substance).
+    // The effect and textures of every group of slot 0 (0x5d68e0, 0x5e0970;
+    // first substance).
     for (Package& p : packages_) {
-        p.effectOf.resize(p.data->models.size());
+        p.groupOf.resize(p.data->models.size());
         for (size_t m = 0; m < p.data->models.size(); ++m) {
             const MdpcModel& model = p.data->models[m];
             int id = RenderId(model);
@@ -247,23 +293,31 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
                           model.vertexBuffer < p.data->vertexBuffers.size() &&
                           p.data->vertexBuffers[model.vertexBuffer].stride == 48;
             for (const MdpcSubmesh& sm : model.lods[0]) {
-                std::vector<int> ids;
+                std::vector<Package::Group> groups;
                 for (const MdpcGroup& g : sm.groups) {
-                    int fx = id;
+                    Package::Group gr;
+                    gr.fx = id;
                     auto it = byUid.find(g.material >> 16);
                     if (g.material != 0xffff0000 && g.material != 0xcccccccc && it != byUid.end()) {
-                        const MdpcPackage& owner = *packages_[it->second].data;
+                        const Package& owner = packages_[it->second];
                         uint32_t mi = g.material & 0xffff;
-                        if (mi < owner.materials.size() && !owner.materials[mi].empty()) {
-                            const uint8_t* s = owner.materials[mi][0].bytes;
+                        if (mi < owner.data->materials.size() && !owner.data->materials[mi].empty()) {
+                            const MdpcSubstance& sub = owner.data->materials[mi][0];
+                            const uint8_t* s = sub.bytes;
                             int index = (((s[4] & 0x7f) + id * 4) * 3 + s[5]) * 5 + s[6];
-                            if (int e = SubstanceEffect(index)) fx = e;
+                            if (int e = SubstanceEffect(index)) gr.fx = e;
+                            // Texture references are entries of the material's own package.
+                            if (!sub.textures.empty() && size_t(sub.textures[0]) < owner.textures.size())
+                                gr.diffuse = owner.textures[sub.textures[0]];
+                            if ((s[6] == 1 || s[6] == 4) && sub.textures.size() >= 2 &&
+                                size_t(sub.textures[1]) < owner.textures.size())
+                                gr.normal = owner.textures[sub.textures[1]];
                         }
                     }
-                    if (!layout || fx <= 0 || fx >= 0x30 || !fx_[fx].fx) fx = -1;
-                    ids.push_back(fx);
+                    if (!layout || gr.fx <= 0 || gr.fx >= 0x30 || !fx_[gr.fx].fx) gr.fx = -1;
+                    groups.push_back(gr);
                 }
-                p.effectOf[m].push_back(std::move(ids));
+                p.groupOf[m].push_back(std::move(groups));
             }
         }
     }
@@ -281,8 +335,11 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
             for (int k = 0; k < 8; ++k)
                 for (int j = 0; j < 3; ++j) c[j] += m.box[k][j] / 8.0f;
         in.Transform(c, inst.centre);
-        for (const auto& sm : packages_[it->second].effectOf[inst.model])
-            for (int e : sm) (e >= 0 ? groupsDrawn : groupsSkipped)++;
+        for (const auto& sm : packages_[it->second].groupOf[inst.model])
+            for (const Package::Group& g : sm) {
+                (g.fx >= 0 ? groupsDrawn : groupsSkipped)++;
+                if (g.fx >= 0 && !g.diffuse) ++groupsUntextured;
+            }
         instances_.push_back(inst);
     }
     return true;
@@ -298,7 +355,7 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], float rang
     const D3DXVECTOR4 cam(eye[0], eye[1], eye[2], 1.0f);
     if (camPos_) shared_->SetVector(camPos_, &cam);
 
-    struct Item { int fx; const Instance* inst; const MdpcSubmesh* sm; const MdpcGroup* g; };
+    struct Item { int fx; const Instance* inst; const MdpcSubmesh* sm; const MdpcGroup* g; const Package::Group* info; };
     std::vector<Item> items;
     for (const Instance& inst : instances_) {
         float d[3] = { inst.centre[0] - eye[0], inst.centre[1] - eye[1], inst.centre[2] - eye[2] };
@@ -312,11 +369,13 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], float rang
         const MdpcModel& m = p.data->models[inst.model];
         for (size_t s = 0; s < m.lods[0].size(); ++s)
             for (size_t g = 0; g < m.lods[0][s].groups.size(); ++g) {
-                int fx = p.effectOf[inst.model][s][g];
-                if (fx >= 0) items.push_back({ fx, &inst, &m.lods[0][s], &m.lods[0][s].groups[g] });
+                const Package::Group& info = p.groupOf[inst.model][s][g];
+                if (info.fx >= 0) items.push_back({ info.fx, &inst, &m.lods[0][s], &m.lods[0][s].groups[g], &info });
             }
     }
-    std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) { return a.fx < b.fx; });
+    std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+        return a.fx != b.fx ? a.fx < b.fx : a.info->diffuse < b.info->diffuse;
+    });
 
     device_->SetVertexDeclaration(decl_);
     for (size_t i = 0; i < items.size();) {
@@ -337,6 +396,8 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], float rang
             if (it.sm->hasMatrix) Mul(wt, it.sm->matrix, world);
             else memcpy(world, wt, sizeof(world));
             if (e.world) e.fx->SetMatrix(e.world, reinterpret_cast<const D3DXMATRIX*>(world));
+            if (e.diffuse) e.fx->SetTexture(e.diffuse, it.info->diffuse ? it.info->diffuse : white_);
+            if (e.normalMap) e.fx->SetTexture(e.normalMap, it.info->normal ? it.info->normal : white_);
             e.fx->CommitChanges();
             IDirect3DVertexBuffer9* vb = p.vbs[m.vertexBuffer];
             if (!vb || !p.ib) continue;
@@ -373,6 +434,8 @@ void CityRenderer::Release()
         for (IDirect3DVertexBuffer9* b : p.vbs)
             if (b) b->Release();
         if (p.ib) p.ib->Release();
+        for (IDirect3DTexture9* t : p.textures)
+            if (t) t->Release();
     }
     packages_.clear();
     instances_.clear();
@@ -394,4 +457,5 @@ void CityRenderer::Release()
     effects = 0;
     failedEffects.clear();
     groupsDrawn = groupsSkipped = 0;
+    textures = texturesSkipped = groupsUntextured = 0;
 }
