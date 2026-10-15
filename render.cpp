@@ -153,6 +153,149 @@ IDirect3DTexture9* CreateDds(IDirect3DDevice9* device, const std::vector<uint8_t
     return tex;
 }
 
+// Render-state presets. A pair is (D3DRENDERSTATETYPE or D3DSAMPLERSTATETYPE,
+// value).
+struct StatePair { uint16_t state; uint32_t value; };
+struct PresetPair { uint8_t preset; uint16_t state; uint32_t value; };
+// 0x5d4b90 (called at the end of 0x5d9500): the device defaults, render states.
+const StatePair kDefaultRS[] = {
+    { 7, 1 }, { 168, 15 }, { 23, 4 }, { 14, 1 }, { 8, 3 }, { 9, 2 }, { 15, 1 }, { 16, 1 },
+    { 19, 5 }, { 20, 6 }, { 22, 2 }, { 24, 1 }, { 25, 5 }, { 26, 1 }, { 27, 1 }, { 28, 0 },
+    { 29, 0 }, { 35, 0 }, { 36, 0 }, { 37, 0 }, { 38, 0 }, { 48, 0 }, { 52, 0 }, { 53, 1 },
+    { 54, 1 }, { 55, 1 }, { 56, 8 }, { 57, 0 }, { 58, 0xffffffff }, { 59, 0xffffffff }, { 60, 0xffffffff }, { 136, 1 },
+    { 137, 0 }, { 139, 0 }, { 140, 0 }, { 141, 0 }, { 142, 0 }, { 143, 0 }, { 145, 1 }, { 146, 2 },
+    { 147, 0 }, { 148, 0 }, { 151, 1 }, { 152, 0 }, { 154, 0 }, { 155, 0 }, { 156, 0 }, { 157, 0 },
+    { 158, 0 }, { 159, 0 }, { 160, 0 }, { 162, 0xffffffff }, { 163, 0 }, { 165, 1 }, { 166, 0 }, { 167, 0 },
+    { 170, 0 }, { 171, 1 }, { 174, 0 }, { 184, 0 }, { 185, 0 }, { 186, 1 }, { 187, 1 }, { 188, 1 },
+    { 189, 8 }, { 190, 15 }, { 191, 15 }, { 192, 15 }, { 193, 0xffffffff }, { 194, 0 }, { 195, 0 }, { 206, 0 },
+    { 207, 2 }, { 208, 1 }, { 209, 1 },
+};
+// ... and sampler states (stages 0..3): ADDRESSU / V / W = WRAP.
+const StatePair kDefaultSampler[] = { { 1, 1 }, { 2, 1 }, { 3, 1 } };
+// 0x5d9500: per preset its render states (0x5d4860) and sampler states
+// (0x5d4790); the texture-stage lists (0x5d4800) are left out, the
+// effects' pixel shaders do not use them.
+const PresetPair kPresetRS[] = {
+    { 0x01, 23, 4 }, { 0x01, 27, 0 }, { 0x01, 15, 1 }, { 0x01, 22, 2 }, { 0x01, 28, 1 }, { 0x01, 35, 0 },
+    { 0x0a, 15, 1 }, { 0x0a, 27, 0 }, { 0x0a, 28, 1 }, { 0x0a, 29, 1 },
+    { 0x0b, 15, 1 }, { 0x0b, 27, 1 }, { 0x0b, 28, 1 }, { 0x0b, 29, 1 },
+    { 0x03, 15, 0 }, { 0x03, 27, 0 }, { 0x03, 52, 1 }, { 0x03, 28, 1 }, { 0x03, 57, 1 }, { 0x03, 56, 4 },
+    { 0x03, 55, 1 }, { 0x03, 7, 1 }, { 0x03, 23, 4 }, { 0x03, 14, 1 },
+    { 0x02, 23, 4 }, { 0x02, 27, 0 }, { 0x02, 15, 0 }, { 0x02, 22, 2 }, { 0x02, 24, 2 },
+    { 0x04, 23, 4 }, { 0x04, 14, 0 }, { 0x04, 27, 0 }, { 0x04, 15, 1 }, { 0x04, 22, 2 }, { 0x04, 28, 0 },
+    { 0x0c, 23, 4 }, { 0x0c, 28, 1 }, { 0x0c, 27, 1 }, { 0x0c, 29, 1 }, { 0x0c, 15, 1 }, { 0x0c, 25, 5 },
+    { 0x0c, 24, 2 },
+    { 0x09, 14, 0 }, { 0x09, 27, 1 }, { 0x09, 15, 1 }, { 0x09, 25, 5 }, { 0x09, 24, 2 },
+    { 0x05, 23, 4 }, { 0x05, 28, 1 }, { 0x05, 27, 1 }, { 0x05, 15, 1 }, { 0x05, 25, 5 }, { 0x05, 24, 254 },
+    { 0x06, 14, 0 }, { 0x06, 23, 4 }, { 0x06, 28, 1 }, { 0x06, 27, 1 }, { 0x06, 15, 1 }, { 0x06, 25, 4 },
+    { 0x06, 24, 254 },
+    { 0x07, 14, 1 }, { 0x07, 27, 1 }, { 0x07, 15, 1 }, { 0x07, 25, 5 }, { 0x07, 24, 128 },
+    { 0x08, 14, 0 }, { 0x08, 27, 1 }, { 0x08, 15, 1 }, { 0x08, 25, 8 }, { 0x08, 22, 1 }, { 0x08, 24, 128 },
+    { 0x13, 27, 1 }, { 0x13, 15, 1 },
+    { 0x14, 23, 4 }, { 0x14, 27, 1 }, { 0x14, 15, 1 }, { 0x14, 25, 8 },
+    { 0x15, 23, 4 }, { 0x15, 28, 0 }, { 0x15, 15, 1 },
+    { 0x16, 23, 4 }, { 0x16, 27, 1 }, { 0x16, 15, 0 }, { 0x16, 25, 5 }, { 0x16, 24, 1 }, { 0x16, 171, 1 },
+    { 0x16, 19, 5 }, { 0x16, 20, 2 },
+    { 0x0e, 23, 4 }, { 0x0e, 14, 0 }, { 0x0e, 27, 1 }, { 0x0e, 15, 1 }, { 0x0e, 25, 5 }, { 0x0e, 24, 1 },
+    { 0x0f, 23, 4 }, { 0x0f, 14, 0 }, { 0x0f, 27, 1 }, { 0x0f, 15, 1 }, { 0x0f, 25, 5 }, { 0x0f, 24, 1 },
+    { 0x10, 23, 4 }, { 0x10, 28, 1 }, { 0x10, 27, 1 }, { 0x10, 15, 1 }, { 0x10, 25, 5 }, { 0x10, 24, 1 },
+    { 0x10, 171, 1 }, { 0x10, 19, 7 }, { 0x10, 20, 2 },
+    { 0x0d, 23, 2 }, { 0x0d, 14, 0 }, { 0x0d, 27, 1 }, { 0x0d, 15, 1 }, { 0x0d, 25, 5 }, { 0x0d, 22, 2 },
+    { 0x0d, 24, 1 },
+    { 0x18, 28, 0 },
+    { 0x1a, 28, 0 },
+    { 0x19, 28, 0 }, { 0x19, 23, 8 }, { 0x19, 27, 1 }, { 0x19, 15, 1 }, { 0x19, 14, 0 },
+    { 0x17, 7, 0 }, { 0x17, 14, 0 }, { 0x17, 23, 8 }, { 0x17, 28, 0 }, { 0x17, 23, 4 }, { 0x17, 27, 1 },
+    { 0x17, 15, 1 },
+    { 0x11, 28, 0 }, { 0x11, 52, 1 }, { 0x11, 15, 0 }, { 0x11, 25, 8 }, { 0x11, 14, 0 }, { 0x11, 52, 1 },
+    { 0x11, 23, 5 }, { 0x11, 9, 1 }, { 0x11, 56, 8 }, { 0x11, 54, 1 }, { 0x11, 53, 1 }, { 0x11, 57, 1 },
+    { 0x11, 58, 0xffffffff }, { 0x11, 59, 0xffffffff }, { 0x11, 168, 0 }, { 0x11, 55, 8 }, { 0x11, 22, 2 },
+    { 0x12, 28, 0 }, { 0x12, 52, 1 }, { 0x12, 15, 0 }, { 0x12, 27, 0 }, { 0x12, 25, 8 }, { 0x12, 14, 0 },
+    { 0x12, 52, 1 }, { 0x12, 23, 5 }, { 0x12, 9, 1 }, { 0x12, 56, 8 }, { 0x12, 54, 1 }, { 0x12, 53, 1 },
+    { 0x12, 57, 1 }, { 0x12, 58, 0xffffffff }, { 0x12, 59, 0xffffffff }, { 0x12, 168, 0 }, { 0x12, 55, 7 }, { 0x12, 22, 3 },
+    { 0x20, 15, 0 }, { 0x20, 27, 0 }, { 0x20, 25, 8 }, { 0x20, 28, 0 }, { 0x20, 7, 1 }, { 0x20, 23, 8 },
+    { 0x20, 14, 0 }, { 0x20, 19, 2 }, { 0x20, 20, 1 }, { 0x20, 168, 8 },
+    { 0x1f, 15, 0 }, { 0x1f, 27, 0 }, { 0x1f, 25, 8 }, { 0x1f, 52, 1 }, { 0x1f, 28, 0 }, { 0x1f, 57, 1 },
+    { 0x1f, 56, 4 }, { 0x1f, 55, 1 }, { 0x1f, 7, 1 }, { 0x1f, 23, 8 }, { 0x1f, 14, 0 }, { 0x1f, 19, 2 },
+    { 0x1f, 20, 1 }, { 0x1f, 168, 8 },
+    { 0x1c, 27, 1 }, { 0x1c, 52, 1 }, { 0x1c, 57, 1 }, { 0x1c, 56, 4 }, { 0x1c, 55, 1 }, { 0x1c, 7, 1 },
+    { 0x1c, 23, 4 }, { 0x1c, 14, 1 }, { 0x1c, 168, 7 }, { 0x1c, 171, 1 }, { 0x1c, 19, 7 }, { 0x1c, 20, 8 },
+    { 0x1b, 52, 1 }, { 0x1b, 29, 1 }, { 0x1b, 57, 1 }, { 0x1b, 56, 4 }, { 0x1b, 55, 1 }, { 0x1b, 168, 7 },
+    { 0x1b, 171, 1 }, { 0x1b, 19, 5 }, { 0x1b, 20, 6 },
+    { 0x1e, 168, 0 },
+    { 0x1d, 23, 4 }, { 0x1d, 14, 0 }, { 0x1d, 27, 1 }, { 0x1d, 15, 1 }, { 0x1d, 25, 5 },
+    { 0x26, 23, 4 }, { 0x26, 14, 0 }, { 0x26, 28, 0 }, { 0x26, 27, 0 }, { 0x26, 15, 0 }, { 0x26, 168, 0 },
+    { 0x27, 27, 1 }, { 0x27, 15, 0 }, { 0x27, 23, 4 }, { 0x27, 14, 0 }, { 0x27, 28, 0 }, { 0x27, 57, 1 },
+    { 0x27, 55, 3 }, { 0x27, 56, 8 }, { 0x27, 53, 1 }, { 0x27, 52, 1 }, { 0x27, 168, 8 }, { 0x27, 19, 5 },
+    { 0x27, 20, 2 },
+    { 0x28, 171, 1 }, { 0x28, 19, 2 }, { 0x28, 20, 2 }, { 0x28, 27, 1 }, { 0x28, 14, 0 }, { 0x28, 168, 8 },
+    { 0x2a, 22, 1 },
+    { 0x2b, 171, 1 }, { 0x2b, 19, 5 }, { 0x2b, 20, 2 },
+    { 0x2c, 27, 0 }, { 0x2c, 15, 0 },
+    { 0x2d, 171, 3 }, { 0x2d, 19, 5 }, { 0x2d, 20, 2 },
+    { 0x30, 14, 0 },
+    { 0x31, 14, 0 },
+    { 0x23, 15, 0 }, { 0x23, 27, 0 }, { 0x23, 28, 0 }, { 0x23, 7, 0 },
+    { 0x25, 15, 0 }, { 0x25, 27, 0 }, { 0x25, 28, 0 }, { 0x25, 171, 1 }, { 0x25, 19, 2 }, { 0x25, 20, 2 },
+    { 0x25, 7, 0 },
+    { 0x21, 15, 1 }, { 0x21, 27, 1 }, { 0x21, 28, 0 }, { 0x21, 7, 0 },
+    { 0x22, 15, 1 }, { 0x22, 27, 1 }, { 0x22, 28, 0 }, { 0x22, 171, 1 }, { 0x22, 19, 5 }, { 0x22, 20, 2 },
+    { 0x22, 7, 0 },
+    { 0x24, 15, 0 }, { 0x24, 27, 0 }, { 0x24, 28, 0 }, { 0x24, 7, 0 },
+};
+const PresetPair kPresetSampler[] = {
+    { 0x18, 1, 3 }, { 0x18, 3, 3 }, { 0x18, 2, 3 },
+    { 0x17, 1, 3 }, { 0x17, 3, 3 }, { 0x17, 2, 3 },
+    { 0x2e, 1, 3 },
+    { 0x2f, 2, 3 }, { 0x2f, 3, 3 },
+};
+
+// 0x5cb9d0 (jump table 0x5cbaec / 0x5cba84): substance type -> preset;
+// above 0x35: 1.
+int TypePreset(int type)
+{
+    static const uint8_t kPreset[0x36] = {
+        0x04, 0x1e, 0x20, 0x1f, 0x27, 0x21, 0x02, 0x0c, 0x01, 0x1e, 0x0e, 0x0a, 0x0a, 0x1e, 0x0f, 0x10, 0x0c, 0x0c,
+        0x0c, 0x09, 0x07, 0x04, 0x05, 0x09, 0x08, 0x15, 0x26, 0x11, 0x08, 0x0c, 0x13, 0x0d, 0x0d, 0x17, 0x19, 0x19,
+        0x19, 0x19, 0x19, 0x19, 0x19, 0x19, 0x19, 0x19, 0x19, 0x19, 0x18, 0x17, 0x17, 0x17, 0x17, 0x17, 0x1a, 0x17,
+    };
+    return type >= 0 && type < 0x36 ? kPreset[type] : 1;
+}
+
+// 0x5d8340: the presets added for byte 1 (b1) and the flags of a substance,
+// as bits (n: preset 0x2a + n). The check of the render context [0x8afab0]
+// (8 / 9 keep 0x2c out) is left out: it was 0 in every traced draw.
+unsigned ExtraPresets(int b1, int flags)
+{
+    unsigned m = 0;
+    if ((flags & 0x10) || b1 == 1 || b1 == 4) m |= 1u << 0;   // 0x2a cull none
+    bool keep = false;
+    if (flags & 8) { m |= 1u << 1; keep = true; }               // 0x2b additive
+    if (flags & 0x80) { m |= 1u << 3; keep = true; }            // 0x2d BLENDOP 3
+    if (((flags & 4) || b1 == 2 || b1 == 5) && !keep) m |= 1u << 2;  // 0x2c no blend / test
+    if (flags & 0x40) m |= 1u << 4;                             // 0x2e clamp U
+    if (flags & 0x20) m |= 1u << 5;                             // 0x2f clamp V, W
+    if (flags & 1) m |= 1u << 6;                                // 0x30 no z write
+    if (flags & 2) m |= 1u << 7;                                // 0x31 no z write
+    return m;
+}
+
+// 0x5cc3d0, for a model without flag 2 (+0x1c; none in the cities): each
+// substance of its slots 0..3 of type 0x19 becomes 8; one of type 0xf gets
+// byte 1 = (flags == 0x10) when byte 1 is 2, flag 4 cleared and byte 6 = 4.
+// (A substance of type 6 sets the model's flags to 0xffff00bb; not used
+// here.) Runs after the conversion and before the effect (0x5d68e0).
+void ModelSubstance(uint8_t s[8])
+{
+    if (s[0] == 0x19) {
+        s[0] = 8;
+    } else if (s[0] == 0xf) {
+        if (s[1] == 2) s[1] = s[2] == 0x10;
+        s[2] &= 0xfb;
+        s[6] = 4;
+    }
+}
+
 }  // namespace
 
 void CameraMatrix(const float eye[3], const float at[3], float fovY, float aspect, float zNear, float zFar, float out[16])
@@ -252,6 +395,7 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
 {
     if (!device_) { error_ = "no device"; return false; }
     std::map<uint32_t, int> byUid;  // the table 0x8b5310 (0x57c058)
+    std::map<int, size_t> perPreset;
     for (size_t k = first; k < end && k < packages.size(); ++k) {
         Package p;
         p.data = &packages[k];
@@ -297,13 +441,16 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
                 for (const MdpcGroup& g : sm.groups) {
                     Package::Group gr;
                     gr.fx = id;
+                    // No substance: the binder's request keeps type 8 (0x5e0900).
+                    uint8_t s[8] = { 8 };
                     auto it = byUid.find(g.material >> 16);
                     if (g.material != 0xffff0000 && g.material != 0xcccccccc && it != byUid.end()) {
                         const Package& owner = packages_[it->second];
                         uint32_t mi = g.material & 0xffff;
                         if (mi < owner.data->materials.size() && !owner.data->materials[mi].empty()) {
                             const MdpcSubstance& sub = owner.data->materials[mi][0];
-                            const uint8_t* s = sub.bytes;
+                            memcpy(s, sub.bytes, 8);
+                            if (!(model.flags & 2)) ModelSubstance(s);
                             int index = (((s[4] & 0x7f) + id * 4) * 3 + s[5]) * 5 + s[6];
                             if (int e = SubstanceEffect(index)) gr.fx = e;
                             // Texture references are entries of the material's own package.
@@ -315,6 +462,7 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
                         }
                     }
                     if (!layout || gr.fx <= 0 || gr.fx >= 0x30 || !fx_[gr.fx].fx) gr.fx = -1;
+                    gr.state = StateFor(s);
                     groups.push_back(gr);
                 }
                 p.groupOf[m].push_back(std::move(groups));
@@ -339,10 +487,76 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
             for (const Package::Group& g : sm) {
                 (g.fx >= 0 ? groupsDrawn : groupsSkipped)++;
                 if (g.fx >= 0 && !g.diffuse) ++groupsUntextured;
+                if (g.fx >= 0) ++perPreset[states_[g.state].base];
             }
         instances_.push_back(inst);
     }
+    stateSets = states_.size();
+    presetsUsed.clear();
+    for (const auto& e : perPreset) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%s0x%02x x%zu", presetsUsed.empty() ? "" : ", ", unsigned(e.first), e.second);
+        presetsUsed += buf;
+    }
     return true;
+}
+
+int CityRenderer::StateFor(const uint8_t s[8])
+{
+    // The request reads bytes 0..2 sign-extended (0x5e0900).
+    int base = TypePreset(int8_t(s[0]));
+    unsigned extras = ExtraPresets(int8_t(s[1]), int8_t(s[2]));
+    for (size_t k = 0; k < states_.size(); ++k)
+        if (states_[k].base == base && states_[k].extras == extras) return int(k);
+    // Defaults, the base preset over them (presets below 0x2a first restore
+    // the defaults, 0x5d50f0), then the extra presets in 0x5d8340's order.
+    std::map<DWORD, DWORD> rs, sampler;
+    for (const StatePair& p : kDefaultRS) rs[p.state] = p.value;
+    for (const StatePair& p : kDefaultSampler) sampler[p.state] = p.value;
+    // Filters: MIN / MAG LINEAR, MIP POINT in every traced draw (where the
+    // game sets them was not found).
+    sampler[D3DSAMP_MINFILTER] = D3DTEXF_LINEAR;
+    sampler[D3DSAMP_MAGFILTER] = D3DTEXF_LINEAR;
+    sampler[D3DSAMP_MIPFILTER] = D3DTEXF_POINT;
+    auto apply = [&](int preset) {
+        for (const PresetPair& p : kPresetRS)
+            if (p.preset == preset) rs[p.state] = p.value;
+        for (const PresetPair& p : kPresetSampler)
+            if (p.preset == preset) sampler[p.state] = p.value;
+    };
+    apply(base);
+    static const int kOrder[] = { 0, 1, 3, 2, 4, 5, 6, 7 };  // 0x2a, 0x2b, 0x2d, 0x2c, 0x2e, 0x2f, 0x30, 0x31
+    for (int n : kOrder)
+        if (extras & (1u << n)) apply(0x2a + n);
+    // Stand-ins (see render.h): no fog, cull mode mirrored.
+    rs[D3DRS_FOGENABLE] = FALSE;
+    if (rs[D3DRS_CULLMODE] == D3DCULL_CW) rs[D3DRS_CULLMODE] = D3DCULL_CCW;
+    else if (rs[D3DRS_CULLMODE] == D3DCULL_CCW) rs[D3DRS_CULLMODE] = D3DCULL_CW;
+    StateSet set;
+    set.base = base;
+    set.extras = extras;
+    set.rs.assign(rs.begin(), rs.end());
+    set.sampler.assign(sampler.begin(), sampler.end());
+    set.blend = rs[D3DRS_ALPHABLENDENABLE] != 0;
+    states_.push_back(std::move(set));
+    return int(states_.size() - 1);
+}
+
+void CityRenderer::ApplyState(const StateSet& set)
+{
+    for (const auto& p : set.rs) {
+        if (p.first >= 256 || (rsValid_[p.first] && rsCache_[p.first] == p.second)) continue;
+        device_->SetRenderState(D3DRENDERSTATETYPE(p.first), p.second);
+        rsCache_[p.first] = p.second;
+        rsValid_[p.first] = true;
+    }
+    for (DWORD stage = 0; stage < 4; ++stage)
+        for (const auto& p : set.sampler) {
+            if (p.first >= 16 || (samplerValid_[stage][p.first] && samplerCache_[stage][p.first] == p.second)) continue;
+            device_->SetSamplerState(stage, D3DSAMPLERSTATETYPE(p.first), p.second);
+            samplerCache_[stage][p.first] = p.second;
+            samplerValid_[stage][p.first] = true;
+        }
 }
 
 void CityRenderer::Draw(const float viewProj[16], const float eye[3], float range)
@@ -373,11 +587,18 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], float rang
                 if (info.fx >= 0) items.push_back({ info.fx, &inst, &m.lods[0][s], &m.lods[0][s].groups[g], &info });
             }
     }
-    std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
-        return a.fx != b.fx ? a.fx < b.fx : a.info->diffuse < b.info->diffuse;
+    // Blended groups after the others (stand-in, see render.h), then by
+    // effect, render states and texture.
+    std::stable_sort(items.begin(), items.end(), [this](const Item& a, const Item& b) {
+        bool ba = states_[a.info->state].blend, bb = states_[b.info->state].blend;
+        if (ba != bb) return bb;
+        if (a.fx != b.fx) return a.fx < b.fx;
+        if (a.info->state != b.info->state) return a.info->state < b.info->state;
+        return a.info->diffuse < b.info->diffuse;
     });
 
     device_->SetVertexDeclaration(decl_);
+    int applied = -1;
     for (size_t i = 0; i < items.size();) {
         Effect& e = fx_[items[i].fx];
         UINT passes = 0;
@@ -399,6 +620,10 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], float rang
             if (e.diffuse) e.fx->SetTexture(e.diffuse, it.info->diffuse ? it.info->diffuse : white_);
             if (e.normalMap) e.fx->SetTexture(e.normalMap, it.info->normal ? it.info->normal : white_);
             e.fx->CommitChanges();
+            if (it.info->state != applied) {
+                ApplyState(states_[it.info->state]);
+                applied = it.info->state;
+            }
             IDirect3DVertexBuffer9* vb = p.vbs[m.vertexBuffer];
             if (!vb || !p.ib) continue;
             device_->SetStreamSource(0, vb, 0, p.data->vertexBuffers[m.vertexBuffer].stride);
@@ -423,6 +648,9 @@ void CityRenderer::OnLostDevice()
 
 void CityRenderer::OnResetDevice()
 {
+    // A reset puts every state back to Direct3D's defaults.
+    memset(rsValid_, 0, sizeof(rsValid_));
+    memset(samplerValid_, 0, sizeof(samplerValid_));
     if (shared_) shared_->OnResetDevice();
     for (Effect& e : fx_)
         if (e.fx) e.fx->OnResetDevice();
@@ -439,6 +667,9 @@ void CityRenderer::Release()
     }
     packages_.clear();
     instances_.clear();
+    states_.clear();
+    memset(rsValid_, 0, sizeof(rsValid_));
+    memset(samplerValid_, 0, sizeof(samplerValid_));
     for (Effect& e : fx_) {
         if (e.fx) e.fx->Release();
         e = Effect();

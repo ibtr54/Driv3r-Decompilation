@@ -67,8 +67,10 @@ struct MdpcVertexBuffer
     const float* Position(uint32_t i) const { return reinterpret_cast<const float*>(&data[size_t(i) * stride]); }
 };
 
-// The first 8 bytes of a PCMP substance (a material's pass): +0 type,
-// +4 & 0x7f / +5 / +6 pick the effect with the model's render id (0x5d68e0).
+// The first 8 bytes of a PCMP substance (a material's pass), as the game has
+// them after loading (ConvertSubstance): +0 type (selects the render-state
+// preset, 0x5cb9d0), +1 / +2 more presets (0x5d8340), +4 & 0x7f / +5 / +6
+// pick the effect with the model's render id (0x5d68e0).
 struct MdpcSubstance
 {
     uint8_t bytes[8] = {};
@@ -85,6 +87,14 @@ struct MdpcTexture
     uint32_t hash = 0;
     std::vector<uint8_t> dds;
 };
+
+// The game converts every substance of a package when it is first loaded
+// (0x5d6490): 0x5cbf80 turns the file's dword +0 into the runtime type
+// (byte 0, table 0x5cc1c4), byte 1 and the flags of byte 2 (bits 0x8000,
+// 0x10000, 0x20000, 0x40000; 0x100 / 0x200 only with flag), then 0x5cc270
+// moves byte 6 to byte 3 and rewrites bytes 1, 2 and 4..7 from bytes 4, 5
+// and 7. flag is set only for substance 0x20 of a package of type 0x1f.
+void ConvertSubstance(uint8_t s[8], bool flag = false);
 
 // Offset and size of every MDPC chunk in a CHNK file, depth first (a
 // .vvs holds one per car, SuperRegions.pcs one per region group).

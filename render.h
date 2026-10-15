@@ -14,9 +14,19 @@
 // (0x5dfe20). Textures (0x5e0970 for ordinary objects): g_TextureDiffuse
 // = the first texture of the group's substance (0x5e0af0), g_TextureNormalMap
 // = the second when substance +6 is 1 or 4 (0x5e0e70); the other texture
-// parameters keep a white texture. Not done yet: the render-state presets
-// (alpha test / blend, 0x5d48d0), the mood's light and fog (the effects'
-// defaults are kept), draw distances, and the game's camera.
+// parameters keep a white texture. Render states: the effects' passes set
+// none, the game sets them from presets (table [0x8afaac], built by
+// 0x5d9500): per group the device defaults (0x5d4b90), the preset of the
+// substance type (0x5cb9d0, applied by 0x5d4440 after the texture binder's
+// request 0x5e0900) and the presets of its byte 1 / flags (0x5d8340), with
+// their sampler states for stages 0..3; set only where the device's value
+// differs, like the game's cache. Checked against a trace of the original
+// (driv3r-re\tools\presets\d3d9proxy.cpp). Stand-ins: no fog (the mood's
+// fog values are not set yet), the cull mode swapped (CW <-> CCW: the
+// game's camera has a mirror that the stand-in camera has not), blended
+// groups drawn after the others (the game's draw order is not traced).
+// Not done yet: the mood's light and fog (the effects' defaults are kept),
+// draw distances, and the game's camera.
 #pragma once
 
 #define WIN32_LEAN_AND_MEAN
@@ -61,6 +71,10 @@ public:
     // Textures created from the packages' DDS data, and those left out
     // (a format not handled, or no DDS); groups without a texture.
     size_t textures = 0, texturesSkipped = 0, groupsUntextured = 0;
+    // Drawn groups per base preset ("preset x count, ..."), distinct
+    // render-state sets.
+    std::string presetsUsed;
+    size_t stateSets = 0;
 
 private:
     struct Package
@@ -74,6 +88,7 @@ private:
             int fx = -1;  // effect id (-1: not drawn)
             IDirect3DTexture9* diffuse = nullptr;
             IDirect3DTexture9* normal = nullptr;
+            int state = 0;  // index into states_
         };
         // Per model, per slot 0 submesh, per group.
         std::vector<std::vector<std::vector<Group>>> groupOf;
@@ -95,6 +110,18 @@ private:
         const char* normalMap = nullptr;
     };
 
+    // The device states of one combination of presets: every render state
+    // the defaults or a preset touch, sampler states for stages 0..3.
+    struct StateSet
+    {
+        int base = 0;          // preset of the substance type
+        unsigned extras = 0;   // bit n: preset 0x2a + n
+        std::vector<std::pair<DWORD, DWORD>> rs, sampler;
+        bool blend = false;    // ALPHABLENDENABLE
+    };
+    int StateFor(const uint8_t s[8]);
+    void ApplyState(const StateSet& set);
+
     HMODULE dll_ = nullptr;
     IDirect3DDevice9* device_ = nullptr;
     ID3DXEffectPool* pool_ = nullptr;
@@ -106,5 +133,11 @@ private:
     IDirect3DTexture9* white_ = nullptr;
     std::vector<Package> packages_;
     std::vector<Instance> instances_;
+    std::vector<StateSet> states_;
+    // What the device has (valid: set by ApplyState since the last reset).
+    DWORD rsCache_[256] = {};
+    bool rsValid_[256] = {};
+    DWORD samplerCache_[4][16] = {};
+    bool samplerValid_[4][16] = {};
     std::string error_;
 };

@@ -55,6 +55,109 @@ std::vector<std::pair<size_t, size_t>> FindMdpcChunks(const std::vector<uint8_t>
     return out;
 }
 
+void ConvertSubstance(uint8_t s[8], bool flag)
+{
+    // The masks 0x7a2b7c / 0x7a2b80 / 0x7a2b84 / 0x7a2b88 / 0x7a2b8c /
+    // 0x7a2b90 (1, 2, 2, 1, 2, 1; never written) and 0x8afac4 (0, only read).
+    const bool both = (s[4] & 3) && (s[5] & 3);
+    // 0x5cbf80: file type -> runtime type (jump table 0x5cc1c4); 5 is 8 when
+    // both, 0x14 otherwise; above 0x28: 8.
+    static const uint8_t kType[0x29] = {
+        0, 1, 21, 6, 8, 0, 12, 31, 33, 49, 48, 50, 34, 35, 36, 37, 38, 39, 40, 41, 16,
+        10, 19, 11, 22, 17, 14, 15, 42, 43, 30, 44, 45, 8, 25, 7, 51, 29, 52, 9, 47,
+    };
+    uint32_t w;
+    memcpy(&w, s, 4);
+    uint8_t type = (w & 0xff) > 0x28 ? 8 : (w & 0xff) == 5 ? (both ? 8 : 0x14) : kType[w & 0xff];
+    uint8_t flags = 0, b1 = (w & 0x400) ? 1 : 0;
+    if (flag) {
+        if (w & 0x100) flags = 0x40;
+        if (w & 0x200) flags |= 0x20;
+    }
+    if (w & 0x8000) flags |= 2;
+    if (w & 0x10000) flags |= 8;
+    if (w & 0x20000) flags |= 0x80;
+    if (w & 0x40000) flags |= 1;
+    if (flags) b1 = b1 ? 4 : 3;
+    if (type == 7 && (flags & 0x80) && (flags & 2)) {
+        flags = 0;
+        b1 = 0;
+        type = 4;
+    }
+    s[0] = type;
+    s[1] = b1;
+    s[2] = flags;
+    s[3] = 0;
+
+    // 0x5cc270: effect bytes 4..7.
+    const bool lit = (s[7] & 2) != 0;
+    s[3] = s[6];
+    if (s[7] & 1) {
+        s[6] = 2;
+    } else {
+        bool fixed = false;  // true: skip the "lit" step (0x5cc399)
+        if (both) {
+            if (s[0] == 9) {
+                s[5] = 0;
+                s[6] = 0;
+                s[7] = 1;
+                s[4] = 0x81;
+                s[0] = 0xd;
+                return;
+            }
+            if (s[1] == 0) s[1] = 2;
+            else if (s[1] == 1) {
+                s[2] |= 0x10;
+                s[1] = 5;
+            } else if (s[1] == 3) s[1] = 5;
+            // byte 5 is 1, 2 or 3 here (never 0x8afac4 = 0)
+            if (s[5] == 2) {
+                s[7] = 4;
+                s[4] = 2;
+                s[5] = 1;
+                s[6] = 0;
+            } else if (s[5] == 1) {
+                s[4] = 2;
+                s[7] = 3;
+                s[5] = 2;
+                s[6] = 0;
+            }
+        } else if (s[5] == 0) {
+            if (!lit) {
+                s[7] = 1;
+                s[4] = 0x81;
+                s[5] = 0;
+                s[6] = 0;
+                fixed = true;
+            } else {
+                s[7] = 1;
+                s[4] = 1;
+                s[5] = 0;
+                s[6] = 0;
+            }
+        } else if (s[5] == 2) {
+            s[7] = 4;
+            s[4] = 1;
+            s[5] = 1;
+            s[6] = 0;
+        } else if (s[5] == 1) {
+            s[4] = 1;
+            s[7] = 3;
+            s[5] = 2;
+            s[6] = 0;
+        }
+        if (!fixed && lit) {
+            s[7] = 2;
+            s[6] = 1;
+        }
+    }
+    if (s[0] == 0x10) {
+        if (s[1] == 2) s[1] = s[2] == 0x10;
+        s[2] &= 0xfb;
+        s[6] = 4;
+    }
+}
+
 bool MdpcPackage::Load(const std::vector<uint8_t>& file, size_t mdpc, size_t size)
 {
     vertexBuffers.clear();
@@ -126,11 +229,14 @@ bool MdpcPackage::Load(const std::vector<uint8_t>& file, size_t mdpc, size_t siz
         }
     }
     // Materials (PCMP at header +0x2c): +0x08 count, +0x0c table of 0x18
-    // entries {+0 offset of the substance offsets, +4 count}; offsets are
-    // from the PCMP. A substance's bytes +0 / +4 / +5 / +6 choose the effect
-    // in 0x5d68e0 (table 0x8accc8), +0x10 / +0x14 its textures: a list of
-    // offsets of texture entries. Texture table: PCMP +0x28 count, +0x2c
-    // offset (0x20 bytes each); the data starts at PCMP +0x30.
+    // entries {+0 offset of its first entry in the substance list, +4
+    // count}; offsets are from the PCMP. The substance list (+0x10 count,
+    // +0x14 offset) has 8-byte entries {+0 substance offset, +4 pointer
+    // filled at load} (0x5d6490, read by 0x5cc3d0). Substances: +0x18
+    // count, +0x1c table of 0x20 bytes; their first 8 bytes are converted
+    // as the game does (ConvertSubstance), +0x10 / +0x14 their textures: a
+    // list of offsets of texture entries. Texture table: PCMP +0x28 count,
+    // +0x2c offset (0x20 bytes each); the data starts at PCMP +0x30.
     materials.clear();
     textures.clear();
     uint32_t pcmp = h.U32(0x2c);
@@ -151,9 +257,12 @@ bool MdpcPackage::Load(const std::vector<uint8_t>& file, size_t mdpc, size_t siz
             uint32_t list = h.U32(e), n = h.U32(e + 4);
             std::vector<MdpcSubstance> subs;
             for (uint32_t s = 0; s < n && s < 16; ++s) {
-                size_t so = pcmp + h.U32(pcmp + list + s * 4);
+                size_t so = pcmp + h.U32(pcmp + list + s * 8);
                 MdpcSubstance sub;
-                if (h.Has(so, 8)) memcpy(sub.bytes, &file[mdpc + so], 8);
+                if (h.Has(so, 8)) {
+                    memcpy(sub.bytes, &file[mdpc + so], 8);
+                    ConvertSubstance(sub.bytes);
+                }
                 uint32_t refs = h.U32(so + 0x10), refCount = h.U32(so + 0x14);
                 for (uint32_t r = 0; r < refCount && r < 16; ++r) {
                     uint32_t te = h.U32(pcmp + refs + r * 4);
