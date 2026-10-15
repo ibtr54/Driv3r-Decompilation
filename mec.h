@@ -38,6 +38,14 @@ struct Texture
 
 bool DecodeDds(const uint8_t* dds, size_t size, Texture& out);
 
+// The whole file (empty if it cannot be read).
+std::vector<uint8_t> ReadFile(const std::string& path);
+// CHNK container (all of Driv3r's data files): the first chunk with the tag,
+// searched depth-first from base; off / size of its data.
+bool FindChunk(const std::vector<uint8_t>& d, size_t base, const char* tag, size_t& off, size_t& size);
+// The textures of an MDPC chunk, one per material (first texture each).
+std::vector<Texture> LoadMaterials(const std::vector<uint8_t>& d, size_t mdpc, size_t mdpcSize);
+
 struct Canvas
 {
     uint32_t* px = nullptr;

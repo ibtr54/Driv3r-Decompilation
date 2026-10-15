@@ -32,6 +32,7 @@
 #include <string>
 #include <vector>
 
+#include "level.h"
 #include "mec.h"
 #include "story.h"
 
@@ -612,6 +613,9 @@ public:
     // Mouse button newly pressed, DirectInput order (0 left, 1 right,
     // 2 middle, 3..): the code 0x2000 + n polled by 0x583a00.
     virtual void OnMouseButton(int) {}
+    // A screen that presents its own frames (Direct3D 9) returns true; the
+    // others are drawn on the canvas and blitted.
+    virtual bool PresentOwn() { return false; }
     // Joystick: a newly pressed POV direction or button as 0x1000 + n
     // (0x583fb0), or an axis pushed past half way (0x583ff0, dir: positive).
     // Return true when the press is used up (the menu does not get it).
@@ -1570,7 +1574,9 @@ public:
         if (!f) return false;
         bool ok = fwrite(data_.data(), 1, kSize, f) == size_t(kSize);
         ok = fclose(f) == 0 && ok;
-        return ok && MoveFileExA(tmp.c_str(), path_.c_str(), MOVEFILE_REPLACE_EXISTING);
+        ok = ok && MoveFileExA(tmp.c_str(), path_.c_str(), MOVEFILE_REPLACE_EXISTING);
+        if (!ok) DeleteFileA(tmp.c_str());  // e.g. a read-only profile: leave no .tmp behind
+        return ok;
     }
 
     // ---- profile folders (save device 0x8ac2bc, Saves\<prefix><name>) ------
@@ -2082,17 +2088,17 @@ private:
                 s.replace(pct, 2, std::to_wstring(value));
             if (s.empty() || !g.font.Loaded()) break;
             s = ExpandIcons(s);
-            // Compared with the original (aspect 0, 8 texts with scales from
-            // 0.4 to 1.25): widths follow sx, heights follow sy x ~0.93
-            // (taken as 480/512; the code behind it was not traced), and y
-            // is the top of the capitals, as for the subtitles. Text wider
-            // than the element wraps inside it, lines LinePitch x sy apart
-            // (MUMAIN ASOffQ: 22 and 19 px for sy 0.7 and 0.6, measured).
-            // The glyphs go through the same Direct3D sampling as the sprites,
-            // 0.5 px lower (measured against the original's screenshots: the
-            // vertical offset was the only one left, the same on every text).
-            float hs = e.sy * (480.0f / 512.0f);
-            float ly = y + 0.5f - g.font.TopOffset() * hs;
+            // Widths follow sx and heights sy, and y is the top of the
+            // capitals, as for the subtitles. Text wider than the element
+            // wraps inside it, lines LinePitch x sy apart (MUMAIN ASOffQ: 22
+            // and 19 px for sy 0.7 and 0.6, measured). The glyphs go through
+            // the same Direct3D sampling as the sprites. (A height of sy x
+            // 480/512 drawn 0.5 px lower fitted the blurred filter-1 text
+            // about as well; with point sampling, filter 0, only sy with no
+            // shift reproduced which texel rows the original shows, and it
+            // is closer with every filter.)
+            float hs = e.sy;
+            float ly = y - g.font.TopOffset() * hs;
             // The text box is kept in whole pixels (int fields read with fild
             // by the line placement 0x575300), so x and the width are cut
             // before the alignment (247.9999 -> 247 moved some centred
@@ -2667,8 +2673,8 @@ public:
             // sprites, box in whole pixels (section 28). The vertical
             // correction is -0.5 px here, not the menu's +0.5: measured on
             // the making-of lines and the attract "DEMO" (both 1 px low with
-            // +0.5); the two y formulas differ (top offset x sy here, x the
-            // 480/512 height there).
+            // +0.5). The menu text needs no correction (its y is the MEC
+            // element's top, this one a fraction of 480).
             y += -0.5f - g.font.TopOffset() * r.sy;
             float x0 = float(int(0.1f * kWidth)), w = float(int(0.8f * kWidth));
             int align = (r.flags & 0x3000) == 0x1000 ? 1 : (r.flags & 0x3000) == 0x2000 ? 2 : 0;
@@ -2946,18 +2952,55 @@ private:
 
 // --------------------------------------------------- 0xB4 gameplay (stand-in)
 // Gameplay is not implemented. This screen stands for one level (a story
-// mission is played in parts, see StoryNextPart): it names it and lets the
-// user send the messages gameplay sends to the story sequencer (handler
-// 0x557de0). Where gameplay goes after a message is decided by state 0xBB
-// (EndOfPart below); the end screens 0xCD / 0xCF are not implemented.
+// mission is played in parts, see StoryNextPart). It starts like the
+// original: state 0xB4 Enter (0x54d680) selects sub-state 0xB6, which shows
+// the loading screen while the level loader 0x8ac338 reads the files
+// (vtbl+8 0x44b360 queues them, vtbl+0x10 is polled). Then the level runs
+// (0xB8): Take A Ride in Miami (levels 0x4d / 0x4e) as an empty Direct3D 9
+// view (black), every other level as a stand-in that names it. The keys send
+// the messages gameplay sends to the story sequencer (handler 0x557de0);
+// where gameplay goes after one is decided by state 0xBB (EndOfPart below);
+// the end screens 0xCD / 0xCF are not implemented.
 class MissionScreen : public Screen
 {
 public:
     std::function<void(const char*)> onMessage;
     int mission = 0;
+    // Take A Ride time (front end +0x14, or the replay header +0x3a): 3 is
+    // night, which picks the city's _Night file (game setup vtbl+0x28).
+    int rideTime = 1;
+
+    void Enter() override { StartLoading(); }
+    void Leave() override
+    {
+        view_.Close();
+        loader_.Wait();
+    }
+    // "restart" (0xB4 listener 0x54d8e0): the level starts again from 0xB6.
+    void Restart() { StartLoading(); }
+
+    void Update() override
+    {
+        if (!loading_ || !loader_.Done()) return;
+        loading_ = false;  // 0xB6 -> 0xB7 -> 0xB8
+        std::string missing;
+        for (const std::string& f : loader_.Missing()) missing += " " + f;
+        Log("Level 0x%02x: loaded %.1f MB in %.2f s%s%s", mission, loader_.Bytes() / 1048576.0, loader_.Seconds(),
+            missing.empty() ? "" : ", missing:", missing.c_str());
+        if (mission == 0x4d || mission == 0x4e) {  // Take A Ride, Miami
+            if (view_.Open(g.hwnd)) Log("Level 0x%02x: Direct3D 9 view (black)", mission);
+            else Log("Level 0x%02x: Direct3D 9: %s, stand-in instead", mission, view_.Error().c_str());
+        }
+    }
+
+    bool PresentOwn() override { return !loading_ && view_.IsOpen() && view_.Frame(D3DCOLOR_XRGB(0, 0, 0)); }
 
     void Render(HDC, Canvas& cv) override
     {
+        if (loading_) {
+            RenderLoading(cv);
+            return;
+        }
         static const float kWhite[4] = { 1, 1, 1, 1 }, kGrey[4] = { 0.6f, 0.6f, 0.6f, 1 };
         char buf[128], file[64];
         snprintf(buf, sizeof(buf), "Level %d (0x%02x)%s", mission, mission,
@@ -2972,9 +3015,69 @@ public:
     }
     void OnKey(WPARAM vk) override
     {
+        if (loading_) return;
         const char* msg = vk == VK_RETURN ? "complete" : vk == 'F' ? "fail" : vk == 'R' ? "restart"
                         : vk == VK_ESCAPE ? "frontend" : nullptr;
         if (msg && onMessage) onMessage(msg);
+    }
+
+private:
+    LevelLoader loader_;
+    D3DView view_;
+    OverlayGfx gfx_;
+    bool gfxLoaded_ = false;
+    TextTable generic_;
+    bool loading_ = false;
+    unsigned frame_ = 0;
+
+    void StartLoading()
+    {
+        view_.Close();
+        loading_ = true;
+        if (!gfxLoaded_) {
+            // Loaded once at boot in the original (0x556c44: 0x8ac584 vtbl+4).
+            gfxLoaded_ = true;
+            if (!gfx_.Load(g.gameDir + "\\OVERLAYS\\LOADING.GFX")) Log("Loading screen: OVERLAYS\\LOADING.GFX not read");
+        }
+        // The text's table is LANG:TEXT\GENERIC.TXT (0x8ac598 +0x108, read at
+        // boot, 0x556aa4); "Loading..." is its entry 3 (how the entry is
+        // chosen was not traced).
+        generic_ = LoadTxt(g.Resolve("LANG:TEXT\\GENERIC.TXT"));
+        std::vector<std::string> files;
+        if (mission >= 0x4d && mission <= 0x54) {
+            files = RideFileList(mission, (mission - 0x4d) / 3, rideTime == 3);
+        } else {
+            char dam[64];
+            snprintf(dam, sizeof(dam), "Missions\\mission%.2d.dam", mission);
+            files = { "sfx\\sfx.pmu", "OVERLAYS\\OVERLAYS.GFX", dam, "Guns\\Guns.Cpr" };  // the city is not known
+        }
+        Log("Level 0x%02x: loading screen, %u files", mission, unsigned(files.size()));
+        loader_.Start(g.gameDir, files);
+    }
+
+    // The loading screen (0x8ac584, class vtbl 0x78915c; Load 0x5406e0,
+    // Start 0x540a00, frame 0x540a90), cleared to black (the device command
+    // "ENABLE_COLOUR_CLEAR: 1"). Positions are fractions of the screen size
+    // (W x H, here 640 x 480):
+    //   logo 0x380000 at ((W-256)/W x 0.5, (H-128)/H x 0.5), 256 x 128: centred;
+    //   hubcap 0x380001 + (n & 15) at ((W-80)/W, (H-80)/H), 32 x 32; n counts
+    //     the frames drawn (one step per frame, about 60 per second in the
+    //     original's screenshots);
+    //   text, white, scale 0.8, centred in the full width, top (H-80)/H.
+    void RenderLoading(Canvas& cv)
+    {
+        static const float kWhite[4] = { 1, 1, 1, 1 };
+        if (const Texture* t = gfx_.Item(0x380000))
+            cv.Draw(*t, 0, 0, 1, 1, (kWidth - 256) * 0.5f, (kHeight - 128) * 0.5f, 256, 128, kWhite);
+        if (const Texture* t = gfx_.Item(0x380001 + (frame_ & 15)))
+            cv.Draw(*t, 0, 0, 1, 1, float(kWidth - 80), float(kHeight - 80), 32, 32, kWhite);
+        ++frame_;
+        auto it = generic_.find(3);
+        if (it != generic_.end() && g.font.Loaded()) {
+            const float s = 0.8f;
+            float tw = g.font.Width(it->second, s);
+            g.font.Draw(cv, it->second, (kWidth - tw) / 2, (kHeight - 80) - g.font.TopOffset() * s, s, s, kWhite);
+        }
     }
 };
 static MissionScreen g_mission;
@@ -3379,6 +3482,7 @@ private:
             Log("Take A Ride: city %d, time %d, weather %d, vehicle %d (car %d), cops %d, start point %d, level 0x%x",
                 city_, time_, weather_, VehicleId(), kRideCities[city_].list[vehicle_].car, cops_ ? 1 : 0,
                 startPoint_, RideLevel());
+            g_mission.rideTime = time_;
             g_story.ClearBlock();
             g_story.RunMission(RideLevel());
             return;
@@ -4024,6 +4128,7 @@ private:
         memcpy(&vehicle, &d[0x3c], 4);
         memcpy(&start, &d[0x40], 4);
         Log("Replay: level 0x%x", level);
+        if (level >= 0x4d && level <= 0x54) g_mission.rideTime = time;  // before the level starts loading
         g_story.RunMission(level);
         if (level >= 0x4d && level <= 0x54)
             Log("Replay: Take A Ride weather %d, time %d, vehicle %d, start point %d, cops %d",
@@ -4226,6 +4331,7 @@ static void UpdateGuiRepeat()
 static void Present()
 {
     if (!g.hwnd) return;
+    if (g.cur && g.cur->PresentOwn()) return;
     std::fill(g.canvas.px, g.canvas.px + size_t(kWidth) * kHeight, 0xff000000u);
     if (g.cur) g.cur->Render(g.backDC, g.canvas);
     GdiFlush();
@@ -4379,6 +4485,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdLine, int showCmd)
         // 0 (0x54d890 -> 0x4d92e0).
         if (_stricmp(msg, "restart") == 0) {
             g.SetPlayContext(0);
+            g_mission.Restart();  // 0x54d890: sub-state 0xB6 again (loading)
             return;
         }
         EndOfPart();

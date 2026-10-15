@@ -5,8 +5,6 @@
 #include <cstdio>
 #include <cstring>
 
-namespace {
-
 std::vector<uint8_t> ReadFile(const std::string& path)
 {
     std::vector<uint8_t> d;
@@ -23,7 +21,7 @@ std::vector<uint8_t> ReadFile(const std::string& path)
     return d;
 }
 
-uint32_t U32(const std::vector<uint8_t>& d, size_t p)
+static uint32_t U32(const std::vector<uint8_t>& d, size_t p)
 {
     if (p + 4 > d.size()) return 0;
     uint32_t v;
@@ -49,7 +47,7 @@ bool FindChunk(const std::vector<uint8_t>& d, size_t base, const char* tag, size
     return false;
 }
 
-std::string FixedString(const uint8_t* p, size_t n)
+static std::string FixedString(const uint8_t* p, size_t n)
 {
     size_t len = 0;
     while (len < n && p[len]) ++len;
@@ -87,6 +85,8 @@ std::vector<Texture> LoadMaterials(const std::vector<uint8_t>& d, size_t mdpc, s
     }
     return out;
 }
+
+namespace {
 
 struct Reader
 {

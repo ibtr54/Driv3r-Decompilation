@@ -11,6 +11,9 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="level.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -20,6 +23,9 @@
     <ClCompile Include="story.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="level.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="mec.h">
       <Filter>Header Files</Filter>
     </ClInclude>
