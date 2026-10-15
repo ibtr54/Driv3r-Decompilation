@@ -21,12 +21,35 @@
 // request 0x5e0900) and the presets of its byte 1 / flags (0x5d8340), with
 // their sampler states for stages 0..3; set only where the device's value
 // differs, like the game's cache. Checked against a trace of the original
-// (driv3r-re\tools\presets\d3d9proxy.cpp). Stand-ins: no fog (the mood's
-// fog values are not set yet), the cull mode swapped (CW <-> CCW: the
-// game's camera has a mirror that the stand-in camera has not), blended
+// (driv3r-re\tools\presets\d3d9proxy.cpp). The mood (mood.h): per frame
+// the shared effect gets s_LightAmbientColour, s_LightDirectionalColour /
+// Direction and s_FogParams, and the device FOGCOLOR (0x5dc1e0, 0x5cefb0,
+// 0x5dc3f0); the presets switch fog on and off. The sky dome (0x539cb0) is
+// drawn first: model 0 of the sky package (model id 0xd000) with the mood's
+// sky matrix moved to (camera x, -5, camera z), and the light of a kind
+// 0x10001 object (0x5de330): ambient = SKY_COLOUR, directional colour 0,
+// direction (0, -1, 0); its substance (type 0x15 -> preset 4) keeps z
+// writes and fog off. All checked against a trace of the original
+// (shader constants c8..c14 and the sky's World matrix). Stand-in: blended
 // groups drawn after the others (the game's draw order is not traced).
-// Not done yet: the mood's light and fog (the effects' defaults are kept),
-// draw distances, and the game's camera.
+//
+// Shadows (0x5d2ca0, with the profile's Shadows setting +0xc8c -> render
+// context +0x148): the scene's lists are 0 (most groups), 1 (shadow
+// volumes) and 2 (groups whose substance type is 0x11, 0x1d or 0x1e,
+// 0x5d2ae8). Drawn: list 0 in mode 2; the shadow volumes in mode 4
+// (preset 0x11: no colour or z writes, ZFUNC GREATER, stencil DECR, cull
+// CW) and again in mode 5 (0x12: INCR, cull CCW); then the directional
+// colour set to 0 and list 0 again in mode 7 (0x1c: stencil >= 1, colour
+// writes RGB, blend DESTALPHA / INVDESTALPHA), mode 6 (0x1b: SRCALPHA /
+// INVSRCALPHA) for the alpha-tested and blended types (0x5d4330); then
+// list 2 in mode 2. A shadow volume (0x5d2b90) is a copy of the object
+// drawn with effect 0x2b and its model's slot of mask 0x20 (slot 5, or 6
+// when 5 is empty: 0x5ca020); the shader moves the vertices whose normal
+// faces away from the light by g_fExtrusion (20 in the trace) along it.
+// Which substance types each mode draws: 0x5e06f0. Checked against a trace
+// of the original (stencil states, c9, the order of the modes).
+// Not done yet: draw distances and the game's camera (only its handedness
+// is known: right-handed, see CameraMatrix).
 #pragma once
 
 #define WIN32_LEAN_AND_MEAN
@@ -34,14 +57,20 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "city.h"
 #include "mdpc.h"
+#include "mood.h"
 
-// A stand-in camera (the game's camera is not traced): left-handed look-at
-// (y up) times a perspective projection, row vector (Direct3D convention).
+// A stand-in camera (the game's camera is not traced): right-handed look-at
+// (y up) times a right-handed perspective projection, row vector (Direct3D
+// convention). The traced view-projection of the original is right-handed
+// (it looks along -z with +x to the right), which is why the game culls
+// clockwise triangles (preset default CULL 2) with data whose front faces
+// are clockwise in a left-handed view.
 void CameraMatrix(const float eye[3], const float at[3], float fovY, float aspect, float zNear, float zFar, float out[16]);
 
 struct ID3DXEffect;
@@ -53,10 +82,17 @@ public:
     ~CityRenderer() { Release(); }
     // Loads the effects out of the game's executable.
     bool Init(IDirect3DDevice9* device, const std::string& exePath);
-    // The city's packages (packages[first, end)) and its placement.
-    bool Upload(const std::vector<MdpcPackage>& packages, size_t first, size_t end, const CityPlacement& city);
+    // The city's packages (packages[first, end)), its placement and the
+    // sky dome's package (nullptr: no sky).
+    bool Upload(const std::vector<MdpcPackage>& packages, size_t first, size_t end, const CityPlacement& city,
+                const MdpcPackage* sky = nullptr);
+    // The level's light, fog and sky matrix (used from the next Draw).
+    void SetMood(const Mood& mood) { mood_ = mood; }
+    // The profile's Shadows setting (+0xc8c).
+    void SetShadows(bool on) { shadows_ = on; }
     // viewProj: row-vector view x projection (Direct3D); eye: the camera.
-    // Instances whose box centre is farther than range are skipped.
+    // The sky first, then the city; instances whose box centre is farther
+    // than range are skipped.
     void Draw(const float viewProj[16], const float eye[3], float range);
     void OnLostDevice();
     void OnResetDevice();
@@ -68,13 +104,21 @@ public:
     int effects = 0;
     std::string failedEffects;  // ids that D3DX did not create
     size_t groupsDrawn = 0, groupsSkipped = 0, frameInstances = 0, frameDraws = 0;
+    // Placed models with a shadow volume, groups in list 2, groups whose
+    // type (0..5) keeps them out of mode 2; last frame's shadow volume and
+    // shadow redraw draw calls.
+    size_t shadowInstances = 0, lateGroups = 0, hiddenGroups = 0, frameShadowDraws = 0, frameRedraws = 0;
     // Textures created from the packages' DDS data, and those left out
     // (a format not handled, or no DDS); groups without a texture.
     size_t textures = 0, texturesSkipped = 0, groupsUntextured = 0;
     // Drawn groups per base preset ("preset x count, ..."), distinct
     // render-state sets.
     std::string presetsUsed;
+    // Drawn groups per effect id ("id x count, ...").
+    std::string effectsUsed;
     size_t stateSets = 0;
+    // The sky's drawn groups and their effect / base preset ("" without sky).
+    std::string skyInfo;
 
 private:
     struct Package
@@ -88,10 +132,15 @@ private:
             int fx = -1;  // effect id (-1: not drawn)
             IDirect3DTexture9* diffuse = nullptr;
             IDirect3DTexture9* normal = nullptr;
-            int state = 0;  // index into states_
+            int state = 0;  // index into states_ (mode 2)
+            int redraw = -1;  // states_ of the shadow redraw (mode 7 / 6), -1: not redrawn
+            int8_t type = 8;  // the substance type (byte 0)
+            bool late = false;  // list 2
         };
         // Per model, per slot 0 submesh, per group.
         std::vector<std::vector<std::vector<Group>>> groupOf;
+        // Per model, its shadow volume's slot (mask 0x20), -1: none.
+        std::vector<int> shadowSlot;
     };
     struct Instance
     {
@@ -108,6 +157,8 @@ private:
         const char* brightness = nullptr;
         const char* diffuse = nullptr;  // 0x5e1080
         const char* normalMap = nullptr;
+        const char* envSpec = nullptr;  // g_envSpecColourAndLerpFactor (0x5e1080)
+        const char* extrusion = nullptr;  // g_fExtrusion (0x5def70)
     };
 
     // The device states of one combination of presets: every render state
@@ -116,11 +167,19 @@ private:
     {
         int base = 0;          // preset of the substance type
         unsigned extras = 0;   // bit n: preset 0x2a + n
+        int mode = 2;          // the request's mode (its preset: 0x5cdaa0)
         std::vector<std::pair<DWORD, DWORD>> rs, sampler;
         bool blend = false;    // ALPHABLENDENABLE
     };
-    int StateFor(const uint8_t s[8]);
+    int StateFor(const uint8_t s[8], int mode = 2);
     void ApplyState(const StateSet& set);
+    void AddPackage(const MdpcPackage& data);
+    void ResolveGroups(Package& p, const std::map<uint32_t, int>& byUid);
+    void DrawGroup(const Package& p, const MdpcModel& m, const MdpcGroup& g, const Package::Group& info, int state,
+                   const float world[16], int& applied);
+    void SetLight(const float ambient[4], const float colour[4], const float direction[4]);
+    void SetEnvSpec(const float colour[4]);
+    void DrawSky(const float eye[3]);
 
     HMODULE dll_ = nullptr;
     IDirect3DDevice9* device_ = nullptr;
@@ -128,6 +187,14 @@ private:
     ID3DXEffect* shared_ = nullptr;
     const char* viewProj_ = nullptr;
     const char* camPos_ = nullptr;
+    const char* ambient_ = nullptr;      // s_LightAmbientColour
+    const char* lightColour_ = nullptr;  // s_LightDirectionalColour
+    const char* lightDir_ = nullptr;     // s_LightDirectionalDirection
+    const char* fogParams_ = nullptr;    // s_FogParams
+    Mood mood_;
+    bool shadows_ = true;
+    int shadowState_[2] = { -1, -1 };  // states_ of modes 4 and 5
+    int skyPackage_ = -1;  // index into packages_
     Effect fx_[0x30];
     IDirect3DVertexDeclaration9* decl_ = nullptr;
     IDirect3DTexture9* white_ = nullptr;

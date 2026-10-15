@@ -2971,6 +2971,10 @@ public:
     // Take A Ride time (front end +0x14, or the replay header +0x3a): 3 is
     // night, which picks the city's _Night file (game setup vtbl+0x28).
     int rideTime = 1;
+    // Take A Ride weather (front end +0x18, or the replay header +0x38):
+    // 0 dry, 1 overcast, 2 wet; with the city and the time it picks the
+    // level's mood (game setup vtbl+0x6c, mood.h).
+    int rideWeather = 0;
 
     void Enter() override { StartLoading(); }
     void Leave() override
@@ -2998,8 +3002,11 @@ public:
             }
             view_.onLost = [this] { city_.OnLostDevice(); };
             view_.onReset = [this] { city_.OnResetDevice(); };
+            city_.SetMood(mood_);
+            city_.SetShadows(g.Toggle("shadows"));  // settings +0xc8c -> render context +0x148 (0x5483ee)
             if (city_.Init(view_.Device(), g.gameDir + "\\Driv3r.exe") &&
-                city_.Upload(loader_.Packages(), loader_.CityFirst(), loader_.CityEnd(), loader_.City()))
+                city_.Upload(loader_.Packages(), loader_.CityFirst(), loader_.CityEnd(), loader_.City(),
+                             loader_.FirstPackageOf(mood_.skydome)))
                 Log("Level 0x%02x: Direct3D 9 view, %d effects from Driv3r.exe%s%s, %zu city groups drawn, %zu left out",
                     mission, city_.effects, city_.failedEffects.empty() ? "" : " (not created:",
                     city_.failedEffects.empty() ? "" : (city_.failedEffects + ")").c_str(), city_.groupsDrawn,
@@ -3009,6 +3016,13 @@ public:
                     city_.textures, city_.texturesSkipped, city_.groupsUntextured);
                 Log("Level 0x%02x: %zu render-state sets; drawn groups per base preset: %s", mission, city_.stateSets,
                     city_.presetsUsed.c_str());
+                Log("Level 0x%02x: drawn groups per effect: %s", mission, city_.effectsUsed.c_str());
+                Log("Level 0x%02x: shadows %s; %zu placed models with a shadow volume, %zu groups in list 2, "
+                    "%zu groups of types 0..5 (not drawn in mode 2)",
+                    mission, g.Toggle("shadows") ? "on" : "off", city_.shadowInstances, city_.lateGroups,
+                    city_.hiddenGroups);
+                Log("Level 0x%02x: sky %s: %s", mission, mood_.skydome.c_str(),
+                    city_.skyInfo.empty() ? "not drawn (no model package)" : city_.skyInfo.c_str());
             } else
                 Log("Level 0x%02x: Direct3D 9 view (black), city not drawn: %s", mission, city_.Error().c_str());
             drawn_ = 0;
@@ -3019,15 +3033,20 @@ public:
     {
         if (loading_ || !view_.IsOpen()) return false;
         // Stand-in camera (the start point's position in Mission77.mpc and
-        // the game's camera are not decoded): above a street west of the
-        // centre, 60 degrees, the draw range of the lowest setting (500,
+        // the game's camera are not decoded): the original's camera at the
+        // start of Take A Ride Miami as traced (s_CamPos (1988.15, 1.754,
+        // -1075.32), looking along the view-projection's w column (0,
+        // 0.00289, -1), y scale 2.32871 = 46.5 degrees; near / far about
+        // 0.25 and 8000), and the draw range of the lowest setting (500,
         // 0x4ddc50 +0x40).
-        static const float kEye[3] = { -1450, 40, -60 }, kAt[3] = { -1350, 0, 40 };
+        static const float kEye[3] = { 1988.15f, 1.754f, -1075.32f };
+        static const float kAt[3] = { kEye[0], kEye[1] + 0.289f, kEye[2] - 100.0f };
         float vp[16];
-        CameraMatrix(kEye, kAt, 3.14159265f / 3, view_.Aspect(), 1.0f, 600.0f, vp);
+        CameraMatrix(kEye, kAt, 2.0f * std::atan(1.0f / 2.32871f), view_.Aspect(), 0.25f, 8000.0f, vp);
         bool ok = view_.Frame(D3DCOLOR_XRGB(0, 0, 0), [&](IDirect3DDevice9*) { city_.Draw(vp, kEye, 500.0f); });
         if (drawn_++ == 1)
-            Log("Level 0x%02x: frame: %zu instances, %zu draw calls", mission, city_.frameInstances, city_.frameDraws);
+            Log("Level 0x%02x: frame: %zu instances, %zu draw calls (%zu shadow volume, %zu shadow redraw)", mission,
+                city_.frameInstances, city_.frameDraws, city_.frameShadowDraws, city_.frameRedraws);
         return ok;
     }
 
@@ -3061,6 +3080,7 @@ private:
     LevelLoader loader_;
     D3DView view_;
     CityRenderer city_;
+    Mood mood_;
     unsigned drawn_ = 0;
     OverlayGfx gfx_;
     bool gfxLoaded_ = false;
@@ -3084,7 +3104,16 @@ private:
         generic_ = LoadTxt(g.Resolve("LANG:TEXT\\GENERIC.TXT"));
         std::vector<std::string> files;
         if (mission >= 0x4d && mission <= 0x54) {
-            files = RideFileList(mission, (mission - 0x4d) / 3, rideTime == 3);
+            // The mood first (0x52b4f0 -> 0x471870): its SKYDOME_NAME is one
+            // of the loader's files. A number below 1 reads Mood01.
+            int city = (mission - 0x4d) / 3, number = std::max(1, RideMoodNumber(city, rideTime, rideWeather));
+            char moodFile[32];
+            snprintf(moodFile, sizeof(moodFile), "Moods\\Mood%02d.txt", number);
+            mood_ = Mood();
+            bool read = mood_.Load(g.gameDir + "\\" + moodFile);
+            Log("Level 0x%02x: mood %d (%s%s), sky %s", mission, number, moodFile, read ? "" : " not read, defaults",
+                mood_.skydome.c_str());
+            files = RideFileList(mission, city, rideTime == 3, mood_.skydome);
         } else {
             char dam[64];
             snprintf(dam, sizeof(dam), "Missions\\mission%.2d.dam", mission);
@@ -3522,6 +3551,7 @@ private:
                 city_, time_, weather_, VehicleId(), kRideCities[city_].list[vehicle_].car, cops_ ? 1 : 0,
                 startPoint_, RideLevel());
             g_mission.rideTime = time_;
+            g_mission.rideWeather = weather_;
             g_story.ClearBlock();
             g_story.RunMission(RideLevel());
             return;
@@ -4167,7 +4197,10 @@ private:
         memcpy(&vehicle, &d[0x3c], 4);
         memcpy(&start, &d[0x40], 4);
         Log("Replay: level 0x%x", level);
-        if (level >= 0x4d && level <= 0x54) g_mission.rideTime = time;  // before the level starts loading
+        if (level >= 0x4d && level <= 0x54) {  // before the level starts loading
+            g_mission.rideTime = time;
+            g_mission.rideWeather = d[0x38];
+        }
         g_story.RunMission(level);
         if (level >= 0x4d && level <= 0x54)
             Log("Replay: Take A Ride weather %d, time %d, vehicle %d, start point %d, cops %d",

@@ -9,7 +9,7 @@ const char* const kCity[3] = { "Miami", "Nice", "Istanbul" };
 
 }  // namespace
 
-std::vector<std::string> RideFileList(int level, int city, bool night)
+std::vector<std::string> RideFileList(int level, int city, bool night, const std::string& sky)
 {
     if (city < 0 || city > 2) city = 0;
     const std::string c = kCity[city];
@@ -18,14 +18,21 @@ std::vector<std::string> RideFileList(int level, int city, bool night)
     return {
         "Vehicles\\" + c + "\\CarGlobals" + c + ".vgt",
         "Vehicles\\" + c + ".vvv",
-        "Cities\\" + c + (night ? "_Night" : "_Day") + "_PC.d3c",
+        sky,
         "sfx\\sfx.pmu",
         "OVERLAYS\\" + c + ".MAP",
         "OVERLAYS\\OVERLAYS.GFX",
         dam,
         "Guns\\Guns.Cpr",
         "Vehicles\\" + c + ".vvs",
+        "Cities\\" + c + (night ? "_Night" : "_Day") + "_PC.d3c",
     };
+}
+
+const MdpcPackage* LevelLoader::FirstPackageOf(const std::string& file) const
+{
+    auto it = firstOf_.find(file);
+    return it != firstOf_.end() && it->second < packages_.size() ? &packages_[it->second] : nullptr;
 }
 
 void LevelLoader::Start(const std::string& gameDir, const std::vector<std::string>& files)
@@ -37,6 +44,7 @@ void LevelLoader::Start(const std::string& gameDir, const std::vector<std::strin
     missing_.clear();
     report_.clear();
     packages_.clear();
+    firstOf_.clear();
     city_ = CityPlacement();
     cityFirst_ = cityEnd_ = 0;
     worker_ = std::thread([this, gameDir, files] {
@@ -77,6 +85,7 @@ void LevelLoader::DecodePackages(const std::string& f, const std::vector<uint8_t
                 }
         packages_.push_back(std::move(p));
     }
+    if (packages_.size() > first) firstOf_[f] = first;
     if (!chunks.empty()) {
         char line[256];
         snprintf(line, sizeof(line), "%s: %zu model packages, %zu models, %zu triangles (level 0)%s", f.c_str(),
@@ -208,7 +217,8 @@ bool D3DView::Frame(D3DCOLOR clear, const std::function<void(IDirect3DDevice9*)>
         if (FAILED(device_->Reset(&pp_))) return true;
         if (onReset) onReset();
     }
-    device_->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, clear, 1.0f, 0);
+    // Target, depth and stencil (0), like the game's frame clear (flags 7).
+    device_->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, clear, 1.0f, 0);
     if (SUCCEEDED(device_->BeginScene())) {
         if (draw) draw(device_);
         device_->EndScene();

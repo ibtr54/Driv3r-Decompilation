@@ -23,6 +23,9 @@
     <ClCompile Include="mdpc.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="mood.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="render.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -39,6 +42,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="mdpc.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="mood.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="render.h">

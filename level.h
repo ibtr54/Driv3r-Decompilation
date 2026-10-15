@@ -25,16 +25,18 @@
 //   game setup vtbl+0x44  Vehicles\<City>\CarGlobals<City>.vgt
 //              vtbl+0x34  Vehicles\<City>.vvv (0x464390; boat and articulated
 //                         truck have their own files, not chosen here)
-//              vtbl+0x30  Cities\<City><_Day|_Night>_PC.d3c (0x463b70: _Night
-//                         when the lighting vtbl+0x28 is 2, 4 or 6; a ride at
-//                         night (time 3) turns 1/3/5 into 2/4/6)
+//   mood [0x8ac3d8] +0x50 the sky dome, Skies\sky_<name>.d3s (SKYDOME_NAME
+//                         of the level's mood, mood.h)
 //              sfx\sfx.pmu, OVERLAYS\<city>.MAP, OVERLAYS\OVERLAYS.GFX
 //              vtbl+0x38  Missions\mission<NN>.dam
 //              Guns\Guns.Cpr
+// Read here as well (not from that queue):
 //              vtbl+0x3c  Vehicles\<City>.vvs
-// The city file is the one the loader's +0x50 entry stands for (0x8ac3d8;
-// that object was not traced, the path is from the setup's getter).
-std::vector<std::string> RideFileList(int level, int city, bool night);
+//              vtbl+0x30  Cities\<City><_Day|_Night>_PC.d3c (0x463b70: _Night
+//                         when the lighting vtbl+0x28 is 2, 4 or 6; a ride at
+//                         night (time 3) turns 1/3/5 into 2/4/6), opened by
+//                         the city object itself (0x461e80 -> 0x461ef5).
+std::vector<std::string> RideFileList(int level, int city, bool night, const std::string& sky);
 
 // Reads the files on a worker thread (the original loads them behind the
 // loading screen, polled by state 0xB6 through vtbl+0x10). Only reading:
@@ -59,6 +61,8 @@ public:
     // The city's packages: Packages()[CityFirst(), CityEnd()).
     size_t CityFirst() const { return cityFirst_; }
     size_t CityEnd() const { return cityEnd_; }
+    // The first package decoded from a file of the list (nullptr: none).
+    const MdpcPackage* FirstPackageOf(const std::string& file) const;
 
 private:
     void DecodePackages(const std::string& f, const std::vector<uint8_t>& d);
@@ -69,6 +73,7 @@ private:
     double seconds_ = 0;
     std::vector<std::string> missing_, report_;
     std::vector<MdpcPackage> packages_;
+    std::map<std::string, size_t> firstOf_;  // file -> its first package
     CityPlacement city_;
     size_t cityFirst_ = 0, cityEnd_ = 0;
 };

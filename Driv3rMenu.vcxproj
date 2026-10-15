@@ -83,6 +83,7 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="city.cpp" />
     <ClCompile Include="mdpc.cpp" />
+    <ClCompile Include="mood.cpp" />
     <ClCompile Include="render.cpp" />
     <ClCompile Include="mec.cpp" />
     <ClCompile Include="story.cpp" />
@@ -91,6 +92,7 @@
     <ClInclude Include="level.h" />
     <ClInclude Include="city.h" />
     <ClInclude Include="mdpc.h" />
+    <ClInclude Include="mood.h" />
     <ClInclude Include="render.h" />
     <ClInclude Include="mec.h" />
     <ClInclude Include="story.h" />

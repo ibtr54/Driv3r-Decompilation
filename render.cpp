@@ -280,6 +280,55 @@ unsigned ExtraPresets(int b1, int flags)
     return m;
 }
 
+// 0x5cdaa0: the request's mode -> its preset (0: none), applied by 0x5d4440
+// after the type and extra presets unless the type is 2..4.
+int ModePreset(int mode)
+{
+    switch (mode) {
+    case 3: case 4: return 0x11;
+    case 5: return 0x12;
+    case 6: return 0x1b;
+    case 7: return 0x1c;
+    case 8: return 0x28;
+    case 9: return 0x06;
+    case 10: return 0x14;
+    case 11: return 0x16;
+    default: return 0;
+    }
+}
+
+// 0x5d4330 (commit of the request): in mode 7 the types whose byte in the
+// table 0x5d4428 (types 11..24) is 0 use mode 6; in mode 6 the types 6 and 8
+// use mode 7.
+int EffectiveMode(int mode, int type)
+{
+    static const uint8_t kKeep7[14] = { 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0 };
+    if (mode == 7 && type >= 11 && type <= 24 && !kKeep7[type - 11]) return 6;
+    if (mode == 6 && (type == 6 || type == 8)) return 7;
+    return mode;
+}
+
+// 0x5e06f0 (asked per group by 0x5e05b0): whether a group whose substance
+// has this type is drawn in the request's mode. Modes 6 / 7: types 2..24
+// whose byte in the table 0x5e0758 is 0; other modes: every type but 0..5.
+// (Its range check against 0x8df140 / 0x7e5f04 is 0..100: always true.)
+bool DrawnInMode(int type, int mode)
+{
+    static const uint8_t kSkip67[23] = { 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0 };
+    if (mode == 6 || mode == 7) return type >= 2 && type <= 24 && !kSkip67[type - 2];
+    return type < 0 || type > 5;
+}
+
+// 0x5d2ae8: groups whose substance type is 0x11, 0x1d or 0x1e go to the
+// scene's list 2 (drawn last, after the shadows), the others to list 0.
+bool LateType(int type) { return type == 0x11 || type == 0x1d || type == 0x1e; }
+
+// The traced g_fExtrusion of every shadow volume draw (c9 = (20, 0, 0, 0)).
+// 0x5defb0 sets it from the drawn object's +0x70, which the copy made by
+// 0x5d2b90 (0x70 bytes) does not write; where the 20 comes from was not
+// found.
+const float kExtrusion = 20.0f;
+
 // 0x5cc3d0, for a model without flag 2 (+0x1c; none in the cities): each
 // substance of its slots 0..3 of type 0x19 becomes 8; one of type 0xf gets
 // byte 1 = (flags == 0x10) when byte 1 is 2, flag 4 cleared and byte 6 = 4.
@@ -300,7 +349,8 @@ void ModelSubstance(uint8_t s[8])
 
 void CameraMatrix(const float eye[3], const float at[3], float fovY, float aspect, float zNear, float zFar, float out[16])
 {
-    float z[3] = { at[0] - eye[0], at[1] - eye[1], at[2] - eye[2] };
+    // z points from the target back to the eye (right-handed).
+    float z[3] = { eye[0] - at[0], eye[1] - at[1], eye[2] - at[2] };
     float n = std::sqrt(z[0] * z[0] + z[1] * z[1] + z[2] * z[2]);
     for (float& v : z) v /= n;
     float x[3] = { z[2], 0, -z[0] };  // up (0, 1, 0) x z
@@ -314,8 +364,8 @@ void CameraMatrix(const float eye[3], const float at[3], float fovY, float aspec
         -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]), -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]),
         -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1,
     };
-    float ys = 1.0f / std::tan(fovY * 0.5f), xs = ys / aspect, q = zFar / (zFar - zNear);
-    const float proj[16] = { xs, 0, 0, 0, 0, ys, 0, 0, 0, 0, q, 1, 0, 0, -q * zNear, 0 };
+    float ys = 1.0f / std::tan(fovY * 0.5f), xs = ys / aspect, q = zFar / (zNear - zFar);
+    const float proj[16] = { xs, 0, 0, 0, 0, ys, 0, 0, 0, 0, q, -1, 0, 0, q * zNear, 0 };
     Mul(view, proj, out);
 }
 
@@ -368,6 +418,10 @@ bool CityRenderer::Init(IDirect3DDevice9* device, const std::string& exePath)
             // 0x5dc9a0: ViewProjection by semantic, the rest by name.
             viewProj_ = fx->GetParameterBySemantic(nullptr, "ViewProjection");
             camPos_ = fx->GetParameterByName(nullptr, "s_CamPos");
+            ambient_ = fx->GetParameterByName(nullptr, "s_LightAmbientColour");
+            lightDir_ = fx->GetParameterByName(nullptr, "s_LightDirectionalDirection");
+            lightColour_ = fx->GetParameterByName(nullptr, "s_LightDirectionalColour");
+            fogParams_ = fx->GetParameterByName(nullptr, "s_FogParams");
             continue;
         }
         Effect& f = fx_[e.id];
@@ -378,6 +432,12 @@ bool CityRenderer::Init(IDirect3DDevice9* device, const std::string& exePath)
         f.brightness = fx->GetParameterByName(nullptr, "g_fBrightness");
         f.diffuse = fx->GetParameterByName(nullptr, "g_TextureDiffuse");
         f.normalMap = fx->GetParameterByName(nullptr, "g_TextureNormalMap");
+        f.envSpec = fx->GetParameterByName(nullptr, "g_envSpecColourAndLerpFactor");
+        f.extrusion = e.id == 0x2b ? fx->GetParameterByName(nullptr, "g_fExtrusion") : nullptr;
+        if (f.extrusion) {
+            const D3DXVECTOR4 v(kExtrusion, 0, 0, 0);
+            fx->SetVector(f.extrusion, &v);
+        }
         // 0x5de330: g_fBrightness 0x3f26a6a7; g_fAlpha comes from the drawn
         // object (+0x64, not traced): 1 here.
         uint32_t bits = 0x3f26a6a7;
@@ -391,83 +451,127 @@ bool CityRenderer::Init(IDirect3DDevice9* device, const std::string& exePath)
     return true;
 }
 
-bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first, size_t end, const CityPlacement& city)
+void CityRenderer::AddPackage(const MdpcPackage& data)
+{
+    Package p;
+    p.data = &data;
+    for (const MdpcVertexBuffer& vb : data.vertexBuffers) {
+        IDirect3DVertexBuffer9* b = nullptr;
+        void* ptr;
+        if (SUCCEEDED(device_->CreateVertexBuffer(UINT(vb.data.size()), D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, &b, nullptr)) &&
+            SUCCEEDED(b->Lock(0, 0, &ptr, 0))) {
+            memcpy(ptr, vb.data.data(), vb.data.size());
+            b->Unlock();
+        }
+        p.vbs.push_back(b);
+    }
+    if (!data.indices.empty()) {
+        UINT bytes = UINT(data.indices.size() * 2);
+        void* ptr;
+        if (SUCCEEDED(device_->CreateIndexBuffer(bytes, D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_MANAGED, &p.ib, nullptr)) &&
+            SUCCEEDED(p.ib->Lock(0, 0, &ptr, 0))) {
+            memcpy(ptr, data.indices.data(), bytes);
+            p.ib->Unlock();
+        }
+    }
+    for (const MdpcTexture& t : data.textures) {
+        IDirect3DTexture9* tex = CreateDds(device_, t.dds);
+        (tex ? textures : texturesSkipped)++;
+        p.textures.push_back(tex);
+    }
+    packages_.push_back(std::move(p));
+}
+
+// The effect and textures of every group of slot 0 (0x5d68e0, 0x5e0970;
+// first substance); byUid: package uid -> index into packages_.
+void CityRenderer::ResolveGroups(Package& p, const std::map<uint32_t, int>& byUid)
+{
+    p.groupOf.resize(p.data->models.size());
+    for (size_t m = 0; m < p.data->models.size(); ++m) {
+        const MdpcModel& model = p.data->models[m];
+        int id = RenderId(model);
+        bool layout = (DeclIndex(model.vertexType) == 1 || DeclIndex(model.vertexType) == 2) &&
+                      model.vertexBuffer < p.data->vertexBuffers.size() &&
+                      p.data->vertexBuffers[model.vertexBuffer].stride == 48;
+        for (const MdpcSubmesh& sm : model.lods[0]) {
+            std::vector<Package::Group> groups;
+            for (const MdpcGroup& g : sm.groups) {
+                Package::Group gr;
+                gr.fx = id;
+                // No substance: the binder's request keeps type 8 (0x5e0900).
+                uint8_t s[8] = { 8 };
+                auto it = byUid.find(g.material >> 16);
+                if (g.material != 0xffff0000 && g.material != 0xcccccccc && it != byUid.end()) {
+                    const Package& owner = packages_[it->second];
+                    uint32_t mi = g.material & 0xffff;
+                    if (mi < owner.data->materials.size() && !owner.data->materials[mi].empty()) {
+                        const MdpcSubstance& sub = owner.data->materials[mi][0];
+                        memcpy(s, sub.bytes, 8);
+                        if (!(model.flags & 2)) ModelSubstance(s);
+                        int index = (((s[4] & 0x7f) + id * 4) * 3 + s[5]) * 5 + s[6];
+                        if (int e = SubstanceEffect(index)) gr.fx = e;
+                        // Texture references are entries of the material's own package.
+                        if (!sub.textures.empty() && size_t(sub.textures[0]) < owner.textures.size())
+                            gr.diffuse = owner.textures[sub.textures[0]];
+                        if ((s[6] == 1 || s[6] == 4) && sub.textures.size() >= 2 &&
+                            size_t(sub.textures[1]) < owner.textures.size())
+                            gr.normal = owner.textures[sub.textures[1]];
+                    }
+                }
+                if (!layout || gr.fx <= 0 || gr.fx >= 0x30 || !fx_[gr.fx].fx) gr.fx = -1;
+                gr.state = StateFor(s);
+                gr.type = int8_t(s[0]);
+                gr.late = LateType(gr.type);
+                if (!gr.late && DrawnInMode(gr.type, 7)) gr.redraw = StateFor(s, EffectiveMode(7, gr.type));
+                groups.push_back(gr);
+            }
+            p.groupOf[m].push_back(std::move(groups));
+        }
+    }
+    // 0x5ca020: slot 5 gets the mask 0x20 when it has submeshes, else slot 6
+    // (the files have 0 in both).
+    p.shadowSlot.assign(p.data->models.size(), -1);
+    for (size_t m = 0; m < p.data->models.size(); ++m) {
+        const MdpcModel& model = p.data->models[m];
+        bool layout = (DeclIndex(model.vertexType) == 1 || DeclIndex(model.vertexType) == 2) &&
+                      model.vertexBuffer < p.data->vertexBuffers.size() &&
+                      p.data->vertexBuffers[model.vertexBuffer].stride == 48;
+        if (!layout || !fx_[0x2b].fx) continue;
+        if (!model.lods[5].empty()) p.shadowSlot[m] = 5;
+        else if (!model.lods[6].empty()) p.shadowSlot[m] = 6;
+    }
+}
+
+bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first, size_t end, const CityPlacement& city,
+                          const MdpcPackage* sky)
 {
     if (!device_) { error_ = "no device"; return false; }
     std::map<uint32_t, int> byUid;  // the table 0x8b5310 (0x57c058)
-    std::map<int, size_t> perPreset;
+    std::map<int, size_t> perPreset, perEffect;
     for (size_t k = first; k < end && k < packages.size(); ++k) {
-        Package p;
-        p.data = &packages[k];
-        for (const MdpcVertexBuffer& vb : p.data->vertexBuffers) {
-            IDirect3DVertexBuffer9* b = nullptr;
-            void* ptr;
-            if (SUCCEEDED(device_->CreateVertexBuffer(UINT(vb.data.size()), D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, &b, nullptr)) &&
-                SUCCEEDED(b->Lock(0, 0, &ptr, 0))) {
-                memcpy(ptr, vb.data.data(), vb.data.size());
-                b->Unlock();
-            }
-            p.vbs.push_back(b);
-        }
-        if (!p.data->indices.empty()) {
-            UINT bytes = UINT(p.data->indices.size() * 2);
-            void* ptr;
-            if (SUCCEEDED(device_->CreateIndexBuffer(bytes, D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_MANAGED, &p.ib, nullptr)) &&
-                SUCCEEDED(p.ib->Lock(0, 0, &ptr, 0))) {
-                memcpy(ptr, p.data->indices.data(), bytes);
-                p.ib->Unlock();
-            }
-        }
-        for (const MdpcTexture& t : p.data->textures) {
-            IDirect3DTexture9* tex = CreateDds(device_, t.dds);
-            (tex ? textures : texturesSkipped)++;
-            p.textures.push_back(tex);
-        }
-        byUid[p.data->uid] = int(packages_.size());
-        packages_.push_back(std::move(p));
+        byUid[packages[k].uid] = int(packages_.size());
+        AddPackage(packages[k]);
     }
-    // The effect and textures of every group of slot 0 (0x5d68e0, 0x5e0970;
-    // first substance).
-    for (Package& p : packages_) {
-        p.groupOf.resize(p.data->models.size());
-        for (size_t m = 0; m < p.data->models.size(); ++m) {
-            const MdpcModel& model = p.data->models[m];
-            int id = RenderId(model);
-            bool layout = (DeclIndex(model.vertexType) == 1 || DeclIndex(model.vertexType) == 2) &&
-                          model.vertexBuffer < p.data->vertexBuffers.size() &&
-                          p.data->vertexBuffers[model.vertexBuffer].stride == 48;
-            for (const MdpcSubmesh& sm : model.lods[0]) {
-                std::vector<Package::Group> groups;
-                for (const MdpcGroup& g : sm.groups) {
-                    Package::Group gr;
-                    gr.fx = id;
-                    // No substance: the binder's request keeps type 8 (0x5e0900).
-                    uint8_t s[8] = { 8 };
-                    auto it = byUid.find(g.material >> 16);
-                    if (g.material != 0xffff0000 && g.material != 0xcccccccc && it != byUid.end()) {
-                        const Package& owner = packages_[it->second];
-                        uint32_t mi = g.material & 0xffff;
-                        if (mi < owner.data->materials.size() && !owner.data->materials[mi].empty()) {
-                            const MdpcSubstance& sub = owner.data->materials[mi][0];
-                            memcpy(s, sub.bytes, 8);
-                            if (!(model.flags & 2)) ModelSubstance(s);
-                            int index = (((s[4] & 0x7f) + id * 4) * 3 + s[5]) * 5 + s[6];
-                            if (int e = SubstanceEffect(index)) gr.fx = e;
-                            // Texture references are entries of the material's own package.
-                            if (!sub.textures.empty() && size_t(sub.textures[0]) < owner.textures.size())
-                                gr.diffuse = owner.textures[sub.textures[0]];
-                            if ((s[6] == 1 || s[6] == 4) && sub.textures.size() >= 2 &&
-                                size_t(sub.textures[1]) < owner.textures.size())
-                                gr.normal = owner.textures[sub.textures[1]];
-                        }
-                    }
-                    if (!layout || gr.fx <= 0 || gr.fx >= 0x30 || !fx_[gr.fx].fx) gr.fx = -1;
-                    gr.state = StateFor(s);
-                    groups.push_back(gr);
-                }
-                p.groupOf[m].push_back(std::move(groups));
+    for (Package& p : packages_) ResolveGroups(p, byUid);
+    // Shadow volumes: the request keeps type 8, byte 1 and flags 0 (every
+    // traced mode 4 / 5 draw), modes 4 and 5.
+    static const uint8_t kVolume[8] = { 8 };
+    shadowState_[0] = StateFor(kVolume, 4);
+    shadowState_[1] = StateFor(kVolume, 5);
+    // The sky's materials are its own (uid 0x34; city packages may use the
+    // same small uid).
+    skyInfo.clear();
+    if (sky && !sky->models.empty()) {
+        skyPackage_ = int(packages_.size());
+        AddPackage(*sky);
+        ResolveGroups(packages_.back(), { { sky->uid, skyPackage_ } });
+        for (const auto& sm : packages_.back().groupOf[0])
+            for (const Package::Group& g : sm) {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "%sgroup: effect %d, preset 0x%02x", skyInfo.empty() ? "" : "; ", g.fx,
+                         unsigned(states_[g.state].base));
+                skyInfo += buf;
             }
-        }
     }
     for (const CityInstance& in : city.instances) {
         if (!in.HasModel()) continue;
@@ -486,9 +590,14 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
         for (const auto& sm : packages_[it->second].groupOf[inst.model])
             for (const Package::Group& g : sm) {
                 (g.fx >= 0 ? groupsDrawn : groupsSkipped)++;
-                if (g.fx >= 0 && !g.diffuse) ++groupsUntextured;
-                if (g.fx >= 0) ++perPreset[states_[g.state].base];
+                if (g.fx < 0) continue;
+                if (!g.diffuse) ++groupsUntextured;
+                ++perPreset[states_[g.state].base];
+                ++perEffect[g.fx];
+                if (g.late) ++lateGroups;
+                if (!DrawnInMode(g.type, 2)) ++hiddenGroups;
             }
+        if (packages_[it->second].shadowSlot[inst.model] >= 0) ++shadowInstances;
         instances_.push_back(inst);
     }
     stateSets = states_.size();
@@ -498,18 +607,27 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
         snprintf(buf, sizeof(buf), "%s0x%02x x%zu", presetsUsed.empty() ? "" : ", ", unsigned(e.first), e.second);
         presetsUsed += buf;
     }
+    effectsUsed.clear();
+    for (const auto& e : perEffect) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%s0x%02x x%zu", effectsUsed.empty() ? "" : ", ", unsigned(e.first), e.second);
+        effectsUsed += buf;
+    }
     return true;
 }
 
-int CityRenderer::StateFor(const uint8_t s[8])
+int CityRenderer::StateFor(const uint8_t s[8], int mode)
 {
     // The request reads bytes 0..2 sign-extended (0x5e0900).
-    int base = TypePreset(int8_t(s[0]));
+    const int type = int8_t(s[0]);
+    int base = TypePreset(type);
     unsigned extras = ExtraPresets(int8_t(s[1]), int8_t(s[2]));
+    if (type >= 2 && type <= 4) mode = 2;  // 0x5d4440: no mode preset for these types
     for (size_t k = 0; k < states_.size(); ++k)
-        if (states_[k].base == base && states_[k].extras == extras) return int(k);
+        if (states_[k].base == base && states_[k].extras == extras && states_[k].mode == mode) return int(k);
     // Defaults, the base preset over them (presets below 0x2a first restore
-    // the defaults, 0x5d50f0), then the extra presets in 0x5d8340's order.
+    // the defaults, 0x5d50f0), then the extra presets in 0x5d8340's order,
+    // then the mode's preset (0x5cdaa0).
     std::map<DWORD, DWORD> rs, sampler;
     for (const StatePair& p : kDefaultRS) rs[p.state] = p.value;
     for (const StatePair& p : kDefaultSampler) sampler[p.state] = p.value;
@@ -528,13 +646,11 @@ int CityRenderer::StateFor(const uint8_t s[8])
     static const int kOrder[] = { 0, 1, 3, 2, 4, 5, 6, 7 };  // 0x2a, 0x2b, 0x2d, 0x2c, 0x2e, 0x2f, 0x30, 0x31
     for (int n : kOrder)
         if (extras & (1u << n)) apply(0x2a + n);
-    // Stand-ins (see render.h): no fog, cull mode mirrored.
-    rs[D3DRS_FOGENABLE] = FALSE;
-    if (rs[D3DRS_CULLMODE] == D3DCULL_CW) rs[D3DRS_CULLMODE] = D3DCULL_CCW;
-    else if (rs[D3DRS_CULLMODE] == D3DCULL_CCW) rs[D3DRS_CULLMODE] = D3DCULL_CW;
+    if (int preset = ModePreset(mode)) apply(preset);
     StateSet set;
     set.base = base;
     set.extras = extras;
+    set.mode = mode;
     set.rs.assign(rs.begin(), rs.end());
     set.sampler.assign(sampler.begin(), sampler.end());
     set.blend = rs[D3DRS_ALPHABLENDENABLE] != 0;
@@ -559,6 +675,100 @@ void CityRenderer::ApplyState(const StateSet& set)
         }
 }
 
+// The shared light (the effects share these parameters through the pool).
+void CityRenderer::SetLight(const float ambient[4], const float colour[4], const float direction[4])
+{
+    if (ambient_) shared_->SetVector(ambient_, reinterpret_cast<const D3DXVECTOR4*>(ambient));
+    if (lightColour_) shared_->SetVector(lightColour_, reinterpret_cast<const D3DXVECTOR4*>(colour));
+    if (lightDir_) shared_->SetVector(lightDir_, reinterpret_cast<const D3DXVECTOR4*>(direction));
+}
+
+// 0x5e0f20 (per group, from the texture binder): g_envSpecColourAndLerpFactor
+// by effect id from the light state (0x8d6c9c + 0x100, copied by 0x5e1130):
+// ids 2, 3, 5, 6, 0x24, 0x25 the directional colour (colour) with w 0; 0x1d,
+// 0x1f, 0x20, 0x21 the ambient colour with w 0.35; 0x23 zero; 9 and 0xb the
+// light state's +0x140 (not decoded: their default is kept); others
+// unchanged.
+void CityRenderer::SetEnvSpec(const float colour[4])
+{
+    for (int id = 0; id < 0x30; ++id) {
+        Effect& e = fx_[id];
+        if (!e.fx || !e.envSpec) continue;
+        D3DXVECTOR4 v(0, 0, 0, 0);
+        if (id == 2 || id == 3 || id == 5 || id == 6 || id == 0x24 || id == 0x25)
+            v = D3DXVECTOR4(colour[0], colour[1], colour[2], 0);
+        else if (id == 0x1d || id == 0x1f || id == 0x20 || id == 0x21)
+            v = D3DXVECTOR4(mood_.ambient[0], mood_.ambient[1], mood_.ambient[2], 0.35f);
+        else if (id != 0x23)
+            continue;
+        e.fx->SetVector(e.envSpec, &v);
+    }
+}
+
+// One group with its effect already begun: World, textures, CommitChanges,
+// its render states and the DrawIndexedPrimitive (0x5de4e0, 0x5e0970,
+// 0x5d4440, 0x5dfe20). world: row-vector object matrix.
+void CityRenderer::DrawGroup(const Package& p, const MdpcModel& m, const MdpcGroup& g, const Package::Group& info,
+                             int state, const float world[16], int& applied)
+{
+    Effect& e = fx_[info.fx];
+    if (e.world) e.fx->SetMatrix(e.world, reinterpret_cast<const D3DXMATRIX*>(world));
+    if (e.diffuse) e.fx->SetTexture(e.diffuse, info.diffuse ? info.diffuse : white_);
+    if (e.normalMap) e.fx->SetTexture(e.normalMap, info.normal ? info.normal : white_);
+    e.fx->CommitChanges();
+    if (state != applied) {
+        ApplyState(states_[state]);
+        applied = state;
+    }
+    IDirect3DVertexBuffer9* vb = p.vbs[m.vertexBuffer];
+    if (!vb || !p.ib) return;
+    device_->SetStreamSource(0, vb, 0, p.data->vertexBuffers[m.vertexBuffer].stride);
+    device_->SetIndices(p.ib);
+    // 0x5dfe20: the group's six DrawIndexedPrimitive values.
+    device_->DrawIndexedPrimitive(D3DPRIMITIVETYPE(g.type), g.baseVertex, g.minIndex, g.numVertices, g.startIndex,
+                                  g.primitives);
+    ++frameDraws;
+}
+
+// 0x539cb0: the sky dome is an object with the mood's sky matrix (+0x10),
+// row 3 = the camera position with y = -5 (0xc0a00000), model 0xd000
+// (package uid 0x34, model 0) and the colour SKY_COLOUR (+0x160). Drawn
+// as kind 0x10001, 0x5de330 gives it s_LightAmbientColour = that colour,
+// s_LightDirectionalDirection (0, -1, 0, 0) and s_LightDirectionalColour
+// (0, 0, 0, 1) (the values the trace shows for its draw).
+void CityRenderer::DrawSky(const float eye[3])
+{
+    if (skyPackage_ < 0) return;
+    const Package& p = packages_[skyPackage_];
+    const MdpcModel& m = p.data->models[0];
+    static const float kDown[4] = { 0, -1, 0, 0 }, kBlack[4] = { 0, 0, 0, 1 };
+    SetLight(mood_.skyColour, kBlack, kDown);
+    float object[16];
+    memcpy(object, mood_.skyMatrix, sizeof(object));
+    object[12] = eye[0];
+    object[13] = -5.0f;
+    object[14] = eye[2];
+    object[15] = 1.0f;
+    float wt[16], world[16];
+    Transpose(object, wt);
+    int applied = -1;
+    for (size_t s = 0; s < m.lods[0].size() && s < p.groupOf[0].size(); ++s) {
+        const MdpcSubmesh& sm = m.lods[0][s];
+        if (sm.hasMatrix) Mul(wt, sm.matrix, world);
+        else memcpy(world, wt, sizeof(world));
+        for (size_t g = 0; g < sm.groups.size(); ++g) {
+            const Package::Group& info = p.groupOf[0][s][g];
+            if (info.fx < 0) continue;
+            Effect& e = fx_[info.fx];
+            UINT passes = 0;
+            if (FAILED(e.fx->Begin(&passes, D3DXFX_DONOTSAVESTATE)) || FAILED(e.fx->BeginPass(0))) continue;
+            DrawGroup(p, m, sm.groups[g], info, info.state, world, applied);
+            e.fx->EndPass();
+            e.fx->End();
+        }
+    }
+}
+
 void CityRenderer::Draw(const float viewProj[16], const float eye[3], float range)
 {
     frameInstances = frameDraws = 0;
@@ -568,9 +778,26 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], float rang
     shared_->SetMatrix(viewProj_, reinterpret_cast<const D3DXMATRIX*>(t));
     const D3DXVECTOR4 cam(eye[0], eye[1], eye[2], 1.0f);
     if (camPos_) shared_->SetVector(camPos_, &cam);
+    device_->SetVertexDeclaration(decl_);
+    DrawSky(eye);
+    // The mood (0x5dc1e0): s_FogParams and FOGCOLOR (0x5cefb0), the light
+    // (0x5dc3f0): ambient (w 1), directional colour (w 1) and direction
+    // normalized with w 0 (0x417ea0).
+    float fog[4], dir[4] = { mood_.direction[0], mood_.direction[1], mood_.direction[2], 0 };
+    mood_.FogParams(fog);
+    if (fogParams_) shared_->SetVector(fogParams_, reinterpret_cast<const D3DXVECTOR4*>(fog));
+    float len = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    if (len > 0)
+        for (float& v : dir) v /= len;
+    SetLight(mood_.ambient, mood_.directional, dir);
+    device_->SetRenderState(D3DRS_FOGCOLOR, mood_.FogColour());
+    SetEnvSpec(mood_.directional);
 
+    // The scene's lists (0x5d2ca0): 0 = items, 1 = volumes, 2 = late.
     struct Item { int fx; const Instance* inst; const MdpcSubmesh* sm; const MdpcGroup* g; const Package::Group* info; };
-    std::vector<Item> items;
+    std::vector<Item> items, late;
+    std::vector<const Instance*> volumes;
+    frameShadowDraws = frameRedraws = 0;
     for (const Instance& inst : instances_) {
         float d[3] = { inst.centre[0] - eye[0], inst.centre[1] - eye[1], inst.centre[2] - eye[2] };
         if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > range * range) continue;
@@ -584,59 +811,97 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], float rang
         for (size_t s = 0; s < m.lods[0].size(); ++s)
             for (size_t g = 0; g < m.lods[0][s].groups.size(); ++g) {
                 const Package::Group& info = p.groupOf[inst.model][s][g];
-                if (info.fx >= 0) items.push_back({ info.fx, &inst, &m.lods[0][s], &m.lods[0][s].groups[g], &info });
+                if (info.fx >= 0)
+                    (info.late ? late : items).push_back({ info.fx, &inst, &m.lods[0][s], &m.lods[0][s].groups[g], &info });
             }
+        // 0x5d2990 -> 0x5d2b90: a shadow volume per object while shadows are on.
+        if (shadows_ && p.shadowSlot[inst.model] >= 0) volumes.push_back(&inst);
     }
     // Blended groups after the others (stand-in, see render.h), then by
     // effect, render states and texture.
-    std::stable_sort(items.begin(), items.end(), [this](const Item& a, const Item& b) {
+    auto order = [this](const Item& a, const Item& b) {
         bool ba = states_[a.info->state].blend, bb = states_[b.info->state].blend;
         if (ba != bb) return bb;
         if (a.fx != b.fx) return a.fx < b.fx;
         if (a.info->state != b.info->state) return a.info->state < b.info->state;
         return a.info->diffuse < b.info->diffuse;
-    });
+    };
+    std::stable_sort(items.begin(), items.end(), order);
+    std::stable_sort(late.begin(), late.end(), order);
 
-    device_->SetVertexDeclaration(decl_);
+    // 0x5de4e0: World = transpose(object matrix) x submesh matrix when +0x4a is set.
+    auto worldOf = [](const Instance& inst, const MdpcSubmesh& sm, float world[16]) {
+        float wt[16];
+        Transpose(inst.in->world, wt);
+        if (sm.hasMatrix) Mul(wt, sm.matrix, world);
+        else memcpy(world, wt, 16 * sizeof(float));
+    };
     int applied = -1;
-    for (size_t i = 0; i < items.size();) {
-        Effect& e = fx_[items[i].fx];
-        UINT passes = 0;
-        // 0x5dfdb0: Begin(&passes, 1 = D3DXFX_DONOTSAVESTATE), pass 0.
-        if (FAILED(e.fx->Begin(&passes, D3DXFX_DONOTSAVESTATE)) || FAILED(e.fx->BeginPass(0))) {
-            while (i < items.size() && &fx_[items[i].fx] == &e) ++i;
-            continue;
-        }
-        for (; i < items.size() && &fx_[items[i].fx] == &e; ++i) {
-            const Item& it = items[i];
-            const Package& p = packages_[it.inst->package];
-            const MdpcModel& m = p.data->models[it.inst->model];
-            // 0x5de4e0: transpose(world) x submesh matrix when +0x4a is set.
-            float wt[16], world[16];
-            Transpose(it.inst->in->world, wt);
-            if (it.sm->hasMatrix) Mul(wt, it.sm->matrix, world);
-            else memcpy(world, wt, sizeof(world));
-            if (e.world) e.fx->SetMatrix(e.world, reinterpret_cast<const D3DXMATRIX*>(world));
-            if (e.diffuse) e.fx->SetTexture(e.diffuse, it.info->diffuse ? it.info->diffuse : white_);
-            if (e.normalMap) e.fx->SetTexture(e.normalMap, it.info->normal ? it.info->normal : white_);
-            e.fx->CommitChanges();
-            if (it.info->state != applied) {
-                ApplyState(states_[it.info->state]);
-                applied = it.info->state;
+    // 0x5dbfc0 / 0x5e05b0: one list in one mode; per effect Begin(&passes, 1 =
+    // D3DXFX_DONOTSAVESTATE) and pass 0 (0x5dfdb0); the groups the mode does
+    // not draw are left out (0x5e06f0).
+    auto drawList = [&](const std::vector<Item>& list, bool redraw) {
+        for (size_t i = 0; i < list.size();) {
+            Effect& e = fx_[list[i].fx];
+            size_t end = i;
+            bool any = false;
+            for (; end < list.size() && &fx_[list[end].fx] == &e; ++end)
+                any |= redraw ? list[end].info->redraw >= 0 : DrawnInMode(list[end].info->type, 2);
+            UINT passes = 0;
+            if (!any || FAILED(e.fx->Begin(&passes, D3DXFX_DONOTSAVESTATE)) || FAILED(e.fx->BeginPass(0))) {
+                i = end;
+                continue;
             }
-            IDirect3DVertexBuffer9* vb = p.vbs[m.vertexBuffer];
-            if (!vb || !p.ib) continue;
-            device_->SetStreamSource(0, vb, 0, p.data->vertexBuffers[m.vertexBuffer].stride);
-            device_->SetIndices(p.ib);
-            // 0x5dfe20: the group's six DrawIndexedPrimitive values.
-            const MdpcGroup& g = *it.g;
-            device_->DrawIndexedPrimitive(D3DPRIMITIVETYPE(g.type), g.baseVertex, g.minIndex, g.numVertices, g.startIndex,
-                                          g.primitives);
-            ++frameDraws;
+            for (; i < end; ++i) {
+                const Item& it = list[i];
+                int state = redraw ? it.info->redraw : it.info->state;
+                if (redraw ? state < 0 : !DrawnInMode(it.info->type, 2)) continue;
+                const Package& p = packages_[it.inst->package];
+                float world[16];
+                worldOf(*it.inst, *it.sm, world);
+                DrawGroup(p, p.data->models[it.inst->model], *it.g, *it.info, state, world, applied);
+                if (redraw) ++frameRedraws;
+            }
+            e.fx->EndPass();
+            e.fx->End();
         }
-        e.fx->EndPass();
-        e.fx->End();
+    };
+
+    drawList(items, false);  // list 0, mode 2
+    if (!volumes.empty()) {
+        // Modes 4 and 5: every volume twice, effect 0x2b with the request's
+        // type 8 (the state sets of Upload).
+        Effect& e = fx_[0x2b];
+        Package::Group volume;
+        volume.fx = 0x2b;
+        for (int pass = 0; pass < 2; ++pass) {
+            UINT passes = 0;
+            if (FAILED(e.fx->Begin(&passes, D3DXFX_DONOTSAVESTATE)) || FAILED(e.fx->BeginPass(0))) break;
+            for (const Instance* inst : volumes) {
+                const Package& p = packages_[inst->package];
+                const MdpcModel& m = p.data->models[inst->model];
+                for (const MdpcSubmesh& sm : m.lods[p.shadowSlot[inst->model]]) {
+                    float world[16];
+                    worldOf(*inst, sm, world);
+                    for (const MdpcGroup& g : sm.groups) {
+                        DrawGroup(p, m, g, volume, shadowState_[pass], world, applied);
+                        ++frameShadowDraws;
+                    }
+                }
+            }
+            e.fx->EndPass();
+            e.fx->End();
+        }
+        // 0x5d2e2a: directional colour (0, 0, 0, 0), the light uploaded again
+        // (0x5dc1e0), list 0 in mode 7 / 6, then the colour back.
+        static const float kZero[4] = {};
+        SetLight(mood_.ambient, kZero, dir);
+        SetEnvSpec(kZero);
+        drawList(items, true);
+        SetLight(mood_.ambient, mood_.directional, dir);
+        SetEnvSpec(mood_.directional);
     }
+    drawList(late, false);  // list 2, mode 2
 }
 
 void CityRenderer::OnLostDevice()
@@ -668,6 +933,8 @@ void CityRenderer::Release()
     packages_.clear();
     instances_.clear();
     states_.clear();
+    skyPackage_ = -1;
+    skyInfo.clear();
     memset(rsValid_, 0, sizeof(rsValid_));
     memset(samplerValid_, 0, sizeof(samplerValid_));
     for (Effect& e : fx_) {
@@ -688,5 +955,7 @@ void CityRenderer::Release()
     effects = 0;
     failedEffects.clear();
     groupsDrawn = groupsSkipped = 0;
+    shadowInstances = lateGroups = hiddenGroups = 0;
+    shadowState_[0] = shadowState_[1] = -1;
     textures = texturesSkipped = groupsUntextured = 0;
 }
