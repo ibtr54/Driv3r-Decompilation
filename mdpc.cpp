@@ -125,6 +125,27 @@ bool MdpcPackage::Load(const std::vector<uint8_t>& file, size_t mdpc, size_t siz
             }
         }
     }
+    // Materials (PCMP at header +0x2c): +0x08 count, +0x0c table of 0x18
+    // entries {+0 offset of the substance offsets, +4 count}; offsets are
+    // from the PCMP. A substance's bytes +0 / +4 / +5 / +6 choose the effect
+    // in 0x5d68e0 (table 0x8accc8), +0x10 / +0x14 its textures.
+    materials.clear();
+    uint32_t pcmp = h.U32(0x2c);
+    if (pcmp && h.Has(pcmp, 0x10) && memcmp(&file[mdpc + pcmp], "PCMP", 4) == 0) {
+        uint32_t mCount = h.U32(pcmp + 8), mTable = h.U32(pcmp + 0xc);
+        for (uint32_t m = 0; m < mCount && h.Has(pcmp + mTable + size_t(m) * 0x18, 0x18); ++m) {
+            size_t e = pcmp + mTable + size_t(m) * 0x18;
+            uint32_t list = h.U32(e), n = h.U32(e + 4);
+            std::vector<MdpcSubstance> subs;
+            for (uint32_t s = 0; s < n && s < 16; ++s) {
+                size_t so = pcmp + h.U32(pcmp + list + s * 4);
+                MdpcSubstance sub;
+                if (h.Has(so, 8)) memcpy(sub.bytes, &file[mdpc + so], 8);
+                subs.push_back(sub);
+            }
+            materials.push_back(std::move(subs));
+        }
+    }
     return true;
 }
 

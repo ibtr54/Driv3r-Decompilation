@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <atomic>
+#include <functional>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -55,6 +56,9 @@ public:
     const std::vector<std::string>& Report() const { return report_; }
     const std::vector<MdpcPackage>& Packages() const { return packages_; }
     const CityPlacement& City() const { return city_; }
+    // The city's packages: Packages()[CityFirst(), CityEnd()).
+    size_t CityFirst() const { return cityFirst_; }
+    size_t CityEnd() const { return cityEnd_; }
 
 private:
     void DecodePackages(const std::string& f, const std::vector<uint8_t>& d);
@@ -66,6 +70,7 @@ private:
     std::vector<std::string> missing_, report_;
     std::vector<MdpcPackage> packages_;
     CityPlacement city_;
+    size_t cityFirst_ = 0, cityEnd_ = 0;
 };
 
 // OVERLAYS\*.GFX: CHNK { UPST, MDPC }. UPST (as found in LOADING.GFX, not
@@ -93,8 +98,14 @@ public:
     bool Open(HWND hwnd);
     void Close();
     bool IsOpen() const { return device_ != nullptr; }
-    // Clears the back buffer to the colour and presents it (vsync).
-    bool Frame(D3DCOLOR clear);
+    // Clears the back buffer to the colour (and the depth buffer), calls
+    // draw between BeginScene and EndScene, and presents it (vsync).
+    bool Frame(D3DCOLOR clear, const std::function<void(IDirect3DDevice9*)>& draw = nullptr);
+    IDirect3DDevice9* Device() const { return device_; }
+    float Aspect() const;
+    // Called around a device reset (effects must release and recreate
+    // their default-pool resources).
+    std::function<void()> onLost, onReset;
     const std::string& Error() const { return error_; }
 
 private:

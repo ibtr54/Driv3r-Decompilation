@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "level.h"
+#include "render.h"
 #include "mec.h"
 #include "story.h"
 
@@ -2956,8 +2957,9 @@ private:
 // original: state 0xB4 Enter (0x54d680) selects sub-state 0xB6, which shows
 // the loading screen while the level loader 0x8ac338 reads the files
 // (vtbl+8 0x44b360 queues them, vtbl+0x10 is polled). Then the level runs
-// (0xB8): Take A Ride in Miami (levels 0x4d / 0x4e) as an empty Direct3D 9
-// view (black), every other level as a stand-in that names it. The keys send
+// (0xB8): Take A Ride in Miami (levels 0x4d / 0x4e) as a Direct3D 9 view of
+// the city drawn with the game's effects (render.h) from a fixed stand-in
+// camera, every other level as a stand-in that names it. The keys send
 // the messages gameplay sends to the story sequencer (handler 0x557de0);
 // where gameplay goes after one is decided by state 0xBB (EndOfPart below);
 // the end screens 0xCD / 0xCF are not implemented.
@@ -2973,6 +2975,7 @@ public:
     void Enter() override { StartLoading(); }
     void Leave() override
     {
+        city_.Release();
         view_.Close();
         loader_.Wait();
     }
@@ -2989,12 +2992,39 @@ public:
             missing.empty() ? "" : ", missing:", missing.c_str());
         for (const std::string& line : loader_.Report()) Log("Level 0x%02x: %s", mission, line.c_str());
         if (mission == 0x4d || mission == 0x4e) {  // Take A Ride, Miami
-            if (view_.Open(g.hwnd)) Log("Level 0x%02x: Direct3D 9 view (black)", mission);
-            else Log("Level 0x%02x: Direct3D 9: %s, stand-in instead", mission, view_.Error().c_str());
+            if (!view_.Open(g.hwnd)) {
+                Log("Level 0x%02x: Direct3D 9: %s, stand-in instead", mission, view_.Error().c_str());
+                return;
+            }
+            view_.onLost = [this] { city_.OnLostDevice(); };
+            view_.onReset = [this] { city_.OnResetDevice(); };
+            if (city_.Init(view_.Device(), g.gameDir + "\\Driv3r.exe") &&
+                city_.Upload(loader_.Packages(), loader_.CityFirst(), loader_.CityEnd(), loader_.City()))
+                Log("Level 0x%02x: Direct3D 9 view, %d effects from Driv3r.exe%s%s, %zu city groups drawn, %zu left out",
+                    mission, city_.effects, city_.failedEffects.empty() ? "" : " (not created:",
+                    city_.failedEffects.empty() ? "" : (city_.failedEffects + ")").c_str(), city_.groupsDrawn,
+                    city_.groupsSkipped);
+            else
+                Log("Level 0x%02x: Direct3D 9 view (black), city not drawn: %s", mission, city_.Error().c_str());
+            drawn_ = 0;
         }
     }
 
-    bool PresentOwn() override { return !loading_ && view_.IsOpen() && view_.Frame(D3DCOLOR_XRGB(0, 0, 0)); }
+    bool PresentOwn() override
+    {
+        if (loading_ || !view_.IsOpen()) return false;
+        // Stand-in camera (the start point's position in Mission77.mpc and
+        // the game's camera are not decoded): above a street west of the
+        // centre, 60 degrees, the draw range of the lowest setting (500,
+        // 0x4ddc50 +0x40).
+        static const float kEye[3] = { -1450, 40, -60 }, kAt[3] = { -1350, 0, 40 };
+        float vp[16];
+        CameraMatrix(kEye, kAt, 3.14159265f / 3, view_.Aspect(), 1.0f, 600.0f, vp);
+        bool ok = view_.Frame(D3DCOLOR_XRGB(0, 0, 0), [&](IDirect3DDevice9*) { city_.Draw(vp, kEye, 500.0f); });
+        if (drawn_++ == 1)
+            Log("Level 0x%02x: frame: %zu instances, %zu draw calls", mission, city_.frameInstances, city_.frameDraws);
+        return ok;
+    }
 
     void Render(HDC, Canvas& cv) override
     {
@@ -3025,6 +3055,8 @@ public:
 private:
     LevelLoader loader_;
     D3DView view_;
+    CityRenderer city_;
+    unsigned drawn_ = 0;
     OverlayGfx gfx_;
     bool gfxLoaded_ = false;
     TextTable generic_;
@@ -3033,6 +3065,7 @@ private:
 
     void StartLoading()
     {
+        city_.Release();
         view_.Close();
         loading_ = true;
         if (!gfxLoaded_) {

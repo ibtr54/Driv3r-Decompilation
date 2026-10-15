@@ -38,6 +38,7 @@ void LevelLoader::Start(const std::string& gameDir, const std::vector<std::strin
     report_.clear();
     packages_.clear();
     city_ = CityPlacement();
+    cityFirst_ = cityEnd_ = 0;
     worker_ = std::thread([this, gameDir, files] {
         auto t0 = std::chrono::steady_clock::now();
         for (const std::string& f : files) {
@@ -119,6 +120,8 @@ void LevelLoader::LoadCity(const std::string& gameDir, const std::string& f, con
                 break;
             }
     }
+    cityFirst_ = first;
+    cityEnd_ = packages_.size();
     snprintf(line, sizeof(line), "%s: %zu instances on a %d x %d grid, %zu with a model, %zu of them found", f.c_str(),
              city_.instances.size(), city_.gridSide, city_.gridSide, models, resolved);
     report_.push_back(line);
@@ -168,6 +171,8 @@ bool D3DView::Open(HWND hwnd)
     pp_.BackBufferFormat = D3DFMT_UNKNOWN;  // the desktop's format; size from the client area
     pp_.hDeviceWindow = hwnd;
     pp_.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
+    pp_.EnableAutoDepthStencil = TRUE;
+    pp_.AutoDepthStencilFormat = D3DFMT_D24S8;
     HRESULT hr = d3d_->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp_,
                                     &device_);
     if (FAILED(hr))
@@ -193,14 +198,28 @@ void D3DView::Close()
     dll_ = nullptr;
 }
 
-bool D3DView::Frame(D3DCOLOR clear)
+bool D3DView::Frame(D3DCOLOR clear, const std::function<void(IDirect3DDevice9*)>& draw)
 {
     if (!device_) return false;
     HRESULT hr = device_->TestCooperativeLevel();
     if (hr == D3DERR_DEVICELOST) return true;  // e.g. another window full screen: wait
-    if (hr == D3DERR_DEVICENOTRESET && FAILED(device_->Reset(&pp_))) return true;
-    device_->Clear(0, nullptr, D3DCLEAR_TARGET, clear, 1.0f, 0);
-    if (SUCCEEDED(device_->BeginScene())) device_->EndScene();
+    if (hr == D3DERR_DEVICENOTRESET) {
+        if (onLost) onLost();
+        if (FAILED(device_->Reset(&pp_))) return true;
+        if (onReset) onReset();
+    }
+    device_->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, clear, 1.0f, 0);
+    if (SUCCEEDED(device_->BeginScene())) {
+        if (draw) draw(device_);
+        device_->EndScene();
+    }
     device_->Present(nullptr, nullptr, nullptr, nullptr);
     return true;
+}
+
+float D3DView::Aspect() const
+{
+    RECT r = {};
+    if (pp_.hDeviceWindow) GetClientRect(pp_.hDeviceWindow, &r);
+    return r.bottom > r.top ? float(r.right - r.left) / float(r.bottom - r.top) : 4.0f / 3.0f;
 }

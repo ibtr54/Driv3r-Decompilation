@@ -67,6 +67,13 @@ struct MdpcVertexBuffer
     const float* Position(uint32_t i) const { return reinterpret_cast<const float*>(&data[size_t(i) * stride]); }
 };
 
+// The first 8 bytes of a PCMP substance (a material's pass): +0 type,
+// +4 & 0x7f / +5 / +6 pick the effect with the model's render id (0x5d68e0).
+struct MdpcSubstance
+{
+    uint8_t bytes[8] = {};
+};
+
 // Offset and size of every MDPC chunk in a CHNK file, depth first (a
 // .vvs holds one per car, SuperRegions.pcs one per region group).
 std::vector<std::pair<size_t, size_t>> FindMdpcChunks(const std::vector<uint8_t>& file);
@@ -83,6 +90,8 @@ public:
     std::vector<MdpcVertexBuffer> vertexBuffers;
     std::vector<uint16_t> indices;   // +0x30 count, +0x34 size, +0x38 offset
     std::vector<MdpcModel> models;
+    // Per material index (group material & 0xffff), its substances.
+    std::vector<std::vector<MdpcSubstance>> materials;
 
     // Triangles of a group as vertex indices into its model's vertex
     // buffer (strips unrolled with alternating winding, degenerate ones
