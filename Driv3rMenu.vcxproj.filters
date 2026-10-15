@@ -17,6 +17,12 @@
     <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="city.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="mdpc.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="mec.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -24,6 +30,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClInclude Include="level.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="city.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="mdpc.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="mec.h">

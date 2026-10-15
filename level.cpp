@@ -35,23 +35,93 @@ void LevelLoader::Start(const std::string& gameDir, const std::vector<std::strin
     bytes_ = 0;
     seconds_ = 0;
     missing_.clear();
+    report_.clear();
+    packages_.clear();
+    city_ = CityPlacement();
     worker_ = std::thread([this, gameDir, files] {
         auto t0 = std::chrono::steady_clock::now();
-        std::vector<char> buf(1 << 20);
         for (const std::string& f : files) {
-            HANDLE h = CreateFileA((gameDir + "\\" + f).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                                   FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-            if (h == INVALID_HANDLE_VALUE) {
+            std::vector<uint8_t> d = ReadFile(gameDir + "\\" + f);
+            if (d.empty()) {
                 missing_.push_back(f);
                 continue;
             }
-            DWORD got = 0;
-            while (::ReadFile(h, buf.data(), DWORD(buf.size()), &got, nullptr) && got > 0) bytes_ += got;
-            CloseHandle(h);
+            bytes_ += d.size();
+            if (f.size() > 4 && _stricmp(f.c_str() + f.size() - 4, ".d3c") == 0) LoadCity(gameDir, f, d);
+            else DecodePackages(f, d);
         }
         seconds_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         done_ = true;
     });
+}
+
+void LevelLoader::DecodePackages(const std::string& f, const std::vector<uint8_t>& d)
+{
+    auto chunks = FindMdpcChunks(d);
+    size_t first = packages_.size(), models = 0, tris = 0, failed = 0;
+    std::vector<uint32_t> t;
+    for (const auto& c : chunks) {
+        MdpcPackage p;
+        if (!p.Load(d, c.first, c.second)) {
+            ++failed;
+            continue;
+        }
+        models += p.models.size();
+        for (const MdpcModel& m : p.models)
+            for (const MdpcSubmesh& sm : m.lods[0])
+                for (const MdpcGroup& g : sm.groups) {
+                    t.clear();
+                    p.Triangles(g, t);
+                    tris += t.size() / 3;
+                }
+        packages_.push_back(std::move(p));
+    }
+    if (!chunks.empty()) {
+        char line[256];
+        snprintf(line, sizeof(line), "%s: %zu model packages, %zu models, %zu triangles (level 0)%s", f.c_str(),
+                 packages_.size() - first, models, tris, failed ? ", some not read" : "");
+        report_.push_back(line);
+    }
+}
+
+void LevelLoader::LoadCity(const std::string& gameDir, const std::string& f, const std::vector<uint8_t>& d)
+{
+    // The city loader (0x461ee0): with a PCSL chunk the regions' models are
+    // not in the .d3c but in <path without extension>\SuperRegions.pcs
+    // (0x7818f8, opened by 0x462ae0; \Interiors.pcs 0x7818e8 is opened the
+    // same way and not read here). The instances are in the GEBI chunks.
+    char line[256];
+    size_t first = packages_.size();
+    DecodePackages(f, d);
+    if (!city_.Load(d)) {
+        snprintf(line, sizeof(line), "%s: placement not read (%s)", f.c_str(), city_.Error().c_str());
+        report_.push_back(line);
+        return;
+    }
+    size_t off, size;
+    if (FindChunk(d, 0, "PCSL", off, size)) {
+        std::string pcs = f.substr(0, f.rfind('.')) + "\\SuperRegions.pcs";
+        std::vector<uint8_t> p = ReadFile(gameDir + "\\" + pcs);
+        if (p.empty()) missing_.push_back(pcs);
+        bytes_ += p.size();
+        DecodePackages(pcs, p);
+    }
+    // A model is package uid << 10 | index, looked up through the table
+    // the packages register in by uid (0x57c058, 0x5cbdd0); here only the
+    // city's own packages (other files reuse the small uids).
+    size_t models = 0, resolved = 0;
+    for (const CityInstance& in : city_.instances) {
+        if (!in.HasModel()) continue;
+        ++models;
+        for (size_t k = first; k < packages_.size(); ++k)
+            if (packages_[k].uid == in.PackageUid()) {
+                if (in.ModelIndex() < packages_[k].models.size()) ++resolved;
+                break;
+            }
+    }
+    snprintf(line, sizeof(line), "%s: %zu instances on a %d x %d grid, %zu with a model, %zu of them found", f.c_str(),
+             city_.instances.size(), city_.gridSide, city_.gridSide, models, resolved);
+    report_.push_back(line);
 }
 
 bool OverlayGfx::Load(const std::string& path)

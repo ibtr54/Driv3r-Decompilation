@@ -15,6 +15,8 @@
 #include <thread>
 #include <vector>
 
+#include "city.h"
+#include "mdpc.h"
 #include "mec.h"
 
 // The files the level loader queues (vtbl+8 0x44b360, in its order) for a
@@ -35,7 +37,9 @@ std::vector<std::string> RideFileList(int level, int city, bool night);
 
 // Reads the files on a worker thread (the original loads them behind the
 // loading screen, polled by state 0xB6 through vtbl+0x10). Only reading:
-// nothing is decoded yet.
+// the model packages (MDPC chunks) in them are decoded (mdpc.h), and for
+// the .d3c the city's placement (city.h) and SuperRegions.pcs; the rest
+// of the data is not used yet.
 class LevelLoader
 {
 public:
@@ -46,13 +50,22 @@ public:
     uint64_t Bytes() const { return bytes_; }
     double Seconds() const { return seconds_; }
     const std::vector<std::string>& Missing() const { return missing_; }
+    // Per file with model packages: "<file>: N packages, M models, T
+    // triangles" (failed packages named); filled when Done().
+    const std::vector<std::string>& Report() const { return report_; }
+    const std::vector<MdpcPackage>& Packages() const { return packages_; }
+    const CityPlacement& City() const { return city_; }
 
 private:
+    void DecodePackages(const std::string& f, const std::vector<uint8_t>& d);
+    void LoadCity(const std::string& gameDir, const std::string& f, const std::vector<uint8_t>& d);
     std::thread worker_;
     std::atomic<bool> done_{ true };
     uint64_t bytes_ = 0;
     double seconds_ = 0;
-    std::vector<std::string> missing_;
+    std::vector<std::string> missing_, report_;
+    std::vector<MdpcPackage> packages_;
+    CityPlacement city_;
 };
 
 // OVERLAYS\*.GFX: CHNK { UPST, MDPC }. UPST (as found in LOADING.GFX, not

@@ -2987,6 +2987,7 @@ public:
         for (const std::string& f : loader_.Missing()) missing += " " + f;
         Log("Level 0x%02x: loaded %.1f MB in %.2f s%s%s", mission, loader_.Bytes() / 1048576.0, loader_.Seconds(),
             missing.empty() ? "" : ", missing:", missing.c_str());
+        for (const std::string& line : loader_.Report()) Log("Level 0x%02x: %s", mission, line.c_str());
         if (mission == 0x4d || mission == 0x4e) {  // Take A Ride, Miami
             if (view_.Open(g.hwnd)) Log("Level 0x%02x: Direct3D 9 view (black)", mission);
             else Log("Level 0x%02x: Direct3D 9: %s, stand-in instead", mission, view_.Error().c_str());
