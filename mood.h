@@ -19,10 +19,19 @@ struct Mood
     float ambient[4] = { 0.3984375f, 0.3984375f, 0.3984375f, 1 };      // +0x180 LIGHT_AMBIENT_COLOUR
     float directional[4] = { 1.1015625f, 1.1015625f, 1.1015625f, 1 };  // +0x1c0 LIGHT_DIRECTIONAL_COLOUR
     float direction[4] = { 0.579f, -0.573f, -0.579f, 0 };             // +0x1b0 LIGHT_DIRECTIONAL_VECTOR
+    float shadow[4] = { 0.455f, -0.766f, -0.455f, 0 };                // +0x190 SHADOW_VECTOR
     float fogNearDistance = 50, fogNearValue = 0;    // +0x230 / +0x234 FOG_NEARDISTANCE / FOG_NEARVALUE
     float fogFarDistance = 1050, fogFarValue = 1350; // +0x238 / +0x23c FOG_FARDISTANCE / FOG_FARVALUE
     float fogColour[4] = { 0.5f, 0.5f, 0.6f, 1 };    // +0x240 FOG_COLOUR
     float skyColour[4] = { 1, 1, 1, 1 };             // +0x160 SKY_COLOUR (no shipped mood sets it)
+    // +0x1f0 SHINY_WATER_TINT (default 1, 1, 1 from 0x471b41..): the
+    // g_envSpecColourAndLerpFactor of effects 9 and 0xb (light state
+    // L+0x140, 0x5e1130); the original's water draws have it as ps c2.
+    float shinyWaterTint[4] = { 1, 1, 1, 1 };
+    // +0x15c SEA_COLOUR ("%d"): the water object keeps it - 1 (0..3, else
+    // 0; 0x450c84) as the sea tiles' substance index (object +0x50).
+    int seaColour = 1;
+    int SeaIndex() const { return seaColour - 1 >= 0 && seaColour - 1 <= 3 ? seaColour - 1 : 0; }
     // +0x10: the sky dome's rotation (0x472fc0), row vector times matrix:
     // row 0 = the light direction flattened (y = 0) and normalized, row 1 =
     // up, row 2 = row 0 x row 1, row 3 = (0, 0, 0, 1).

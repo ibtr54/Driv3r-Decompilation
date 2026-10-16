@@ -49,8 +49,13 @@
 // it; its World is the object's matrix moved 0.1 away from the camera.
 // Which substance types each mode draws: 0x5e06f0. Checked against a trace
 // of the original (stencil states, c9, the order of the modes).
-// Not done yet: draw distances. The camera is the ride's start camera or
-// the free one (main.cpp); the game's chase cameras need the vehicle.
+// Draw distances (0x4e7e30): each cell's quadtree (SCND) is walked with
+// the node distances of the profile's setting (0x4ddc50), a 2D frustum and
+// the shadow-vector retest; the distance ratio picks the detail slots
+// (0x4dff20, 0x5dcc50) and an adaptive scale keeps about 150 objects. All
+// cells are walked (the game streams 11 around the player). The camera is
+// the ride's start camera or the free one (main.cpp); the game's chase
+// cameras need the vehicle.
 #pragma once
 
 #define WIN32_LEAN_AND_MEAN
@@ -93,10 +98,22 @@ public:
     void SetMood(const Mood& mood) { mood_ = mood; }
     // The profile's Shadows setting (+0xc8c).
     void SetShadows(bool on) { shadows_ = on; }
-    // viewProj: row-vector view x projection (Direct3D); eye: the camera.
-    // The sky first, then the city; instances whose box centre is farther
-    // than range are skipped.
-    void Draw(const float viewProj[16], const float eye[3], float range);
+    // The profile's draw distance (+0xc88, 0..2) and whether the city is a
+    // night one (game setup vtbl+0x60 == 2): the cells' distance and detail
+    // tables (0x4ddc50, 0x4dde20).
+    void SetDrawDistance(int setting, bool night);
+    // The ride's time of day (game setup +0x34, vtbl+0x64): 3 (night) picks
+    // the sky's material 0 as the environment cube and no shine (0x57c092).
+    void SetTimeOfDay(int time) { timeOfDay_ = time; }
+    // The clock of animated materials ([0x8d6d90]; stand-in: seconds since
+    // the level started).
+    void SetTime(float seconds) { time_ = seconds; }
+    // viewProj: row-vector view x projection (Direct3D); eye: the camera;
+    // back: the camera's z axis (it looks along -back); fov / aspect: the
+    // camera's +0x180 / +0x184. The sky first, then the city, walked like
+    // 0x4e7e30: each cell's quadtree (SCND) with the node distances, a 2D
+    // frustum and the detail levels of the draw-distance tables.
+    void Draw(const float viewProj[16], const float eye[3], const float back[3], float fov, float aspect);
     void OnLostDevice();
     void OnResetDevice();
     void Release();
@@ -107,7 +124,14 @@ public:
     int effects = 0;
     std::string failedEffects;  // ids that D3DX did not create
     size_t groupsDrawn = 0, groupsSkipped = 0, frameInstances = 0, frameDraws = 0;
-    // Placed models with a shadow volume, groups in list 2, groups whose
+    // Last frame: objects submitted with only their shadow (mask 0x20),
+    // objects per detail slot 0..4, the detail scale [0x7a1a68] (0.8..1).
+    size_t frameShadowOnly = 0, frameSlots[5] = {};
+    float lodScale = 1.0f;
+    // Cells with a quadtree, instances not reached by any (logged once).
+    size_t cells = 0, unindexed = 0;
+    // The sea's groups (all tiles) and last frame's submitted tiles.
+    size_t waterGroups = 0, frameWater = 0;    // Placed models with a shadow volume, groups in list 2, groups whose
     // type (0..5) keeps them out of mode 2; last frame's shadow volume and
     // shadow redraw draw calls.
     size_t shadowInstances = 0, lateGroups = 0, hiddenGroups = 0, frameShadowDraws = 0, frameRedraws = 0;
@@ -139,9 +163,11 @@ private:
             int redraw = -1;  // states_ of the shadow redraw (mode 7 / 6), -1: not redrawn
             int8_t type = 8;  // the substance type (byte 0)
             bool late = false;  // list 2
+            bool normalBound = false;  // the binder sets the normal map (substance +6 is 1 or 4)
+            int anim = -1;  // anims_ (a material with several substances), -1: one substance
         };
-        // Per model, per slot 0 submesh, per group.
-        std::vector<std::vector<std::vector<Group>>> groupOf;
+        // Per model, per detail slot 0..4, per submesh, per group.
+        std::vector<std::vector<std::vector<std::vector<Group>>>> groupOf;
         // Per model, its shadow volume's slot (mask 0x20), -1: none.
         std::vector<int> shadowSlot;
     };
@@ -151,6 +177,10 @@ private:
         int package = -1;
         uint32_t model = 0;
         float centre[3] = {};
+        // Submitted object +0x50 -> render object +8 (0x5ce700): the index
+        // of the substance its groups draw with (0x5d92b0; 0 for the city,
+        // SEA_COLOUR - 1 for the sea's tiles).
+        uint32_t substance = 0;
     };
     struct Effect
     {
@@ -162,6 +192,23 @@ private:
         const char* normalMap = nullptr;
         const char* envSpec = nullptr;  // g_envSpecColourAndLerpFactor (0x5e1080)
         const char* extrusion = nullptr;  // g_fExtrusion (0x5def70)
+        // Class 0x5d3da0 (effects 7 and 9, handles 0x5deaa0): two frames of
+        // an animated material blended by g_TextureLerp (0x5de890).
+        const char* lerp = nullptr;
+        const char* diffuse2[2] = {};  // g_TextureDiffuse1 / 2
+        const char* normal2[2] = {};   // g_TextureNormalMap1 / 2
+    };
+    // A material with several substances: per substance the first and
+    // second texture (nullptr: none). Animated (entry +8 bit 0): the
+    // substances are frames shown at speed per second; else the drawn
+    // object's substance index picks one (0x5d92b0). The substances' other
+    // bytes are taken from the first one (in the water materials they are
+    // the same).
+    struct Anim
+    {
+        bool animated = false;
+        float speed = 0;
+        std::vector<IDirect3DTexture9*> tex0, tex1;
     };
 
     // The device states of one combination of presets: every render state
@@ -179,10 +226,37 @@ private:
     void AddPackage(const MdpcPackage& data);
     void ResolveGroups(Package& p, const std::map<uint32_t, int>& byUid);
     void DrawGroup(const Package& p, const MdpcModel& m, const MdpcGroup& g, const Package::Group& info, int state,
-                   const float world[16], int& applied);
+                   const float world[16], int& applied, float alpha = 1.0f, uint32_t substance = 0);
+    // A cell's distance / detail table (the cell slot's +0x40..+0xc4 of
+    // [0x8ac44c]): distances per quadtree level, then six (mask, ratio
+    // limit, fade width) entries.
+    struct LodTable
+    {
+        float dist[16] = {};
+        uint32_t mask[6] = {};
+        float limit[6] = {}, width[6] = {};
+    };
+    // A node's or object's detail: object +0x62 mask, +0x64 alpha, and the
+    // push away from the camera (0x4dff20's result +0xc).
+    struct Lod
+    {
+        uint32_t mask = 0;
+        float alpha = 1.0f, offset = 0.0f;
+    };
+    struct Submit
+    {
+        int instance;
+        Lod lod;
+    };
+    struct View;
+    void PickLod(const LodTable& t, int mode, float ratio, Lod& lod) const;
+    float NodeRatio(const View& v, const LodTable& t, int mode, const float pos[3], float radius, float dist) const;
+    bool NodeVisible(const View& v, const CityCell& cell, int mode, const CityNode& n, float size, Lod& lod) const;
+    void WalkNode(const View& v, const CityCell& cell, int mode, const CityNode& n, std::vector<Submit>& out) const;
     void SetLight(const float ambient[4], const float colour[4], const float direction[4]);
     void SetEnvSpec(const float colour[4]);
     void DrawSky(const float eye[3]);
+    IDirect3DCubeTexture9* CubeFrom(const Package& p, size_t material);
 
     HMODULE dll_ = nullptr;
     IDirect3DDevice9* device_ = nullptr;
@@ -194,6 +268,14 @@ private:
     const char* lightColour_ = nullptr;  // s_LightDirectionalColour
     const char* lightDir_ = nullptr;     // s_LightDirectionalDirection
     const char* fogParams_ = nullptr;    // s_FogParams
+    const char* envTex_ = nullptr;       // s_TextureEnvironment (shared +0x38)
+    const char* worldToEnv_ = nullptr;   // s_WorldToEnvMap (shared +0x2c)
+    const char* shineTex_ = nullptr;     // s_TextureShine (shared +0x3c)
+    IDirect3DCubeTexture9* cubes_[2] = {};  // [0x8afab8]: 0 shine, 1 environment
+    int timeOfDay_ = 1;
+    float time_ = 0;
+    std::vector<Anim> anims_;
+    std::map<std::pair<int, uint32_t>, int> animOf_;  // (package, material) -> anims_
     Mood mood_;
     bool shadows_ = true;
     int shadowState_[2] = { -1, -1 };  // states_ of modes 4 and 5
@@ -203,6 +285,10 @@ private:
     IDirect3DTexture9* white_ = nullptr;
     std::vector<Package> packages_;
     std::vector<Instance> instances_;
+    const CityPlacement* city_ = nullptr;
+    std::vector<int> instanceOf_;  // per city instance: index into instances_, -1: not drawn
+    std::vector<int> waterTiles_;  // the sea's tiles: indices into instances_
+    LodTable tables_[2];           // mode 1 (0x4ddc50) and mode 3 (0x4dde20)
     std::vector<StateSet> states_;
     // What the device has (valid: set by ApplyState since the last reset).
     DWORD rsCache_[256] = {};

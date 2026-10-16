@@ -53,8 +53,12 @@ struct MdpcModel
                               // 6 -> 6, 8 -> 7, others -> 1; table 0x8acc70)
     uint16_t flags = 0;       // +0x1c
     float box[8][3] = {};     // +0x28: 8 corners (x, y, z, w = 1)
-    // +0xa8 + 0x20 * lod: {+0 submesh offset, +4 pointer, +8 count, ...}
+    // +0xa8 + 0x20 * lod: {+0 submesh offset, +4 pointer, +8 count, ...,
+    // +0x14 mask}. A slot is drawn when its mask has a bit of the object's
+    // +0x62 (0x5dcc50); 0x5ca020 sets slot 5's mask to 0x20 when it has
+    // submeshes, else slot 6's.
     std::vector<MdpcSubmesh> lods[7];
+    uint32_t lodMask[7] = {};
 };
 
 struct MdpcVertexBuffer
@@ -114,6 +118,10 @@ public:
     std::vector<MdpcModel> models;
     // Per material index (group material & 0xffff), its substances.
     std::vector<std::vector<MdpcSubstance>> materials;
+    // Per material, the entry's +8 flags (bit 0: the substances are frames
+    // of an animation) and +0xc speed (0x5de890, 0x5cfe78).
+    std::vector<uint32_t> materialFlags;
+    std::vector<float> materialSpeed;
     std::vector<MdpcTexture> textures;  // the PCMP texture table, in order
 
     // Triangles of a group as vertex indices into its model's vertex

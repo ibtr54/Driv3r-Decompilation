@@ -336,10 +336,10 @@ const float kExtrusion = 20.0f;
 // the cities), i.e. away from the camera; then transposed. It replaces the
 // World of 0x5de4e0 (slot +0x24, called first by 0x5e05b0), so the submesh
 // matrix is not used (no volume submesh in the cities has one).
-void VolumeWorld(const CityInstance& in, const float eye[3], float world[16])
+void VolumeWorld(const CityInstance& in, const float* matrix, const float eye[3], float world[16])
 {
     float object[16];
-    memcpy(object, in.world, sizeof(object));
+    memcpy(object, matrix, sizeof(object));
     float d[3] = { eye[0] - object[12], eye[1] - object[13], eye[2] - object[14] };
     float s = -0.005f;
     if ((in.model & 0xfc00) != 0xe400) {
@@ -438,9 +438,20 @@ bool CityRenderer::Init(IDirect3DDevice9* device, const std::string& exePath)
             failedEffects += id;
             continue;
         }
-        // 0x5d5790: the first valid technique.
-        D3DXHANDLE tech = nullptr;
-        if (SUCCEEDED(fx->FindNextValidTechnique(nullptr, &tech)) && tech) fx->SetTechnique(tech);
+        // 0x5d5790: the first valid technique (FindNextValidTechnique(NULL)).
+        // With the game's own (statically linked, older) D3DX that is never
+        // t_2x on this machine: asked in the running original (proxy:
+        // GetCurrentTechnique of every effect in [0x8deff4] +0x2c..), all
+        // effects run t_11, or t_14 / t_13 where they have them. D3DX 9.43
+        // accepts t_2x, so t_2x is skipped here.
+        D3DXHANDLE tech = nullptr, first = nullptr;
+        while (SUCCEEDED(fx->FindNextValidTechnique(tech, &tech)) && tech) {
+            if (!first) first = tech;
+            D3DXTECHNIQUE_DESC desc;
+            if (SUCCEEDED(fx->GetTechniqueDesc(tech, &desc)) && desc.Name && strcmp(desc.Name, "t_2x") != 0) break;
+        }
+        if (!tech) tech = first;
+        if (tech) fx->SetTechnique(tech);
         SetTextures(fx, white_);
         if (e.id < 0) {
             shared_ = fx;
@@ -451,6 +462,9 @@ bool CityRenderer::Init(IDirect3DDevice9* device, const std::string& exePath)
             lightDir_ = fx->GetParameterByName(nullptr, "s_LightDirectionalDirection");
             lightColour_ = fx->GetParameterByName(nullptr, "s_LightDirectionalColour");
             fogParams_ = fx->GetParameterByName(nullptr, "s_FogParams");
+            envTex_ = fx->GetParameterByName(nullptr, "s_TextureEnvironment");  // 0x5dca79
+            worldToEnv_ = fx->GetParameterByName(nullptr, "s_WorldToEnvMap");   // shared +0x2c
+            shineTex_ = fx->GetParameterByName(nullptr, "s_TextureShine");
             continue;
         }
         Effect& f = fx_[e.id];
@@ -464,6 +478,13 @@ bool CityRenderer::Init(IDirect3DDevice9* device, const std::string& exePath)
         f.envSpec = fx->GetParameterByName(nullptr, "g_envSpecColourAndLerpFactor");
         f.extrusion = e.id == 0x2b ? fx->GetParameterByName(nullptr, "g_fExtrusion") : nullptr;
         if (f.extrusion) fx->SetFloat(f.extrusion, kExtrusion);
+        if (e.id == 7 || e.id == 9) {  // class 0x5d3da0, handles 0x5deaa0
+            f.lerp = fx->GetParameterByName(nullptr, "g_TextureLerp");
+            f.diffuse2[0] = fx->GetParameterByName(nullptr, "g_TextureDiffuse1");
+            f.diffuse2[1] = fx->GetParameterByName(nullptr, "g_TextureDiffuse2");
+            f.normal2[0] = fx->GetParameterByName(nullptr, "g_TextureNormalMap1");
+            f.normal2[1] = fx->GetParameterByName(nullptr, "g_TextureNormalMap2");
+        }
         // 0x5de330: g_fBrightness 0x3f26a6a7; g_fAlpha comes from the drawn
         // object (+0x64, not traced): 1 here.
         uint32_t bits = 0x3f26a6a7;
@@ -519,7 +540,9 @@ void CityRenderer::ResolveGroups(Package& p, const std::map<uint32_t, int>& byUi
         bool layout = (DeclIndex(model.vertexType) == 1 || DeclIndex(model.vertexType) == 2) &&
                       model.vertexBuffer < p.data->vertexBuffers.size() &&
                       p.data->vertexBuffers[model.vertexBuffer].stride == 48;
-        for (const MdpcSubmesh& sm : model.lods[0]) {
+        p.groupOf[m].resize(5);
+        for (int lod = 0; lod < 5; ++lod)
+        for (const MdpcSubmesh& sm : model.lods[lod]) {
             std::vector<Package::Group> groups;
             for (const MdpcGroup& g : sm.groups) {
                 Package::Group gr;
@@ -539,9 +562,31 @@ void CityRenderer::ResolveGroups(Package& p, const std::map<uint32_t, int>& byUi
                         // Texture references are entries of the material's own package.
                         if (!sub.textures.empty() && size_t(sub.textures[0]) < owner.textures.size())
                             gr.diffuse = owner.textures[sub.textures[0]];
-                        if ((s[6] == 1 || s[6] == 4) && sub.textures.size() >= 2 &&
-                            size_t(sub.textures[1]) < owner.textures.size())
+                        gr.normalBound = s[6] == 1 || s[6] == 4;
+                        if (gr.normalBound && sub.textures.size() >= 2 && size_t(sub.textures[1]) < owner.textures.size())
                             gr.normal = owner.textures[sub.textures[1]];
+                        // Several substances: their textures (0x5d92b0, 0x5de890).
+                        if (owner.data->materials[mi].size() > 1 && mi < owner.data->materialFlags.size()) {
+                            auto key = std::make_pair(it->second, mi);
+                            auto found = animOf_.find(key);
+                            if (found == animOf_.end()) {
+                                Anim a;
+                                a.animated = (owner.data->materialFlags[mi] & 1) != 0;
+                                a.speed = owner.data->materialSpeed[mi];
+                                for (const MdpcSubstance& f : owner.data->materials[mi]) {
+                                    auto tex = [&](size_t k) {
+                                        return k < f.textures.size() && size_t(f.textures[k]) < owner.textures.size()
+                                                   ? owner.textures[f.textures[k]]
+                                                   : nullptr;
+                                    };
+                                    a.tex0.push_back(tex(0));
+                                    a.tex1.push_back(tex(1));
+                                }
+                                found = animOf_.emplace(key, int(anims_.size())).first;
+                                anims_.push_back(std::move(a));
+                            }
+                            gr.anim = found->second;
+                        }
                     }
                 }
                 if (!layout || gr.fx <= 0 || gr.fx >= 0x30 || !fx_[gr.fx].fx) gr.fx = -1;
@@ -551,7 +596,7 @@ void CityRenderer::ResolveGroups(Package& p, const std::map<uint32_t, int>& byUi
                 if (!gr.late && DrawnInMode(gr.type, 7)) gr.redraw = StateFor(s, EffectiveMode(7, gr.type));
                 groups.push_back(gr);
             }
-            p.groupOf[m].push_back(std::move(groups));
+            p.groupOf[m][lod].push_back(std::move(groups));
         }
     }
     // 0x5ca020: slot 5 gets the mask 0x20 when it has submeshes, else slot 6
@@ -591,7 +636,16 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
         skyPackage_ = int(packages_.size());
         AddPackage(*sky);
         ResolveGroups(packages_.back(), { { sky->uid, skyPackage_ } });
-        for (const auto& sm : packages_.back().groupOf[0])
+        // 0x57bff0: when the package with uid 0x34 (the sky) loads, the
+        // environment cube [0x8afabc] is made from its material 1 and the
+        // shine cube [0x8afab8] from material 0; with the ride's time of day
+        // 3 (setup vtbl+0x64) the environment is material 0 and no shine.
+        if (sky->uid == 0x34) {
+            bool night = timeOfDay_ == 3;
+            cubes_[1] = CubeFrom(packages_.back(), night ? 0 : 1);
+            if (!night) cubes_[0] = CubeFrom(packages_.back(), 0);
+        }
+        for (const auto& sm : packages_.back().groupOf[0][0])
             for (const Package::Group& g : sm) {
                 char buf[64];
                 snprintf(buf, sizeof(buf), "%sgroup: effect %d, preset 0x%02x", skyInfo.empty() ? "" : "; ", g.fx,
@@ -599,10 +653,15 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
                 skyInfo += buf;
             }
     }
+    city_ = &city;
+    instanceOf_.assign(city.instances.size(), -1);
+    cells = city.cells.size();
+    lodScale = 1.0f;  // [0x7a1a68] starts at 1.0
     for (const CityInstance& in : city.instances) {
         if (!in.HasModel()) continue;
         auto it = byUid.find(in.PackageUid());
         if (it == byUid.end() || in.ModelIndex() >= packages_[it->second].data->models.size()) continue;
+        instanceOf_[size_t(&in - city.instances.data())] = int(instances_.size());
         Instance inst;
         inst.in = &in;
         inst.package = it->second;
@@ -613,7 +672,8 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
             for (int k = 0; k < 8; ++k)
                 for (int j = 0; j < 3; ++j) c[j] += m.box[k][j] / 8.0f;
         in.Transform(c, inst.centre);
-        for (const auto& sm : packages_[it->second].groupOf[inst.model])
+        for (const auto& slot : packages_[it->second].groupOf[inst.model])
+        for (const auto& sm : slot)
             for (const Package::Group& g : sm) {
                 (g.fx >= 0 ? groupsDrawn : groupsSkipped)++;
                 if (g.fx < 0) continue;
@@ -626,6 +686,38 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
         if (packages_[it->second].shadowSlot[inst.model] >= 0) ++shadowInstances;
         instances_.push_back(inst);
     }
+    // The sea's tiles (GWTR): models of the city's packages, submitted by
+    // the water object (0x451030), not by a quadtree.
+    waterTiles_.clear();
+    for (const CityInstance& in : city.water.tiles) {
+        auto it = byUid.find(in.PackageUid());
+        if (!in.HasModel() || it == byUid.end() || in.ModelIndex() >= packages_[it->second].data->models.size()) continue;
+        Instance inst;
+        inst.in = &in;
+        inst.package = it->second;
+        inst.model = in.ModelIndex();
+        inst.substance = uint32_t(mood_.SeaIndex());  // 0x451030: object +0x50 = water +0x780
+        memcpy(inst.centre, in.position, sizeof(inst.centre));
+        for (const auto& slot : packages_[it->second].groupOf[inst.model])
+            for (const auto& sm : slot)
+                for (const Package::Group& g : sm) {
+                    (g.fx >= 0 ? groupsDrawn : groupsSkipped)++;
+                    if (g.fx < 0) continue;
+                    ++perPreset[states_[g.state].base];
+                    ++perEffect[g.fx];
+                    ++waterGroups;
+                }
+        waterTiles_.push_back(int(instances_.size()));
+        instances_.push_back(inst);
+    }
+    // Instances no quadtree reaches are not drawn (as in the game).
+    std::vector<bool> reached(city.instances.size(), false);
+    for (const CityCell& c : city.cells)
+        for (uint32_t r : c.index)
+            if (r != 0xffffffffu) reached[c.firstInstance + r] = true;
+    unindexed = 0;
+    for (size_t i = 0; i < reached.size(); ++i)
+        if (instanceOf_[i] >= 0 && !reached[i]) ++unindexed;
     stateSets = states_.size();
     presetsUsed.clear();
     for (const auto& e : perPreset) {
@@ -713,8 +805,9 @@ void CityRenderer::SetLight(const float ambient[4], const float colour[4], const
 // by effect id from the light state (0x8d6c9c + 0x100, copied by 0x5e1130):
 // ids 2, 3, 5, 6, 0x24, 0x25 the directional colour (colour) with w 0; 0x1d,
 // 0x1f, 0x20, 0x21 the ambient colour with w 0.35; 0x23 zero; 9 and 0xb the
-// light state's +0x140 (not decoded: their default is kept); others
-// unchanged.
+// light state's +0x140 with w 0: the mood's SHINY_WATER_TINT (the value of
+// the original's water draws, ps c2 = (1, 0.9, 0.73, 0) with Mood33; where
+// the mood copies it to +0x140 is not traced); others unchanged.
 void CityRenderer::SetEnvSpec(const float colour[4])
 {
     for (int id = 0; id < 0x30; ++id) {
@@ -725,6 +818,8 @@ void CityRenderer::SetEnvSpec(const float colour[4])
             v = D3DXVECTOR4(colour[0], colour[1], colour[2], 0);
         else if (id == 0x1d || id == 0x1f || id == 0x20 || id == 0x21)
             v = D3DXVECTOR4(mood_.ambient[0], mood_.ambient[1], mood_.ambient[2], 0.35f);
+        else if (id == 9 || id == 0xb)
+            v = D3DXVECTOR4(mood_.shinyWaterTint[0], mood_.shinyWaterTint[1], mood_.shinyWaterTint[2], 0);
         else if (id != 0x23)
             continue;
         e.fx->SetVector(e.envSpec, &v);
@@ -735,12 +830,40 @@ void CityRenderer::SetEnvSpec(const float colour[4])
 // its render states and the DrawIndexedPrimitive (0x5de4e0, 0x5e0970,
 // 0x5d4440, 0x5dfe20). world: row-vector object matrix.
 void CityRenderer::DrawGroup(const Package& p, const MdpcModel& m, const MdpcGroup& g, const Package::Group& info,
-                             int state, const float world[16], int& applied)
+                             int state, const float world[16], int& applied, float alpha, uint32_t substance)
 {
     Effect& e = fx_[info.fx];
     if (e.world) e.fx->SetMatrix(e.world, reinterpret_cast<const D3DXMATRIX*>(world));
-    if (e.diffuse) e.fx->SetTexture(e.diffuse, info.diffuse ? info.diffuse : white_);
-    if (e.normalMap) e.fx->SetTexture(e.normalMap, info.normal ? info.normal : white_);
+    if (e.alpha) e.fx->SetFloat(e.alpha, alpha);  // object +0x64 (0x5de330)
+    IDirect3DTexture9* diffuse = info.diffuse;
+    IDirect3DTexture9* normal = info.normal;
+    if (info.anim >= 0) {
+        const Anim& a = anims_[size_t(info.anim)];
+        uint32_t n = uint32_t(a.tex0.size());
+        // 0x5d92b0: the substance drawn is the object's index (0 when it is
+        // not below the count), for an animated material int(time x speed)
+        // mod count (fistp with truncation); its first / second texture.
+        uint32_t frame = substance < n ? substance : 0;
+        if (a.animated) frame = uint32_t(int64_t(time_ * a.speed)) % n;
+        diffuse = a.tex0[frame];
+        normal = info.normalBound ? a.tex1[frame] : nullptr;
+        // 0x5de890 (effects 7 and 9, animated materials only): t = speed x
+        // 0.15 x time, frames int(t) and int(t) + 1 mod count, g_TextureLerp
+        // = t - int(t); Diffuse1 / 2 = their first texture, NormalMap1 / 2
+        // their second (each set only when the substance has it).
+        if (e.lerp && a.animated) {
+            float t = a.speed * 0.15f * time_;
+            uint32_t f = uint32_t(int64_t(t));
+            uint32_t k[2] = { f % n, (f + 1) % n };
+            e.fx->SetFloat(e.lerp, t - float(f));
+            for (int j = 0; j < 2; ++j) {
+                if (e.diffuse2[j] && a.tex0[k[j]]) e.fx->SetTexture(e.diffuse2[j], a.tex0[k[j]]);
+                if (e.normal2[j] && a.tex1[k[j]]) e.fx->SetTexture(e.normal2[j], a.tex1[k[j]]);
+            }
+        }
+    }
+    if (e.diffuse) e.fx->SetTexture(e.diffuse, diffuse ? diffuse : white_);
+    if (e.normalMap) e.fx->SetTexture(e.normalMap, normal ? normal : white_);
     e.fx->CommitChanges();
     if (state != applied) {
         ApplyState(states_[state]);
@@ -754,6 +877,39 @@ void CityRenderer::DrawGroup(const Package& p, const MdpcModel& m, const MdpcGro
     device_->DrawIndexedPrimitive(D3DPRIMITIVETYPE(g.type), g.baseVertex, g.minIndex, g.numVertices, g.startIndex,
                                   g.primitives);
     ++frameDraws;
+}
+
+// 0x5cdb20: a cube texture from a material's six substances: edge and
+// format of the first one's texture, one level, managed; face i (+x, -x,
+// +y, -y, +z, -z) = substance i's first texture, copied by
+// D3DXLoadSurfaceFromSurface with D3DX_FILTER_NONE.
+IDirect3DCubeTexture9* CityRenderer::CubeFrom(const Package& p, size_t material)
+{
+    typedef HRESULT(WINAPI * LoadSurfaceFn)(LPDIRECT3DSURFACE9, const PALETTEENTRY*, const RECT*, LPDIRECT3DSURFACE9,
+                                            const PALETTEENTRY*, const RECT*, DWORD, D3DCOLOR);
+    auto load = dll_ ? reinterpret_cast<LoadSurfaceFn>(GetProcAddress(dll_, "D3DXLoadSurfaceFromSurface")) : nullptr;
+    if (!load || material >= p.data->materials.size()) return nullptr;
+    const std::vector<MdpcSubstance>& subs = p.data->materials[material];
+    IDirect3DTexture9* faces[6] = {};
+    for (size_t i = 0; i < 6; ++i) {
+        if (i >= subs.size() || subs[i].textures.empty() || size_t(subs[i].textures[0]) >= p.textures.size()) return nullptr;
+        faces[i] = p.textures[subs[i].textures[0]];
+        if (!faces[i]) return nullptr;
+    }
+    D3DSURFACE_DESC desc;
+    IDirect3DCubeTexture9* cube = nullptr;
+    if (FAILED(faces[0]->GetLevelDesc(0, &desc)) ||
+        FAILED(device_->CreateCubeTexture(desc.Width, 1, 0, desc.Format, D3DPOOL_MANAGED, &cube, nullptr)))
+        return nullptr;
+    for (int i = 0; i < 6; ++i) {
+        IDirect3DSurface9 *src = nullptr, *dst = nullptr;
+        if (SUCCEEDED(faces[i]->GetSurfaceLevel(0, &src)) &&
+            SUCCEEDED(cube->GetCubeMapSurface(D3DCUBEMAP_FACES(i), 0, &dst)))
+            load(dst, nullptr, nullptr, src, nullptr, nullptr, D3DX_FILTER_NONE, 0);
+        if (src) src->Release();
+        if (dst) dst->Release();
+    }
+    return cube;
 }
 
 // 0x539cb0: the sky dome is an object with the mood's sky matrix (+0x10),
@@ -778,12 +934,12 @@ void CityRenderer::DrawSky(const float eye[3])
     float wt[16], world[16];
     Transpose(object, wt);
     int applied = -1;
-    for (size_t s = 0; s < m.lods[0].size() && s < p.groupOf[0].size(); ++s) {
+    for (size_t s = 0; s < m.lods[0].size() && s < p.groupOf[0][0].size(); ++s) {
         const MdpcSubmesh& sm = m.lods[0][s];
         if (sm.hasMatrix) Mul(wt, sm.matrix, world);
         else memcpy(world, wt, sizeof(world));
         for (size_t g = 0; g < sm.groups.size(); ++g) {
-            const Package::Group& info = p.groupOf[0][s][g];
+            const Package::Group& info = p.groupOf[0][0][s][g];
             if (info.fx < 0) continue;
             Effect& e = fx_[info.fx];
             UINT passes = 0;
@@ -795,7 +951,164 @@ void CityRenderer::DrawSky(const float eye[3])
     }
 }
 
-void CityRenderer::Draw(const float viewProj[16], const float eye[3], float range)
+// 0x4ddc50 (normal cells, mode 1) and 0x4dde20 (the GESR, mode 3): the
+// slot's +0x40.. distances per quadtree level by the profile's draw
+// distance (+0xc88), and at +0x80.. six detail entries (mask, ratio limit,
+// fade width). The masks carry u = 0x20, or 0x40 when the city is a night
+// one (setup vtbl+0x60 == 2; 0x464230: vtbl+0x28 = 2, 4 or 6). Slot masks
+// of the models: 0x1e / 0x1f, 0x1c, 0x18, 0x10 for slots 0..3 (each adds
+// detail), 0x01 for slot 4 (the far stand-in), 0x20 the shadow volume.
+// (0x4ddf00, mode 2, is for the cell at [0x8ac44c]+0xcbc, set by the
+// handler 0x45aef0; none in a ride.)
+void CityRenderer::SetDrawDistance(int setting, bool night)
+{
+    uint32_t u = night ? 0x40 : 0x20;
+    LodTable& t = tables_[0];
+    t = LodTable();
+    static const float kDist[3][16] = {
+        { 500, 62.5f, 62.5f, 62.5f, 50, 37.5f, 25, 21.25f, 21.25f, 21.25f, 21.25f, 21.25f, 12.5f, 12.5f, 12.5f, 12.5f },
+        { 2000, 250, 250, 250, 200, 150, 100, 85, 85, 85, 85, 85, 50, 50, 50, 50 },
+        { 4000, 500, 500, 500, 400, 300, 200, 170, 170, 170, 170, 170, 170, 170, 170, 170 },
+    };
+    if (setting >= 0 && setting <= 2) memcpy(t.dist, kDist[setting], sizeof(t.dist));
+    const uint32_t mask[6] = { u | 0x10, u | 8, u | 4, u | 2, 1, 0 };
+    const float limit[6] = { 0.12f, 0.18f, 0.36f, 0.65f, 1.2f, 1.5f };
+    const float width[6] = { 0.04f, 0.06f, 0.12f, 0.08f, 0.08f, 0 };
+    memcpy(t.mask, mask, sizeof(mask));
+    memcpy(t.limit, limit, sizeof(limit));
+    memcpy(t.width, width, sizeof(width));
+    LodTable& g = tables_[1];
+    g = LodTable();
+    const uint32_t gmask[6] = { 0, 0, 0, u | 1, 1, 0 };
+    const float glimit[6] = { 0, 0, 0.75f, 1.5f, 1e6f, 1e6f };
+    const float gwidth[6] = { 0, 0, 0.15f, 0, 0, 0 };
+    memcpy(g.mask, gmask, sizeof(gmask));
+    memcpy(g.limit, glimit, sizeof(glimit));
+    memcpy(g.width, gwidth, sizeof(gwidth));
+}
+
+// The camera for one frame (0x4e7e30): position, the horizontal backward
+// axis f (camera matrix row 2 with y = 0, normalized; 0x41b630), the two
+// side planes normalize(+-r - k f) (r = f x up, 0x407640; k = tan(fov / 2)
+// x sqrt(1 + 1 / aspect^2) / |f|, the half angle of the view's corners),
+// the distance factor [0x8b3998] = 1.04 / fov and the shadow vector
+// (mood +0x190, y = 0: [0x8b399c]).
+struct CityRenderer::View
+{
+    float eye[3], f[3], p1[3], p2[3], shadow[3];
+    float distScale, lodScale;
+    bool sides;  // false when the view is nearly vertical (|f| <= 0.05)
+};
+
+// 0x4dff20: the detail entry of a ratio; within the fade width below its
+// limit the next entry's mask is added with 0x80 and the alpha falls with
+// the ratio (entries 3 / 4 add 0x200). Mode 3 entry 2: alpha above 0.5
+// pushes the stand-in 2.5 units away and fades it in (2 - 2 alpha), else
+// it is opaque and pushed by alpha x 5. The push is not reset otherwise
+// (the caller's value carries over).
+void CityRenderer::PickLod(const LodTable& t, int mode, float ratio, Lod& lod) const
+{
+    int i = 0;
+    while (i < 5 && !(ratio < t.limit[i])) ++i;
+    lod.mask = t.mask[i];
+    lod.alpha = 1.0f;
+    if (i < 5 && t.limit[i] - t.width[i] < ratio) {
+        lod.mask |= t.mask[i + 1] | 0x80;
+        lod.alpha = (t.limit[i] - ratio) / t.width[i];
+        if (i == 3 || i == 4) lod.mask |= 0x200;
+        if (mode == 3 && i == 2) {
+            if (lod.alpha > 0.5f) {
+                lod.offset = 2.5f;
+                lod.alpha = 2.0f - (lod.alpha + lod.alpha);
+                return;
+            }
+            lod.offset = lod.alpha * 5.0f;
+            lod.mask &= ~0x80u;
+            lod.alpha = 1.0f;
+        }
+    }
+}
+
+// 0x4dfe10: pos is the node centre minus the camera (y = 0), radius its
+// size x 1.2071 (or x 1 for the shadow retest), dist its level's distance
+// x [0x8b3998]. Mode 3: |pos| / radius. Otherwise 0 when the camera is
+// within the radius, -1 when the centre is behind the camera or the node
+// is beyond a side plane, -1 beyond 1.2 x (limit +0xb4) the distance x
+// [0x7a1a68], else (|pos| - radius) / (distance x [0x7a1a68]).
+float CityRenderer::NodeRatio(const View& v, const LodTable& t, int mode, const float pos[3], float radius,
+                              float dist) const
+{
+    float d2 = pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2];
+    if (mode == 3) return std::sqrt(d2) / radius;
+    if (radius * radius > d2) return 0.0f;
+    if (-(v.f[0] * pos[0] + v.f[1] * pos[1] + v.f[2] * pos[2]) < 0.0f) return -1.0f;
+    if (v.sides) {
+        if (v.p1[0] * pos[0] + v.p1[1] * pos[1] + v.p1[2] * pos[2] < -radius) return -1.0f;
+        if (v.p2[0] * pos[0] + v.p2[1] * pos[1] + v.p2[2] * pos[2] < -radius) return -1.0f;
+    }
+    float e = std::sqrt(d2) - radius, s = v.lodScale * dist;
+    if (!(e <= s * t.limit[4])) return -1.0f;
+    return e / s;
+}
+
+// 0x4dfce0: mode 3 nodes wider than 480 get mask 2 with alpha 0 (drawn as
+// nothing); otherwise the node test with radius size x 1.2071 picks the
+// detail; failing that, the same node moved by the shadow vector with
+// radius size passes with mask 0x20 (only its shadow volumes).
+bool CityRenderer::NodeVisible(const View& v, const CityCell& cell, int mode, const CityNode& n, float size,
+                               Lod& lod) const
+{
+    const LodTable& t = tables_[mode == 3 ? 1 : 0];
+    if (mode == 3 && size > 480.0f) {
+        lod.mask = 2;
+        lod.alpha = 0.0f;
+        return true;
+    }
+    float pos[3] = { (float(n.x) + 0.5f) * size + cell.origin[0] - v.eye[0], 0,
+                     (float(n.z) + 0.5f) * size + cell.origin[1] - v.eye[2] };
+    float dist = v.distScale * t.dist[n.level < 16 ? n.level : 15];
+    float r = NodeRatio(v, t, mode, pos, size * 1.2071f, dist);
+    if (r >= -1e-5f) {
+        PickLod(t, mode, r, lod);
+        return true;
+    }
+    for (int k = 0; k < 3; ++k) pos[k] += v.shadow[k];
+    if (NodeRatio(v, t, mode, pos, size, dist) >= -1e-5f) {
+        lod.mask = 0x20;
+        lod.alpha = 0.0f;
+        return true;
+    }
+    return false;
+}
+
+// 0x4dec70: a visible node submits its instances (their three bit masks at
+// slot +0x18 / +0x20 / +0x28 are cleared at load, 0x4ddae0) with the
+// node's detail; in mode 3 nodes narrower than 480 pick each instance's
+// detail again from |instance - camera| / node size. Then its children.
+void CityRenderer::WalkNode(const View& v, const CityCell& cell, int mode, const CityNode& n,
+                            std::vector<Submit>& out) const
+{
+    float size = cell.size / float(1u << (n.level & 31));
+    Lod lod;
+    lod.alpha = 1.0f;
+    if (!NodeVisible(v, cell, mode, n, size, lod)) return;
+    for (uint32_t k = n.first; k < uint32_t(n.first) + n.count; ++k) {
+        uint32_t r = cell.index[k];
+        if (r == 0xffffffffu) continue;
+        int idx = instanceOf_[cell.firstInstance + r];
+        if (idx < 0) continue;
+        if (mode == 3 && size < 480.0f) {
+            const float* p = instances_[size_t(idx)].in->position;
+            float d[3] = { p[0] - v.eye[0], p[1] - v.eye[1], p[2] - v.eye[2] };
+            PickLod(tables_[1], mode, std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) / size, lod);
+        }
+        out.push_back({ idx, lod });
+    }
+    for (uint16_t c : n.child)
+        if (c) WalkNode(v, cell, mode, cell.nodes[c], out);
+}
+
+void CityRenderer::Draw(const float viewProj[16], const float eye[3], const float back[3], float fov, float aspect)
 {
     frameInstances = frameDraws = 0;
     if (!device_ || !shared_) return;
@@ -805,6 +1118,10 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], float rang
     const D3DXVECTOR4 cam(eye[0], eye[1], eye[2], 1.0f);
     if (camPos_) shared_->SetVector(camPos_, &cam);
     device_->SetVertexDeclaration(decl_);
+    // 0x5dc35a: s_TextureEnvironment / s_TextureShine = the cubes when there
+    // are (else the texture the caller passes; here the white one).
+    if (envTex_) shared_->SetTexture(envTex_, cubes_[1] ? static_cast<IDirect3DBaseTexture9*>(cubes_[1]) : white_);
+    if (shineTex_) shared_->SetTexture(shineTex_, cubes_[0] ? static_cast<IDirect3DBaseTexture9*>(cubes_[0]) : white_);
     DrawSky(eye);
     // The mood (0x5dc1e0): s_FogParams and FOGCOLOR (0x5cefb0), the light
     // (0x5dc3f0): ambient (w 1), directional colour (w 1) and direction
@@ -818,30 +1135,135 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], float rang
     SetLight(mood_.ambient, mood_.directional, dir);
     device_->SetRenderState(D3DRS_FOGCOLOR, mood_.FogColour());
     SetEnvSpec(mood_.directional);
+    // 0x5dc566: s_WorldToEnvMap = transpose(D3DXMatrixLookAtRH(eye = -light
+    // direction, at = 0, up = (0, 1, 0))) (the t_11 shaders' c8..c10).
+    if (worldToEnv_) {
+        float z[3] = { -dir[0], -dir[1], -dir[2] };  // normalize(eye - at)
+        float x[3] = { z[2], 0, -z[0] };               // up x z
+        float n = std::sqrt(x[0] * x[0] + x[2] * x[2]);
+        if (n > 0)
+            for (float& c : x) c /= n;
+        float y[3] = { z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0] };
+        auto dot = [&](const float* a) { return a[0] * z[0] + a[1] * z[1] + a[2] * z[2]; };  // . eye (= z)
+        const float m[16] = { x[0], y[0], z[0], 0,  x[1], y[1], z[1], 0,  x[2], y[2], z[2], 0,
+                              -dot(x), -dot(y), -dot(z), 1 };
+        float mt[16];
+        Transpose(m, mt);
+        shared_->SetMatrix(worldToEnv_, reinterpret_cast<const D3DXMATRIX*>(mt));
+    }
 
-    // The scene's lists (0x5d2ca0): 0 = items, 1 = volumes, 2 = late.
-    struct Item { int fx; const Instance* inst; const MdpcSubmesh* sm; const MdpcGroup* g; const Package::Group* info; };
+    // The cells (0x4e7e30): every cell's quadtree from its root, the GESR
+    // in mode 3, the others in mode 1.
+    View v;
+    memcpy(v.eye, eye, sizeof(v.eye));
+    float fh = std::sqrt(back[0] * back[0] + back[2] * back[2]);
+    v.sides = fh > 0.05f;
+    v.f[0] = v.sides ? back[0] / fh : 0;
+    v.f[1] = 0;
+    v.f[2] = v.sides ? back[2] / fh : 0;
+    float k = std::tan(fov * 0.5f) * std::sqrt(1.0f / (aspect * aspect) + 1.0f) / (fh > 0 ? fh : 1);
+    float r[3] = { -v.f[2], 0, v.f[0] };  // f x up, in the ground plane
+    for (int s = 0; s < 2; ++s) {
+        float* pl = s ? v.p2 : v.p1;
+        float sign = s ? 1.0f : -1.0f;
+        float q[3] = { sign * r[0] - k * v.f[0], 0, sign * r[2] - k * v.f[2] };
+        float n = std::sqrt(q[0] * q[0] + q[2] * q[2]);
+        for (int j = 0; j < 3; ++j) pl[j] = n > 0 ? q[j] / n : 0;
+    }
+    v.distScale = 1.04f / fov;
+    v.lodScale = lodScale;
+    v.shadow[0] = mood_.shadow[0];
+    v.shadow[1] = 0;
+    v.shadow[2] = mood_.shadow[2];
+    std::vector<Submit> submitted;
+    if (city_)
+        for (const CityCell& cell : city_->cells)
+            if (!cell.nodes.empty()) WalkNode(v, cell, cell.column == -2 && cell.row == -2 ? 3 : 1, cell.nodes[0], submitted);
+    // The sea (0x451030): every tile whose point is within 6000 units of the
+    // camera (squared distance below 36e6, 0x78f03c), as an object with an
+    // identity rotation, +0x60 = 0x5f and alpha 1 through 0x57de30 (its
+    // cull 0x57dbd0 is not reproduced).
+    frameWater = 0;
+    size_t cityObjects = submitted.size();  // [0x8b3918] counts only these (0x4ddb60)
+    for (int idx : waterTiles_) {
+        const float* p = instances_[size_t(idx)].in->position;
+        float d[3] = { p[0] - eye[0], p[1] - eye[1], p[2] - eye[2] };
+        if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] >= 36e6f) continue;
+        Lod lod;
+        lod.mask = 0x5f;
+        submitted.push_back({ idx, lod });
+        ++frameWater;
+    }
+
+    // The scene's lists (0x5d2ca0): 0 = items, 1 = volumes, 2 = late. Each
+    // submitted object draws the slots 0..4 whose mask shares a bit with
+    // its mask (0x5dcc50); with an alpha other than 1 the slot whose lowest
+    // bit is the object's highest one fades (alpha 0: left out) and any
+    // other slot sets the object's alpha back to 1, so the alpha used is
+    // the one left at the end (the draw reads +0x64 later). Slots 5 / 6
+    // (mask 0x20) are not drawn here: their groups have no material
+    // (0x5ca020); the shadow volume is the object's copy (0x5d2b90).
+    struct Object { const Instance* inst; float world[16]; float alpha; };
+    struct Item { int fx; size_t object; const MdpcSubmesh* sm; const MdpcGroup* g; const Package::Group* info; };
+    std::vector<Object> objects;
+    objects.reserve(submitted.size());
     std::vector<Item> items, late;
-    std::vector<const Instance*> volumes;
-    frameShadowDraws = frameRedraws = 0;
-    for (const Instance& inst : instances_) {
-        float d[3] = { inst.centre[0] - eye[0], inst.centre[1] - eye[1], inst.centre[2] - eye[2] };
-        if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > range * range) continue;
-        // Behind the camera (clip w of the box centre, with some margin).
-        const float* c = inst.centre;
-        float w = c[0] * viewProj[3] + c[1] * viewProj[7] + c[2] * viewProj[11] + viewProj[15];
-        if (w < -60.0f) continue;
-        ++frameInstances;
+    std::vector<size_t> volumes;
+    frameShadowDraws = frameRedraws = frameShadowOnly = 0;
+    for (size_t& c : frameSlots) c = 0;
+    for (const Submit& s : submitted) {
+        const Instance& inst = instances_[size_t(s.instance)];
         const Package& p = packages_[inst.package];
         const MdpcModel& m = p.data->models[inst.model];
-        for (size_t s = 0; s < m.lods[0].size(); ++s)
-            for (size_t g = 0; g < m.lods[0][s].groups.size(); ++g) {
-                const Package::Group& info = p.groupOf[inst.model][s][g];
-                if (info.fx >= 0)
-                    (info.late ? late : items).push_back({ info.fx, &inst, &m.lods[0][s], &m.lods[0][s].groups[g], &info });
-            }
-        // 0x5d2990 -> 0x5d2b90: a shadow volume per object while shadows are on.
-        if (shadows_ && p.shadowSlot[inst.model] >= 0) volumes.push_back(&inst);
+        Object o;
+        o.inst = &inst;
+        memcpy(o.world, inst.in->world, sizeof(o.world));
+        if (s.lod.offset != 0.0f) {  // 0x4def90: away from the camera
+            float d[3] = { o.world[12] - eye[0], o.world[13] - eye[1], o.world[14] - eye[2] };
+            float n = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            if (n > 0)
+                for (int j = 0; j < 3; ++j) o.world[12 + j] += d[j] * s.lod.offset / n;
+        }
+        float alpha = s.lod.alpha;
+        uint32_t high = 0;
+        if (alpha != 1.0f) {
+            high = s.lod.mask & 0x1f;
+            while (high & (high - 1)) high &= high - 1;
+        }
+        bool slot[5] = {};
+        for (int l = 0; l < 7; ++l) {
+            uint32_t sm = m.lodMask[l];
+            if (!(s.lod.mask & sm)) continue;
+            if (!(high & (sm & (0u - sm)))) alpha = 1.0f;
+            else if (alpha == 0.0f) continue;
+            if (l < 5) slot[l] = true;
+        }
+        o.alpha = alpha;
+        size_t oi = objects.size();
+        objects.push_back(o);
+        ++frameInstances;
+        if (s.lod.mask == 0x20) ++frameShadowOnly;
+        for (int l = 0; l < 5; ++l) {
+            if (!slot[l]) continue;
+            ++frameSlots[l];
+            for (size_t sm = 0; sm < m.lods[l].size(); ++sm)
+                for (size_t g = 0; g < m.lods[l][sm].groups.size(); ++g) {
+                    const Package::Group& info = p.groupOf[inst.model][l][sm][g];
+                    if (info.fx >= 0)
+                        (info.late ? late : items).push_back({ info.fx, oi, &m.lods[l][sm], &m.lods[l][sm].groups[g], &info });
+                }
+        }
+        // 0x5d2990 -> 0x5d2b90: a shadow volume per submitted object while
+        // shadows are on.
+        if (shadows_ && p.shadowSlot[inst.model] >= 0) volumes.push_back(oi);
+    }
+    // 0x4e7d90: the detail scale follows the number of objects: (150 - n) /
+    // 3000 when that is more than 0.01 either way, kept within 0.8..1.
+    float step = (150.0f - float(cityObjects)) * (1.0f / 3000.0f);
+    if (std::fabs(step) > 0.01f) {
+        lodScale += step;
+        if (lodScale < 0.8f) lodScale = 0.8f;
+        else if (lodScale > 1.0f) lodScale = 1.0f;
     }
     // Blended groups after the others (stand-in, see render.h), then by
     // effect, render states and texture.
@@ -856,9 +1278,9 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], float rang
     std::stable_sort(late.begin(), late.end(), order);
 
     // 0x5de4e0: World = transpose(object matrix) x submesh matrix when +0x4a is set.
-    auto worldOf = [](const Instance& inst, const MdpcSubmesh& sm, float world[16]) {
+    auto worldOf = [](const float* object, const MdpcSubmesh& sm, float world[16]) {
         float wt[16];
-        Transpose(inst.in->world, wt);
+        Transpose(object, wt);
         if (sm.hasMatrix) Mul(wt, sm.matrix, world);
         else memcpy(world, wt, 16 * sizeof(float));
     };
@@ -882,10 +1304,12 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], float rang
                 const Item& it = list[i];
                 int state = redraw ? it.info->redraw : it.info->state;
                 if (redraw ? state < 0 : !DrawnInMode(it.info->type, 2)) continue;
-                const Package& p = packages_[it.inst->package];
+                const Object& o = objects[it.object];
+                const Package& p = packages_[o.inst->package];
                 float world[16];
-                worldOf(*it.inst, *it.sm, world);
-                DrawGroup(p, p.data->models[it.inst->model], *it.g, *it.info, state, world, applied);
+                worldOf(o.world, *it.sm, world);
+                DrawGroup(p, p.data->models[o.inst->model], *it.g, *it.info, state, world, applied, o.alpha,
+                          o.inst->substance);
                 if (redraw) ++frameRedraws;
             }
             e.fx->EndPass();
@@ -903,11 +1327,12 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], float rang
         for (int pass = 0; pass < 2; ++pass) {
             UINT passes = 0;
             if (FAILED(e.fx->Begin(&passes, D3DXFX_DONOTSAVESTATE)) || FAILED(e.fx->BeginPass(0))) break;
-            for (const Instance* inst : volumes) {
+            for (size_t oi : volumes) {
+                const Instance* inst = objects[oi].inst;
                 const Package& p = packages_[inst->package];
                 const MdpcModel& m = p.data->models[inst->model];
                 float world[16];
-                VolumeWorld(*inst->in, eye, world);
+                VolumeWorld(*inst->in, objects[oi].world, eye, world);
                 for (const MdpcSubmesh& sm : m.lods[p.shadowSlot[inst->model]]) {
                     for (const MdpcGroup& g : sm.groups) {
                         DrawGroup(p, m, g, volume, shadowState_[pass], world, applied);
@@ -958,6 +1383,14 @@ void CityRenderer::Release()
     }
     packages_.clear();
     instances_.clear();
+    waterTiles_.clear();
+    anims_.clear();
+    animOf_.clear();
+    for (IDirect3DCubeTexture9*& c : cubes_) {
+        if (c) c->Release();
+        c = nullptr;
+    }
+    waterGroups = 0;
     states_.clear();
     skyPackage_ = -1;
     skyInfo.clear();

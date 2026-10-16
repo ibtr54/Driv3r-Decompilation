@@ -48,28 +48,110 @@ void WorldMatrix(CityInstance& in)
 bool CityPlacement::Load(const std::vector<uint8_t>& d)
 {
     instances.clear();
+    cells.clear();
+    water = CityWater();
     error_.clear();
     if (d.size() < 16 || memcmp(d.data(), "CHNK", 4) != 0) { error_ = "not a CHNK file"; return false; }
     // Top level: GESR regions, GEIR cells, IRCT, PINF, GEGL, PCSL. The GEBI
     // is a child of a GEIR (the cell's instances) or of a GESR.
     uint32_t count = U32(d, 8);
-    int cells = 0;
+    int geirCells = 0;
     for (uint32_t k = 0; k < count; ++k) {
         size_t e = 16 + size_t(k) * 16;
         if (e + 16 > d.size()) break;
-        if (memcmp(&d[e], "GEIR", 4) == 0) ++cells;
+        if (memcmp(&d[e], "GEIR", 4) == 0) ++geirCells;
         else if (memcmp(&d[e], "GESR", 4) != 0) continue;
         size_t g = U32(d, e + 4);
         if (g + 16 > d.size() || memcmp(&d[g], "CHNK", 4) != 0) continue;
         uint32_t children = U32(d, g + 8);
+        size_t first = instances.size();
+        bool gebi = false;
+        size_t scnd = 0, scndSize = 0;
         for (uint32_t j = 0; j < children; ++j) {
             size_t c = g + 16 + size_t(j) * 16;
             if (c + 16 > d.size()) break;
+            if (memcmp(&d[c], "GWTR", 4) == 0 && d[c + 8] == 5 && !LoadGwtr(d, g + U32(d, c + 4), U32(d, c + 12)))
+                return false;
+            if (memcmp(&d[c], "SCND", 4) == 0 && !scnd) {
+                scnd = g + U32(d, c + 4);
+                scndSize = U32(d, c + 12);
+            }
             if (memcmp(&d[c], "GEBI", 4) != 0) continue;
             if (!LoadGebi(d, g + U32(d, c + 4), U32(d, c + 12))) return false;
+            gebi = true;
+        }
+        if (gebi && scnd) {
+            CityCell cell;
+            cell.firstInstance = first;
+            cell.instanceCount = instances.size() - first;
+            if (!LoadScnd(d, scnd, scndSize, cell)) return false;
+            cells.push_back(std::move(cell));
         }
     }
-    while ((gridSide + 1) * (gridSide + 1) <= cells) ++gridSide;
+    while ((gridSide + 1) * (gridSide + 1) <= geirCells) ++gridSide;
+    return true;
+}
+
+bool CityPlacement::LoadScnd(const std::vector<uint8_t>& d, size_t off, size_t size, CityCell& cell)
+{
+    if (off + size > d.size() || size < 0x28) { error_ = "SCND header"; return false; }
+    uint32_t nodes = U32(d, off), table = U32(d, off + 4), nodeCount = U32(d, off + 8);
+    uint32_t indexCount = U32(d, off + 0x0c), stride = U32(d, off + 0x10);
+    if (size_t(nodes) + size_t(nodeCount) * 16 > size || (indexCount && (stride < 4 || size_t(table) + size_t(indexCount) * stride > size))) {
+        error_ = "SCND tables";
+        return false;
+    }
+    cell.size = F32(d, off + 0x14);
+    cell.origin[0] = F32(d, off + 0x18);
+    cell.origin[1] = F32(d, off + 0x1c);
+    cell.column = int(U32(d, off + 0x20));
+    cell.row = int(U32(d, off + 0x24));
+    for (uint32_t i = 0; i < nodeCount; ++i) {
+        size_t p = off + nodes + size_t(i) * 16;
+        uint16_t w[8];
+        memcpy(w, &d[p], sizeof(w));
+        CityNode n;
+        n.first = w[0] & 0xfff;
+        n.count = w[0] >> 12;
+        n.level = w[1];
+        n.x = w[2];
+        n.z = w[3];
+        for (int k = 0; k < 4; ++k) n.child[k] = w[4 + k] < nodeCount ? w[4 + k] : 0;
+        if (size_t(n.first) + n.count > indexCount) n.count = 0;
+        cell.nodes.push_back(n);
+    }
+    for (uint32_t i = 0; i < indexCount; ++i) {
+        uint32_t r = U32(d, off + table + size_t(i) * stride);
+        cell.index.push_back(r < cell.instanceCount ? r : 0xffffffffu);
+    }
+    return true;
+}
+
+bool CityPlacement::LoadGwtr(const std::vector<uint8_t>& d, size_t off, size_t size)
+{
+    if (off + size > d.size() || size < 0x10) { error_ = "GWTR header"; return false; }
+    uint32_t tiles = U32(d, off);
+    int textures = d[off + 0xc], steps = d[off + 0xd], sets = d[off + 0xe];
+    size_t colours = off + 0x10 + size_t(tiles) * 0x20, refs = colours + size_t(steps) * sets * 16;
+    if (refs + size_t(textures) * 4 > off + size) { error_ = "GWTR tables"; return false; }
+    water = CityWater();
+    water.height = F32(d, off + 8);
+    water.shoreLines = U32(d, off + 4);
+    water.colourSteps = steps;
+    water.colourSets = sets;
+    for (uint32_t i = 0; i < tiles; ++i) {
+        size_t p = off + 0x10 + size_t(i) * 0x20;
+        CityInstance in;
+        for (int k = 0; k < 3; ++k) in.position[k] = F32(d, p + 4 * k);
+        memcpy(&in.model, &d[p + 0x10], 2);
+        in.extra = 0xffff;
+        in.column = in.row = -2;
+        in.rotation[3] = 1.0f;  // the identity quaternion
+        WorldMatrix(in);
+        water.tiles.push_back(in);
+    }
+    for (size_t i = 0; i < size_t(steps) * sets * 4; ++i) water.colours.push_back(F32(d, colours + 4 * i));
+    for (int i = 0; i < textures; ++i) water.textures.push_back(U32(d, refs + 4 * size_t(i)));
     return true;
 }
 

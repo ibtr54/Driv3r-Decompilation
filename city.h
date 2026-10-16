@@ -38,6 +38,51 @@ struct CityInstance
     }
 };
 
+// SCND (a sibling of the GEBI; handler vtbl 0x781340, load 0x45b150, which
+// stores it in the cell's slot +0xc): the cell's quadtree. Header: +0
+// nodes (offset), +4 index table (offset, when +0xc > 0), +8 node count,
+// +0xc index count, +0x10 index stride, +0x14 cell size, +0x18 / +0x1c
+// origin x / z (the cell's lowest corner), +0x20 / +0x24 column / row.
+// Node (16 bytes, 0x4dec70): u16 first index (low 12 bits) and count (high
+// 4 bits), u16 level, u16 x / z on the level's grid, u16 children[4]
+// (node numbers, 0: none). A node at level l is size / 2^l wide and
+// centred on origin + (x or z + 0.5) x that width.
+struct CityNode
+{
+    uint16_t first = 0, count = 0, level = 0, x = 0, z = 0;
+    uint16_t child[4] = {};
+};
+
+struct CityCell
+{
+    int column = 0, row = 0;  // -2 / -2: the GESR's (drawn in mode 3)
+    float size = 0, origin[2] = {};
+    std::vector<CityNode> nodes;   // node 0: the root
+    std::vector<uint32_t> index;   // GEBI record numbers
+    size_t firstInstance = 0;      // instances[] of the GEBI's record 0
+    size_t instanceCount = 0;
+};
+
+// GWTR (a child of the GESR; handler vtbls 0x781134 / 0x78111c, load
+// 0x450be0 when the chunk entry's version byte is 5, tag 'GWTR' at object
+// +0x784): the sea. Header: +0 tile count, +4 shore line count, +8 water
+// height (object +0x774, default -10.0; 0x450fc0 returns it), +0xc bytes:
+// texture count, colour steps, colour sets. Then the tiles (0x20 bytes: x,
+// y, z, w, u16 model id), the colours (sets x steps x RGBA floats; the
+// mood's SEA_COLOUR - 1, 0..3, picks the set: 0x450df0 / 0x450e50), the
+// texture references (u32 each, 0x450fd0) and the shore lines (0x454b00).
+// Each tile is a model of the city's packages (flat at y 0), drawn with
+// an identity rotation at the tile's point (0x451030).
+struct CityWater
+{
+    float height = -10.0f;
+    std::vector<CityInstance> tiles;  // column / row -2 (the GESR's)
+    int colourSteps = 0, colourSets = 0;
+    std::vector<float> colours;      // sets x steps x 4
+    std::vector<uint32_t> textures;  // texture references
+    uint32_t shoreLines = 0;
+};
+
 class CityPlacement
 {
 public:
@@ -46,6 +91,10 @@ public:
     const std::string& Error() const { return error_; }
 
     std::vector<CityInstance> instances;
+    // Cells with a GEBI and a SCND (GEIR cells and the GESR).
+    std::vector<CityCell> cells;
+    // The GESR's GWTR (no tiles: the city has none).
+    CityWater water;
     // GEIR cells per side (12 in Miami, 15 in Nice and Istanbul); a cell
     // is 480 units and the grid is centred on 0, so column c starts at
     // x = 480 * (c - gridSide / 2) and row r ends at z = -480 * (r - gridSide / 2)
@@ -54,5 +103,7 @@ public:
 
 private:
     bool LoadGebi(const std::vector<uint8_t>& d, size_t off, size_t size);
+    bool LoadScnd(const std::vector<uint8_t>& d, size_t off, size_t size, CityCell& cell);
+    bool LoadGwtr(const std::vector<uint8_t>& d, size_t off, size_t size);
     std::string error_;
 };

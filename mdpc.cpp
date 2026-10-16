@@ -202,6 +202,7 @@ bool MdpcPackage::Load(const std::vector<uint8_t>& file, size_t mdpc, size_t siz
         for (int c = 0; c < 8; ++c)
             for (int k = 0; k < 3; ++k) model.box[c][k] = h.F32(mo + 0x28 + c * 16 + k * 4);
         for (int lod = 0; lod < 7; ++lod) {
+            model.lodMask[lod] = h.U32(mo + 0xbc + lod * 0x20);
             uint32_t smOff = h.U32(mo + 0xa8 + lod * 0x20), smCount = h.U32(mo + 0xb0 + lod * 0x20);
             if (!smOff || !smCount) continue;
             if (!h.Has(smOff, size_t(smCount) * 0x58)) { error_ = "submeshes"; return false; }
@@ -228,6 +229,12 @@ bool MdpcPackage::Load(const std::vector<uint8_t>& file, size_t mdpc, size_t siz
             }
         }
     }
+    // 0x5ca020: slot 5 with submeshes gets the mask 0x20, otherwise slot 6
+    // (when slot 5's mask is 0).
+    for (MdpcModel& model : models) {
+        if (!model.lods[5].empty()) model.lodMask[5] = 0x20;
+        else if (!model.lods[6].empty() && model.lodMask[5] == 0) model.lodMask[6] = 0x20;
+    }
     // Materials (PCMP at header +0x2c): +0x08 count, +0x0c table of 0x18
     // entries {+0 offset of its first entry in the substance list, +4
     // count}; offsets are from the PCMP. The substance list (+0x10 count,
@@ -235,9 +242,13 @@ bool MdpcPackage::Load(const std::vector<uint8_t>& file, size_t mdpc, size_t siz
     // filled at load} (0x5d6490, read by 0x5cc3d0). Substances: +0x18
     // count, +0x1c table of 0x20 bytes; their first 8 bytes are converted
     // as the game does (ConvertSubstance), +0x10 / +0x14 their textures: a
-    // list of offsets of texture entries. Texture table: PCMP +0x28 count,
+    // list of 8-byte entries {+0 offset of a texture entry, +4 pointer
+    // filled at load} (the runtime substance's +0x18, read by 0x5d8830:
+    // texture n = [+0x18 + n * 8 + 4] +0x30). Texture table: PCMP +0x28 count,
     // +0x2c offset (0x20 bytes each); the data starts at PCMP +0x30.
     materials.clear();
+    materialFlags.clear();
+    materialSpeed.clear();
     textures.clear();
     uint32_t pcmp = h.U32(0x2c);
     if (pcmp && h.Has(pcmp, 0x34) && memcmp(&file[mdpc + pcmp], "PCMP", 4) == 0) {
@@ -265,13 +276,15 @@ bool MdpcPackage::Load(const std::vector<uint8_t>& file, size_t mdpc, size_t siz
                 }
                 uint32_t refs = h.U32(so + 0x10), refCount = h.U32(so + 0x14);
                 for (uint32_t r = 0; r < refCount && r < 16; ++r) {
-                    uint32_t te = h.U32(pcmp + refs + r * 4);
+                    uint32_t te = h.U32(pcmp + refs + r * 8);
                     if (te < tTable || (te - tTable) % 0x20 || (te - tTable) / 0x20 >= tCount) break;
                     sub.textures.push_back(int((te - tTable) / 0x20));
                 }
                 subs.push_back(sub);
             }
             materials.push_back(std::move(subs));
+            materialFlags.push_back(h.U32(e + 8));
+            materialSpeed.push_back(h.F32(e + 0xc));
         }
     }
     return true;

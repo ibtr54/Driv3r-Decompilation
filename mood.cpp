@@ -52,6 +52,8 @@ bool Mood::Load(const std::string& path)
             rgb(l, "LIGHT_DIRECTIONAL_COLOUR: %f, %f, %f", directional, 1);
         } else if (is(l, "LIGHT_DIRECTIONAL_VECTOR")) {
             rgb(l, "LIGHT_DIRECTIONAL_VECTOR: %f, %f, %f", direction, 0);
+        } else if (is(l, "SHADOW_VECTOR")) {
+            rgb(l, "SHADOW_VECTOR: %f, %f, %f", shadow, 0);
         } else if (is(l, "FOG_NEARDISTANCE")) {
             sscanf(l, "FOG_NEARDISTANCE: %f", &fogNearDistance);
         } else if (is(l, "FOG_NEARVALUE")) {
@@ -64,9 +66,13 @@ bool Mood::Load(const std::string& path)
             rgb(l, "FOG_COLOUR: %f, %f, %f", fogColour, 1);
         } else if (is(l, "SKY_COLOUR")) {
             rgb(l, "SKY_COLOUR: %f, %f, %f", skyColour, 1);
+        } else if (is(l, "SEA_COLOUR")) {
+            sscanf(l, "SEA_COLOUR: %d", &seaColour);
+        } else if (is(l, "SHINY_WATER_TINT")) {
+            rgb(l, "SHINY_WATER_TINT: %f, %f, %f", shinyWaterTint, 1);
         }
-        // The other keys (shadow vector, street / head lights, car specular,
-        // rain, sea, shiny road / water, shore waves, sun flare, particles,
+        // The other keys (street / head lights, car specular,
+        // rain, shiny road, shore waves, sun flare, particles,
         // music, light glow, time of day, weather, kerb height, headlight
         // colours) are not used here.
     }

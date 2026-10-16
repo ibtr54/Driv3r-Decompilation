@@ -3110,6 +3110,7 @@ public:
             RideCamera(pose, startEye_, startYaw_, startPitch_);
             free_ = false;
             lastFrame_ = 0;
+            levelTime_ = 0;
             OnKeyUp(0);
             Log("Level 0x%02x: start point %d, vehicle %d (class %d): pose (%.2f, %.2f, %.2f) heading %.4f; "
                 "camera (%.2f, %.3f, %.2f)", mission, rideStart, rideVehicle, VehicleClass(rideVehicle), pose[0],
@@ -3118,6 +3119,9 @@ public:
             view_.onReset = [this] { city_.OnResetDevice(); };
             city_.SetMood(mood_);
             city_.SetShadows(g.Toggle("shadows"));  // settings +0xc8c -> render context +0x148 (0x5483ee)
+            // Draw distance +0xc88 (0x4ddc50) and a night city (setup vtbl+0x60).
+            city_.SetDrawDistance(g.drawdist, rideTime == 3);
+            city_.SetTimeOfDay(rideTime);  // setup +0x34: the environment cube (0x57c092)
             if (city_.Init(view_.Device(), g.gameDir + "\\Driv3r.exe") &&
                 city_.Upload(loader_.Packages(), loader_.CityFirst(), loader_.CityEnd(), loader_.City(),
                              loader_.FirstPackageOf(mood_.skydome)))
@@ -3137,6 +3141,10 @@ public:
                     city_.hiddenGroups);
                 Log("Level 0x%02x: sky %s: %s", mission, mood_.skydome.c_str(),
                     city_.skyInfo.empty() ? "not drawn (no model package)" : city_.skyInfo.c_str());
+                const CityWater& w = loader_.City().water;
+                Log("Level 0x%02x: sea: %zu tiles at height %.2f (%zu groups), %d x %d colours, %zu textures, %u shore "
+                    "lines", mission, w.tiles.size(), w.height, city_.waterGroups, w.colourSets, w.colourSteps,
+                    w.textures.size(), w.shoreLines);
             } else
                 Log("Level 0x%02x: Direct3D 9 view (black), city not drawn: %s", mission, city_.Error().c_str());
             drawn_ = 0;
@@ -3151,6 +3159,8 @@ public:
         QueryPerformanceFrequency(&freq);
         float dt = lastFrame_ ? float(double(now.QuadPart - lastFrame_) / double(freq.QuadPart)) : 0.0f;
         lastFrame_ = now.QuadPart;
+        levelTime_ += dt;
+        city_.SetTime(float(levelTime_));
         if (free_) MoveFreeCamera(dt < 0.1f ? dt : 0.1f);
         const float* eye = free_ ? freeEye_ : startEye_;
         float yaw = free_ ? freeYaw_ : startYaw_, pitch = free_ ? freePitch_ : startPitch_;
@@ -3160,14 +3170,18 @@ public:
         // and in every frame (2 atan(1 / 1.74654) = 1.0388, 59.5 degrees;
         // the chase cameras set pi / 3 at +0xc4 / +0xcc, 0x567430.., what
         // makes it 1.0388 is not decoded); aspect of the window (4:3 in the
-        // trace); the draw range of the lowest setting (500, 0x4ddc50 +0x40).
-        float vp[16];
-        CameraMatrix(eye, at, 2.0f * std::atan(1.0f / 1.74654f), view_.Aspect(), vp);
-        bool ok = view_.Frame(D3DCOLOR_XRGB(0, 0, 0), [&](IDirect3DDevice9*) { city_.Draw(vp, eye, 500.0f); });
+        // trace). The camera's z axis (it looks along -back) goes to the
+        // city's culling (0x4e7e30).
+        float vp[16], fov = 2.0f * std::atan(1.0f / 1.74654f), aspect = view_.Aspect();
+        CameraMatrix(eye, at, fov, aspect, vp);
+        float back[3] = { -std::sin(yaw) * std::cos(pitch), -std::sin(pitch), -std::cos(yaw) * std::cos(pitch) };
+        bool ok = view_.Frame(D3DCOLOR_XRGB(0, 0, 0), [&](IDirect3DDevice9*) { city_.Draw(vp, eye, back, fov, aspect); });
         if (drawn_++ == 1)
-            Log("Level 0x%02x: frame: %zu instances, %zu draw calls (%zu shadow volume, %zu shadow redraw)", mission,
-                city_.frameInstances, city_.frameDraws, city_.frameShadowDraws, city_.frameRedraws);
-        return ok;
+            Log("Level 0x%02x: frame: %zu objects (%zu shadow only; slots 0..4: %zu / %zu / %zu / %zu / %zu), detail "
+                "scale %.2f, %zu draw calls (%zu shadow volume, %zu shadow redraw), %zu sea tiles", mission,
+                city_.frameInstances, city_.frameShadowOnly, city_.frameSlots[0], city_.frameSlots[1],
+                city_.frameSlots[2], city_.frameSlots[3], city_.frameSlots[4], city_.lodScale, city_.frameDraws,
+                city_.frameShadowDraws, city_.frameRedraws, city_.frameWater);        return ok;
     }
 
     void Render(HDC, Canvas& cv) override
@@ -3241,6 +3255,7 @@ private:
     float startEye_[3] = {}, startYaw_ = 0, startPitch_ = 0;
     float freeEye_[3] = {}, freeYaw_ = 0, freePitch_ = 0;
     long long lastFrame_ = 0;
+    double levelTime_ = 0;  // seconds since the first frame (animated materials)
     LevelLoader loader_;
     D3DView view_;
     CityRenderer city_;
