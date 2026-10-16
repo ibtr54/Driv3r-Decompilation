@@ -45,11 +45,12 @@
 // list 2 in mode 2. A shadow volume (0x5d2b90) is a copy of the object
 // drawn with effect 0x2b and its model's slot of mask 0x20 (slot 5, or 6
 // when 5 is empty: 0x5ca020); the shader moves the vertices whose normal
-// faces away from the light by g_fExtrusion (20 in the trace) along it.
+// faces away from the light by g_fExtrusion (20, set by 0x5dedf0) along
+// it; its World is the object's matrix moved 0.1 away from the camera.
 // Which substance types each mode draws: 0x5e06f0. Checked against a trace
 // of the original (stencil states, c9, the order of the modes).
-// Not done yet: draw distances and the game's camera (only its handedness
-// is known: right-handed, see CameraMatrix).
+// Not done yet: draw distances. The camera is the ride's start camera or
+// the free one (main.cpp); the game's chase cameras need the vehicle.
 #pragma once
 
 #define WIN32_LEAN_AND_MEAN
@@ -65,13 +66,15 @@
 #include "mdpc.h"
 #include "mood.h"
 
-// A stand-in camera (the game's camera is not traced): right-handed look-at
-// (y up) times a right-handed perspective projection, row vector (Direct3D
-// convention). The traced view-projection of the original is right-handed
-// (it looks along -z with +x to the right), which is why the game culls
-// clockwise triangles (preset default CULL 2) with data whose front faces
-// are clockwise in a left-handed view.
-void CameraMatrix(const float eye[3], const float at[3], float fovY, float aspect, float zNear, float zFar, float out[16]);
+// The camera's view-projection (+0xc0 = view +0x40 x projection +0x80,
+// 0x57ce50): right-handed look-at (y up) times the game's projection, row
+// vector (Direct3D convention). fov is the horizontal field of view
+// (camera +0x180; the chase cameras' +0xc4 / +0xcc = pi / 3, 0x567430..),
+// aspect the camera's +0x184. The traced view-projection of the original is
+// right-handed (it looks along -z with +x to the right), which is why the
+// game culls clockwise triangles (preset default CULL 2) with data whose
+// front faces are clockwise in a left-handed view.
+void CameraMatrix(const float eye[3], const float at[3], float fov, float aspect, float out[16]);
 
 struct ID3DXEffect;
 struct ID3DXEffectPool;

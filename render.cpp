@@ -323,11 +323,32 @@ bool DrawnInMode(int type, int mode)
 // scene's list 2 (drawn last, after the shadows), the others to list 0.
 bool LateType(int type) { return type == 0x11 || type == 0x1d || type == 0x1e; }
 
-// The traced g_fExtrusion of every shadow volume draw (c9 = (20, 0, 0, 0)).
-// 0x5defb0 sets it from the drawn object's +0x70, which the copy made by
-// 0x5d2b90 (0x70 bytes) does not write; where the 20 comes from was not
-// found.
+// g_fExtrusion of every shadow volume draw: effect 0x2b's per-object call
+// (vtbl 0x78e4b8 +0x20 = 0x5dedf0) sets it with SetFloat 20.0 (0x5def3c);
+// the trace has c9 = (20, 0, 0, 0). (0x5defb0, which reads the object's
+// +0x70, is +0x20 of the next vtable 0x78e510.)
 const float kExtrusion = 20.0f;
+
+// 0x5dedf0: the volume's World. d = camera position (camera +0x70) - the
+// object's position (+0x40, row 3); the position moves by -0.1 x d
+// normalized (0x4025d0, length of x, y, z), or by -0.005 x d for models
+// whose id (+0x60) & 0xfc00 is 0xe400 (package uid 0x39; none placed in
+// the cities), i.e. away from the camera; then transposed. It replaces the
+// World of 0x5de4e0 (slot +0x24, called first by 0x5e05b0), so the submesh
+// matrix is not used (no volume submesh in the cities has one).
+void VolumeWorld(const CityInstance& in, const float eye[3], float world[16])
+{
+    float object[16];
+    memcpy(object, in.world, sizeof(object));
+    float d[3] = { eye[0] - object[12], eye[1] - object[13], eye[2] - object[14] };
+    float s = -0.005f;
+    if ((in.model & 0xfc00) != 0xe400) {
+        float n = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        s = n > 0 ? -0.1f / n : 0.0f;
+    }
+    for (int k = 0; k < 3; ++k) object[12 + k] += s * d[k];
+    Transpose(object, world);
+}
 
 // 0x5cc3d0, for a model without flag 2 (+0x1c; none in the cities): each
 // substance of its slots 0..3 of type 0x19 becomes 8; one of type 0xf gets
@@ -347,7 +368,7 @@ void ModelSubstance(uint8_t s[8])
 
 }  // namespace
 
-void CameraMatrix(const float eye[3], const float at[3], float fovY, float aspect, float zNear, float zFar, float out[16])
+void CameraMatrix(const float eye[3], const float at[3], float fov, float aspect, float out[16])
 {
     // z points from the target back to the eye (right-handed).
     float z[3] = { eye[0] - at[0], eye[1] - at[1], eye[2] - at[2] };
@@ -364,8 +385,16 @@ void CameraMatrix(const float eye[3], const float at[3], float fovY, float aspec
         -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]), -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]),
         -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1,
     };
-    float ys = 1.0f / std::tan(fovY * 0.5f), xs = ys / aspect, q = zFar / (zNear - zFar);
-    const float proj[16] = { xs, 0, 0, 0, 0, ys, 0, 0, 0, 0, q, -1, 0, 0, q * zNear, 0 };
+    // 0x57ce50 (camera +0x80): t = tan(+0x180 x 0.5); x scale 1 / t, y scale
+    // 1 / tan(atan(t / +0x184)) (the fpatan / fptan pair, x 2 x 0.5);
+    // fixed z row 0xbf800106 / 0xbe800106 (near 0.25, far about 8013) and
+    // w = -z.
+    float t = std::tan(fov * 0.5f), xs = 1.0f / t, ys = 1.0f / std::tan(std::atan(t / aspect));
+    uint32_t qBits = 0xbf800106, qnBits = 0xbe800106;
+    float q, qn;
+    memcpy(&q, &qBits, 4);
+    memcpy(&qn, &qnBits, 4);
+    const float proj[16] = { xs, 0, 0, 0, 0, ys, 0, 0, 0, 0, q, -1, 0, 0, qn, 0 };
     Mul(view, proj, out);
 }
 
@@ -434,10 +463,7 @@ bool CityRenderer::Init(IDirect3DDevice9* device, const std::string& exePath)
         f.normalMap = fx->GetParameterByName(nullptr, "g_TextureNormalMap");
         f.envSpec = fx->GetParameterByName(nullptr, "g_envSpecColourAndLerpFactor");
         f.extrusion = e.id == 0x2b ? fx->GetParameterByName(nullptr, "g_fExtrusion") : nullptr;
-        if (f.extrusion) {
-            const D3DXVECTOR4 v(kExtrusion, 0, 0, 0);
-            fx->SetVector(f.extrusion, &v);
-        }
+        if (f.extrusion) fx->SetFloat(f.extrusion, kExtrusion);
         // 0x5de330: g_fBrightness 0x3f26a6a7; g_fAlpha comes from the drawn
         // object (+0x64, not traced): 1 here.
         uint32_t bits = 0x3f26a6a7;
@@ -880,9 +906,9 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], float rang
             for (const Instance* inst : volumes) {
                 const Package& p = packages_[inst->package];
                 const MdpcModel& m = p.data->models[inst->model];
+                float world[16];
+                VolumeWorld(*inst->in, eye, world);
                 for (const MdpcSubmesh& sm : m.lods[p.shadowSlot[inst->model]]) {
-                    float world[16];
-                    worldOf(*inst, sm, world);
                     for (const MdpcGroup& g : sm.groups) {
                         DrawGroup(p, m, g, volume, shadowState_[pass], world, applied);
                         ++frameShadowDraws;

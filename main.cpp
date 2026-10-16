@@ -606,6 +606,8 @@ public:
     virtual void Update() {}
     virtual void Render(HDC, Canvas&) {}
     virtual void OnKey(WPARAM) {}
+    // Key released (WM_KEYUP); 0: every key (the window lost the focus).
+    virtual void OnKeyUp(WPARAM) {}
     // Keyboard key newly pressed (no auto-repeat), as a DirectInput code
     // (DIK_*), like the poll 0x551f50 used for the cheat codes.
     virtual void OnKeyPress(int) {}
@@ -2952,14 +2954,113 @@ private:
 
 
 // --------------------------------------------------- 0xB4 gameplay (stand-in)
+// 0x464300 (game setup +0x15ac = vehicle id): byte table 0x464340 over ids
+// 0x13..0x5b, jump table 0x464330: 0x13 -> 1; 0x1f, 0x2c, 0x43, 0x44, 0x51,
+// 0x52 -> 3; boats 0x2d..0x30, 0x45..0x47, 0x53..0x55, 0x59..0x5b -> 2;
+// others 0.
+static int VehicleClass(int id)
+{
+    if (id == 0x13) return 1;
+    for (int v : { 0x1f, 0x2c, 0x43, 0x44, 0x51, 0x52 })
+        if (v == id) return 3;
+    if ((id >= 0x2d && id <= 0x30) || (id >= 0x45 && id <= 0x47) || (id >= 0x53 && id <= 0x55) ||
+        (id >= 0x59 && id <= 0x5b))
+        return 2;
+    return 0;
+}
+
+// 0x4644e0 (game setup vtbl+0x58 = 0x4641e0 for levels 0x4d..0x54): the
+// Take A Ride start pose (x, y, z, heading) of start point +0x15a8, the
+// float bits as pushed to 0x4027e0. Boats (class 2) have points 0..2; a
+// point the city has not falls through to the next city's code, as in the
+// exe (Miami -> Nice -> Istanbul -> nothing). Levels 0x4f / 0x52 have none.
+// Heading h: the vehicle faces (sin h, 0, cos h) (traced, see RideCamera).
+static bool RideStartPose(int level, int vehicleId, int point, float out[4])
+{
+    static const uint32_t kMiamiBoat[3][4] = {
+        { 0xc4052000, 0xc00ccccd, 0x44910000, 0xc0490fdb },
+        { 0xc3320000, 0xc00ccccd, 0xc43d999a, 0x3fb4f4ab },
+        { 0x449b6800, 0xc00ccccd, 0x00000000, 0xc0490fdb },
+    };
+    static const uint32_t kMiami[5][4] = {
+        { 0x44f884cd, 0x3f800000, 0xc4873333, 0xc0490fdb },
+        { 0xc4512000, 0x3f800000, 0x44b9c333, 0xc0490fdb },
+        { 0xc3ff0000, 0x3f800000, 0xc40c0000, 0x404307b4 },
+        { 0x44a38ccd, 0x3f800000, 0x40c00000, 0xc0490fdb },  // point 3, level 0x4d
+        { 0x44a4d666, 0x3f800000, 0xc29e6666, 0xc02ae714 },  // point 3, level 0x4e
+    };
+    static const uint32_t kNiceBoat[3][4] = {
+        { 0xc51e2ccd, 0x3e800000, 0x442d2d71, 0xc0490fdb },
+        { 0x449c551f, 0x3e800000, 0x4387f0a4, 0x3f511aba },
+        { 0x45295b33, 0x3e800000, 0x4416099a, 0xc0470d23 },
+    };
+    static const uint32_t kNice[4][4] = {
+        { 0xc533e429, 0x3f800000, 0x442a61fc, 0xc0490fdb },
+        { 0xc33a051f, 0x40dd1687, 0xc3640000, 0xc044090f },
+        { 0x44d70f23, 0x42a0fbe7, 0x43e1eeb8, 0x4044090f },
+        { 0x452c43d7, 0x42920000, 0xc3bcdbc7, 0xbff1463b },
+    };
+    static const uint32_t kIstanbulBoat[3][4] = {
+        { 0x43c1c000, 0xbe800000, 0xc38af333, 0xc025e048 },
+        { 0x45000400, 0xbe800000, 0xc3e65d71, 0xc02fede0 },
+        { 0xc43ec000, 0xbe800000, 0x450a999a, 0x3f490fdb },
+    };
+    static const uint32_t kIstanbul[4][4] = {
+        { 0xc42f62a0, 0x41500000, 0x445cde14, 0x401fd820 },
+        { 0x449c52fa, 0x40a00000, 0x445db1cb, 0x4027e300 },
+        { 0x44a73ba6, 0x41800000, 0x44ddb948, 0x401ed6c4 },
+        { 0x45049103, 0x41f00000, 0xc48ca4fd, 0x3ff9511a },
+    };
+    const uint32_t* bits = nullptr;
+    bool boat = VehicleClass(vehicleId) == 2, inRange = point >= 0 && point <= 3;
+    int city = level == 0x4d || level == 0x4e ? 0 : level == 0x50 || level == 0x51 ? 1 : level == 0x53 || level == 0x54 ? 2 : -1;
+    if (city == 0) {
+        if (boat && point >= 0 && point <= 2) bits = kMiamiBoat[point];
+        else if (inRange) bits = kMiami[point == 3 && level != 0x4d ? 4 : point];
+        else city = 1;
+    }
+    if (!bits && city == 1) {
+        if (boat && point >= 0 && point <= 2) bits = kNiceBoat[point];
+        else if (inRange) bits = kNice[point];
+        else city = 2;
+    }
+    if (!bits && city == 2) {
+        if (boat && point >= 0 && point <= 2) bits = kIstanbulBoat[point];
+        else if (inRange) bits = kIstanbul[point];
+    }
+    if (!bits) return false;
+    memcpy(out, bits, 4 * sizeof(float));
+    return true;
+}
+
+// The game's camera at the start of a ride. In the original it is a chase
+// camera on the player's vehicle (created at the start pose by 0x476480);
+// the chase cameras (0x567430, 0x567b70, 0x567e30, 0x566d10: field of view
+// pi / 3 at +0xc4 / +0xcc and their spring constants) follow the
+// vehicle's physics, which are not implemented. Their resting place is
+// taken from traces of the original at Miami start points 0, 1 and 2 (car
+// 12, vehicle 6, standing): eye = start + (0, 0.754, 0) - 6.28 x forward,
+// looking along forward raised by 0.0029.
+static void RideCamera(const float pose[4], float eye[3], float& yaw, float& pitch)
+{
+    yaw = pose[3];
+    pitch = 0.0029f;
+    eye[0] = pose[0] - 6.28f * std::sin(yaw);
+    eye[1] = pose[1] + 0.754f;
+    eye[2] = pose[2] - 6.28f * std::cos(yaw);
+}
+
 // Gameplay is not implemented. This screen stands for one level (a story
 // mission is played in parts, see StoryNextPart). It starts like the
 // original: state 0xB4 Enter (0x54d680) selects sub-state 0xB6, which shows
 // the loading screen while the level loader 0x8ac338 reads the files
 // (vtbl+8 0x44b360 queues them, vtbl+0x10 is polled). Then the level runs
 // (0xB8): Take A Ride in Miami (levels 0x4d / 0x4e) as a Direct3D 9 view of
-// the city drawn with the game's effects (render.h) from a fixed stand-in
-// camera, every other level as a stand-in that names it. The keys send
+// the city drawn with the game's effects (render.h) from the ride's start
+// camera (RideCamera), every other level as a stand-in that names it.
+// Program addition (not in the game): C toggles a free camera (W / S
+// forward / back, A / D sideways, Q / E down / up, arrows turn, Shift
+// faster). The keys send
 // the messages gameplay sends to the story sequencer (handler 0x557de0);
 // where gameplay goes after one is decided by state 0xBB (EndOfPart below);
 // the end screens 0xCD / 0xCF are not implemented.
@@ -2975,6 +3076,9 @@ public:
     // 0 dry, 1 overcast, 2 wet; with the city and the time it picks the
     // level's mood (game setup vtbl+0x6c, mood.h).
     int rideWeather = 0;
+    // Take A Ride start point (front end +0xc8 -> setup +0x15a8, or the
+    // replay header +0x40) and vehicle id (setup +0x15ac, replay +0x3c).
+    int rideStart = 0, rideVehicle = 6;
 
     void Enter() override { StartLoading(); }
     void Leave() override
@@ -3000,6 +3104,16 @@ public:
                 Log("Level 0x%02x: Direct3D 9: %s, stand-in instead", mission, view_.Error().c_str());
                 return;
             }
+            float pose[4] = {};
+            if (!RideStartPose(mission, rideVehicle, rideStart, pose))
+                Log("Level 0x%02x: no start pose for start point %d", mission, rideStart);
+            RideCamera(pose, startEye_, startYaw_, startPitch_);
+            free_ = false;
+            lastFrame_ = 0;
+            OnKeyUp(0);
+            Log("Level 0x%02x: start point %d, vehicle %d (class %d): pose (%.2f, %.2f, %.2f) heading %.4f; "
+                "camera (%.2f, %.3f, %.2f)", mission, rideStart, rideVehicle, VehicleClass(rideVehicle), pose[0],
+                pose[1], pose[2], pose[3], startEye_[0], startEye_[1], startEye_[2]);
             view_.onLost = [this] { city_.OnLostDevice(); };
             view_.onReset = [this] { city_.OnResetDevice(); };
             city_.SetMood(mood_);
@@ -3032,18 +3146,24 @@ public:
     bool PresentOwn() override
     {
         if (loading_ || !view_.IsOpen()) return false;
-        // Stand-in camera (the start point's position in Mission77.mpc and
-        // the game's camera are not decoded): the original's camera at the
-        // start of Take A Ride Miami as traced (s_CamPos (1988.15, 1.754,
-        // -1075.32), looking along the view-projection's w column (0,
-        // 0.00289, -1), y scale 2.32871 = 46.5 degrees; near / far about
-        // 0.25 and 8000), and the draw range of the lowest setting (500,
-        // 0x4ddc50 +0x40).
-        static const float kEye[3] = { 1988.15f, 1.754f, -1075.32f };
-        static const float kAt[3] = { kEye[0], kEye[1] + 0.289f, kEye[2] - 100.0f };
+        LARGE_INTEGER now, freq;
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&freq);
+        float dt = lastFrame_ ? float(double(now.QuadPart - lastFrame_) / double(freq.QuadPart)) : 0.0f;
+        lastFrame_ = now.QuadPart;
+        if (free_) MoveFreeCamera(dt < 0.1f ? dt : 0.1f);
+        const float* eye = free_ ? freeEye_ : startEye_;
+        float yaw = free_ ? freeYaw_ : startYaw_, pitch = free_ ? freePitch_ : startPitch_;
+        float at[3] = { eye[0] + std::sin(yaw) * std::cos(pitch), eye[1] + std::sin(pitch),
+                        eye[2] + std::cos(yaw) * std::cos(pitch) };
+        // Field of view as traced: x scale 1.74654 at all three start points
+        // and in every frame (2 atan(1 / 1.74654) = 1.0388, 59.5 degrees;
+        // the chase cameras set pi / 3 at +0xc4 / +0xcc, 0x567430.., what
+        // makes it 1.0388 is not decoded); aspect of the window (4:3 in the
+        // trace); the draw range of the lowest setting (500, 0x4ddc50 +0x40).
         float vp[16];
-        CameraMatrix(kEye, kAt, 2.0f * std::atan(1.0f / 2.32871f), view_.Aspect(), 0.25f, 8000.0f, vp);
-        bool ok = view_.Frame(D3DCOLOR_XRGB(0, 0, 0), [&](IDirect3DDevice9*) { city_.Draw(vp, kEye, 500.0f); });
+        CameraMatrix(eye, at, 2.0f * std::atan(1.0f / 1.74654f), view_.Aspect(), vp);
+        bool ok = view_.Frame(D3DCOLOR_XRGB(0, 0, 0), [&](IDirect3DDevice9*) { city_.Draw(vp, eye, 500.0f); });
         if (drawn_++ == 1)
             Log("Level 0x%02x: frame: %zu instances, %zu draw calls (%zu shadow volume, %zu shadow redraw)", mission,
                 city_.frameInstances, city_.frameDraws, city_.frameShadowDraws, city_.frameRedraws);
@@ -3071,12 +3191,56 @@ public:
     void OnKey(WPARAM vk) override
     {
         if (loading_) return;
+        if (vk < 256) held_[vk] = true;
+        if (vk == 'C' && view_.IsOpen()) {
+            free_ = !free_;
+            if (free_) {  // starts where the game's camera is
+                memcpy(freeEye_, startEye_, sizeof(freeEye_));
+                freeYaw_ = startYaw_;
+                freePitch_ = startPitch_;
+            }
+            Log("Level 0x%02x: free camera %s", mission, free_ ? "on" : "off (back to the start camera)");
+            return;
+        }
         const char* msg = vk == VK_RETURN ? "complete" : vk == 'F' ? "fail" : vk == 'R' ? "restart"
                         : vk == VK_ESCAPE ? "frontend" : nullptr;
         if (msg && onMessage) onMessage(msg);
     }
+    void OnKeyUp(WPARAM vk) override
+    {
+        if (vk == 0) memset(held_, 0, sizeof(held_));
+        else if (vk < 256) held_[vk] = false;
+    }
 
 private:
+    // Free camera (program addition): 20 units / s, 100 with Shift; turns
+    // at 1.5 rad / s. Forward follows the view (yaw and pitch), sideways and
+    // up / down do not tilt. Right of a camera looking along (sin y, 0,
+    // cos y) is (-cos y, 0, sin y) (CameraMatrix's x axis).
+    void MoveFreeCamera(float dt)
+    {
+        float speed = (held_[VK_SHIFT] ? 100.0f : 20.0f) * dt, turn = 1.5f * dt;
+        if (held_[VK_LEFT]) freeYaw_ += turn;
+        if (held_[VK_RIGHT]) freeYaw_ -= turn;
+        if (held_[VK_UP]) freePitch_ += turn;
+        if (held_[VK_DOWN]) freePitch_ -= turn;
+        if (freePitch_ > 1.55f) freePitch_ = 1.55f;
+        if (freePitch_ < -1.55f) freePitch_ = -1.55f;
+        float f[3] = { std::sin(freeYaw_) * std::cos(freePitch_), std::sin(freePitch_),
+                       std::cos(freeYaw_) * std::cos(freePitch_) };
+        float r[3] = { -std::cos(freeYaw_), 0, std::sin(freeYaw_) };
+        float move = (held_['W'] ? 1.0f : 0.0f) - (held_['S'] ? 1.0f : 0.0f);
+        float side = (held_['D'] ? 1.0f : 0.0f) - (held_['A'] ? 1.0f : 0.0f);
+        float up = (held_['E'] ? 1.0f : 0.0f) - (held_['Q'] ? 1.0f : 0.0f);
+        for (int k = 0; k < 3; ++k) freeEye_[k] += speed * (move * f[k] + side * r[k]);
+        freeEye_[1] += speed * up;
+    }
+
+    bool held_[256] = {};
+    bool free_ = false;
+    float startEye_[3] = {}, startYaw_ = 0, startPitch_ = 0;
+    float freeEye_[3] = {}, freeYaw_ = 0, freePitch_ = 0;
+    long long lastFrame_ = 0;
     LevelLoader loader_;
     D3DView view_;
     CityRenderer city_;
@@ -3552,6 +3716,8 @@ private:
                 startPoint_, RideLevel());
             g_mission.rideTime = time_;
             g_mission.rideWeather = weather_;
+            g_mission.rideStart = startPoint_;
+            g_mission.rideVehicle = VehicleId();
             g_story.ClearBlock();
             g_story.RunMission(RideLevel());
             return;
@@ -4200,6 +4366,8 @@ private:
         if (level >= 0x4d && level <= 0x54) {  // before the level starts loading
             g_mission.rideTime = time;
             g_mission.rideWeather = d[0x38];
+            g_mission.rideStart = start;
+            g_mission.rideVehicle = vehicle;
         }
         g_story.RunMission(level);
         if (level >= 0x4d && level <= 0x54)
@@ -4274,10 +4442,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_KEYUP: {
         int i = GuiRepeat::Index(wp);
         if (i >= 0) g_repeat.key[i] = false;
+        if (g.cur) g.cur->OnKeyUp(wp);
         return 0;
     }
     case WM_KILLFOCUS:  // DirectInput (foreground) stops reporting keys
         for (bool& k : g_repeat.key) k = false;
+        if (g.cur) g.cur->OnKeyUp(0);
         break;
     case WM_SYSKEYDOWN:
         if (wp == VK_F4) { g.Quit(); return 0; }
