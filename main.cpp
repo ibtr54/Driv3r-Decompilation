@@ -3107,8 +3107,7 @@ public:
             float pose[4] = {};
             if (!RideStartPose(mission, rideVehicle, rideStart, pose))
                 Log("Level 0x%02x: no start pose for start point %d", mission, rideStart);
-            RideCamera(pose, startEye_, startYaw_, startPitch_);
-            free_ = false;
+            RideCamera(pose, startEye_, startYaw_, startPitch_);            free_ = false;
             lastFrame_ = 0;
             levelTime_ = 0;
             OnKeyUp(0);
@@ -3145,6 +3144,8 @@ public:
                 Log("Level 0x%02x: sea: %zu tiles at height %.2f (%zu groups), %d x %d colours, %zu textures, %u shore "
                     "lines", mission, w.tiles.size(), w.height, city_.waterGroups, w.colourSets, w.colourSteps,
                     w.textures.size(), w.shoreLines);
+                Log("Level 0x%02x: shore waves: %zu lines with points, %s", mission, city_.shoreLines,
+                    city_.shoreInfo.empty() ? "not drawn" : city_.shoreInfo.c_str());
             } else
                 Log("Level 0x%02x: Direct3D 9 view (black), city not drawn: %s", mission, city_.Error().c_str());
             drawn_ = 0;
@@ -3178,10 +3179,10 @@ public:
         bool ok = view_.Frame(D3DCOLOR_XRGB(0, 0, 0), [&](IDirect3DDevice9*) { city_.Draw(vp, eye, back, fov, aspect); });
         if (drawn_++ == 1)
             Log("Level 0x%02x: frame: %zu objects (%zu shadow only; slots 0..4: %zu / %zu / %zu / %zu / %zu), detail "
-                "scale %.2f, %zu draw calls (%zu shadow volume, %zu shadow redraw), %zu sea tiles", mission,
-                city_.frameInstances, city_.frameShadowOnly, city_.frameSlots[0], city_.frameSlots[1],
+                "scale %.2f, %zu draw calls (%zu shadow volume, %zu shadow redraw), %zu sea tiles, %zu shore lines",
+                mission, city_.frameInstances, city_.frameShadowOnly, city_.frameSlots[0], city_.frameSlots[1],
                 city_.frameSlots[2], city_.frameSlots[3], city_.frameSlots[4], city_.lodScale, city_.frameDraws,
-                city_.frameShadowDraws, city_.frameRedraws, city_.frameWater);        return ok;
+                city_.frameShadowDraws, city_.frameRedraws, city_.frameWater, city_.frameShore);        return ok;
     }
 
     void Render(HDC, Canvas& cv) override

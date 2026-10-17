@@ -31,6 +31,10 @@ struct Mood
     // +0x15c SEA_COLOUR ("%d"): the water object keeps it - 1 (0..3, else
     // 0; 0x450c84) as the sea tiles' substance index (object +0x50).
     int seaColour = 1;
+    // +0x220 SHORE_WAVE_COLOUR (w = 1; 0x4027e0) and +0x22c
+    // SHORE_WAVE_INTENSITY (defaults 1, 1, 1, 1 from 0x471ba9..; Mood33 sets
+    // neither): the shore strips' vertex colour and alpha (0x454820).
+    float shoreWave[4] = { 1, 1, 1, 1 };
     int SeaIndex() const { return seaColour - 1 >= 0 && seaColour - 1 <= 3 ? seaColour - 1 : 0; }
     // +0x10: the sky dome's rotation (0x472fc0), row vector times matrix:
     // row 0 = the light direction flattened (y = 0) and normalized, row 1 =

@@ -529,8 +529,66 @@ void CityRenderer::AddPackage(const MdpcPackage& data)
     packages_.push_back(std::move(p));
 }
 
-// The effect and textures of every group of slot 0 (0x5d68e0, 0x5e0970;
-// first substance); byUid: package uid -> index into packages_.
+// A group's effect, textures and states from its material (package uid << 16
+// | index) and the render id (0x5d68e0, 0x5e0970, first substance);
+// modelSubstance: the model's substance changes (model flag 2 clear).
+CityRenderer::Package::Group CityRenderer::GroupFor(uint32_t material, int id, bool modelSubstance, bool layout,
+                                                   const std::map<uint32_t, int>& byUid)
+{
+    Package::Group gr;
+    gr.fx = id;
+    // No substance: the binder's request keeps type 8 (0x5e0900).
+    uint8_t s[8] = { 8 };
+    auto it = byUid.find(material >> 16);
+    if (material != 0xffff0000 && material != 0xcccccccc && it != byUid.end()) {
+        const Package& owner = packages_[it->second];
+        uint32_t mi = material & 0xffff;
+        if (mi < owner.data->materials.size() && !owner.data->materials[mi].empty()) {
+            const MdpcSubstance& sub = owner.data->materials[mi][0];
+            memcpy(s, sub.bytes, 8);
+            if (modelSubstance) ModelSubstance(s);
+            int index = (((s[4] & 0x7f) + id * 4) * 3 + s[5]) * 5 + s[6];
+            if (int e = SubstanceEffect(index)) gr.fx = e;
+            // Texture references are entries of the material's own package.
+            if (!sub.textures.empty() && size_t(sub.textures[0]) < owner.textures.size())
+                gr.diffuse = owner.textures[sub.textures[0]];
+            gr.normalBound = s[6] == 1 || s[6] == 4;
+            if (gr.normalBound && sub.textures.size() >= 2 && size_t(sub.textures[1]) < owner.textures.size())
+                gr.normal = owner.textures[sub.textures[1]];
+            // Several substances: their textures (0x5d92b0, 0x5de890).
+            if (owner.data->materials[mi].size() > 1 && mi < owner.data->materialFlags.size()) {
+                auto key = std::make_pair(it->second, mi);
+                auto found = animOf_.find(key);
+                if (found == animOf_.end()) {
+                    Anim a;
+                    a.animated = (owner.data->materialFlags[mi] & 1) != 0;
+                    a.speed = owner.data->materialSpeed[mi];
+                    for (const MdpcSubstance& f : owner.data->materials[mi]) {
+                        auto tex = [&](size_t k) {
+                            return k < f.textures.size() && size_t(f.textures[k]) < owner.textures.size()
+                                       ? owner.textures[f.textures[k]]
+                                       : nullptr;
+                        };
+                        a.tex0.push_back(tex(0));
+                        a.tex1.push_back(tex(1));
+                    }
+                    found = animOf_.emplace(key, int(anims_.size())).first;
+                    anims_.push_back(std::move(a));
+                }
+                gr.anim = found->second;
+            }
+        }
+    }
+    if (!layout || gr.fx <= 0 || gr.fx >= 0x30 || !fx_[gr.fx].fx) gr.fx = -1;
+    gr.state = StateFor(s);
+    gr.type = int8_t(s[0]);
+    gr.late = LateType(gr.type);
+    if (!gr.late && DrawnInMode(gr.type, 7)) gr.redraw = StateFor(s, EffectiveMode(7, gr.type));
+    return gr;
+}
+
+// The groups of every model's slots 0..4; byUid: package uid -> index into
+// packages_.
 void CityRenderer::ResolveGroups(Package& p, const std::map<uint32_t, int>& byUid)
 {
     p.groupOf.resize(p.data->models.size());
@@ -544,58 +602,8 @@ void CityRenderer::ResolveGroups(Package& p, const std::map<uint32_t, int>& byUi
         for (int lod = 0; lod < 5; ++lod)
         for (const MdpcSubmesh& sm : model.lods[lod]) {
             std::vector<Package::Group> groups;
-            for (const MdpcGroup& g : sm.groups) {
-                Package::Group gr;
-                gr.fx = id;
-                // No substance: the binder's request keeps type 8 (0x5e0900).
-                uint8_t s[8] = { 8 };
-                auto it = byUid.find(g.material >> 16);
-                if (g.material != 0xffff0000 && g.material != 0xcccccccc && it != byUid.end()) {
-                    const Package& owner = packages_[it->second];
-                    uint32_t mi = g.material & 0xffff;
-                    if (mi < owner.data->materials.size() && !owner.data->materials[mi].empty()) {
-                        const MdpcSubstance& sub = owner.data->materials[mi][0];
-                        memcpy(s, sub.bytes, 8);
-                        if (!(model.flags & 2)) ModelSubstance(s);
-                        int index = (((s[4] & 0x7f) + id * 4) * 3 + s[5]) * 5 + s[6];
-                        if (int e = SubstanceEffect(index)) gr.fx = e;
-                        // Texture references are entries of the material's own package.
-                        if (!sub.textures.empty() && size_t(sub.textures[0]) < owner.textures.size())
-                            gr.diffuse = owner.textures[sub.textures[0]];
-                        gr.normalBound = s[6] == 1 || s[6] == 4;
-                        if (gr.normalBound && sub.textures.size() >= 2 && size_t(sub.textures[1]) < owner.textures.size())
-                            gr.normal = owner.textures[sub.textures[1]];
-                        // Several substances: their textures (0x5d92b0, 0x5de890).
-                        if (owner.data->materials[mi].size() > 1 && mi < owner.data->materialFlags.size()) {
-                            auto key = std::make_pair(it->second, mi);
-                            auto found = animOf_.find(key);
-                            if (found == animOf_.end()) {
-                                Anim a;
-                                a.animated = (owner.data->materialFlags[mi] & 1) != 0;
-                                a.speed = owner.data->materialSpeed[mi];
-                                for (const MdpcSubstance& f : owner.data->materials[mi]) {
-                                    auto tex = [&](size_t k) {
-                                        return k < f.textures.size() && size_t(f.textures[k]) < owner.textures.size()
-                                                   ? owner.textures[f.textures[k]]
-                                                   : nullptr;
-                                    };
-                                    a.tex0.push_back(tex(0));
-                                    a.tex1.push_back(tex(1));
-                                }
-                                found = animOf_.emplace(key, int(anims_.size())).first;
-                                anims_.push_back(std::move(a));
-                            }
-                            gr.anim = found->second;
-                        }
-                    }
-                }
-                if (!layout || gr.fx <= 0 || gr.fx >= 0x30 || !fx_[gr.fx].fx) gr.fx = -1;
-                gr.state = StateFor(s);
-                gr.type = int8_t(s[0]);
-                gr.late = LateType(gr.type);
-                if (!gr.late && DrawnInMode(gr.type, 7)) gr.redraw = StateFor(s, EffectiveMode(7, gr.type));
-                groups.push_back(gr);
-            }
+            for (const MdpcGroup& g : sm.groups)
+                groups.push_back(GroupFor(g.material, id, !(model.flags & 2), layout, byUid));
             p.groupOf[m][lod].push_back(std::move(groups));
         }
     }
@@ -709,6 +717,40 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
                 }
         waterTiles_.push_back(int(instances_.size()));
         instances_.push_back(inst);
+    }
+    // The shore waves (0x454bb0): min(lines, 8) slots, each of two strips of
+    // up to 6 n + 2 vertices of the longest line, in a buffer object of the
+    // manager [0x8ac240] (vtbl 0x78bddc, object vtbl 0x78bd1c) whose material
+    // is the water's reference 0 ([0x8ac384] = the water object, vtbl+0x28 =
+    // 0x450fd0; Miami 0x41f: type 0x0e, a 512 x 128 DXT3 texture). Drawn as
+    // kind 0xa (0x57b490 -> 0x5cfaa0) with render id 1: effect 1. Checked in
+    // a trace at boat start point 1: two strips of 60 triangles at vertices 0
+    // and 544 (slots 0 and 8 of 68), type 0x0e, mode 2 only, World identity,
+    // the 512 texture, no z writes, SRCALPHA / INVSRCALPHA, no fog, and the
+    // t_11 constants of effect 1 (s_CamPos in c9, g_fAlpha 0.65098 in c13).
+    shoreLines = 0;
+    size_t maxN = 0;
+    for (const ShoreLine& l : city.water.shore)
+        if (l.Count() >= 2) {
+            ++shoreLines;
+            maxN = std::max(maxN, l.Count());
+        }
+    shoreSlots_ = std::min<size_t>(city.water.shore.size(), 8);
+    shoreMaxVerts_ = maxN * 6 + 2;
+    shoreInfo.clear();
+    if (shoreLines && shoreSlots_ && !city.water.textures.empty()) {
+        shoreGroup_ = GroupFor(city.water.textures[0], 1, false, true, byUid);
+        if (shoreGroup_.fx >= 0 &&
+            SUCCEEDED(device_->CreateVertexBuffer(UINT(2 * shoreSlots_ * shoreMaxVerts_ * 48), D3DUSAGE_WRITEONLY, 0,
+                                                  D3DPOOL_MANAGED, &shoreVb_, nullptr))) {
+            shoreCache_.assign(shoreSlots_, ShoreSlot());
+            shoreVerts_.assign(2 * shoreSlots_, 0);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "material 0x%x, effect %d, preset 0x%02x, %zu slots of %zu vertices",
+                     unsigned(city.water.textures[0]), shoreGroup_.fx, unsigned(states_[shoreGroup_.state].base),
+                     shoreSlots_, shoreMaxVerts_);
+            shoreInfo = buf;
+        }
     }
     // Instances no quadtree reaches are not drawn (as in the game).
     std::vector<bool> reached(city.instances.size(), false);
@@ -832,6 +874,22 @@ void CityRenderer::SetEnvSpec(const float colour[4])
 void CityRenderer::DrawGroup(const Package& p, const MdpcModel& m, const MdpcGroup& g, const Package::Group& info,
                              int state, const float world[16], int& applied, float alpha, uint32_t substance)
 {
+    BindGroup(info, state, world, applied, alpha, substance);
+    IDirect3DVertexBuffer9* vb = p.vbs[m.vertexBuffer];
+    if (!vb || !p.ib) return;
+    device_->SetStreamSource(0, vb, 0, p.data->vertexBuffers[m.vertexBuffer].stride);
+    device_->SetIndices(p.ib);
+    // 0x5dfe20: the group's six DrawIndexedPrimitive values.
+    device_->DrawIndexedPrimitive(D3DPRIMITIVETYPE(g.type), g.baseVertex, g.minIndex, g.numVertices, g.startIndex,
+                                  g.primitives);
+    ++frameDraws;
+}
+
+// World, alpha, textures, CommitChanges and the render states of a group
+// whose effect is begun.
+void CityRenderer::BindGroup(const Package::Group& info, int state, const float world[16], int& applied, float alpha,
+                             uint32_t substance)
+{
     Effect& e = fx_[info.fx];
     if (e.world) e.fx->SetMatrix(e.world, reinterpret_cast<const D3DXMATRIX*>(world));
     if (e.alpha) e.fx->SetFloat(e.alpha, alpha);  // object +0x64 (0x5de330)
@@ -869,14 +927,147 @@ void CityRenderer::DrawGroup(const Package& p, const MdpcModel& m, const MdpcGro
         ApplyState(states_[state]);
         applied = state;
     }
-    IDirect3DVertexBuffer9* vb = p.vbs[m.vertexBuffer];
-    if (!vb || !p.ib) return;
-    device_->SetStreamSource(0, vb, 0, p.data->vertexBuffers[m.vertexBuffer].stride);
-    device_->SetIndices(p.ib);
-    // 0x5dfe20: the group's six DrawIndexedPrimitive values.
-    device_->DrawIndexedPrimitive(D3DPRIMITIVETYPE(g.type), g.baseVertex, g.minIndex, g.numVertices, g.startIndex,
-                                  g.primitives);
-    ++frameDraws;
+}
+
+// 0x454820 (line record, vertex out, a, b, alpha): one shore line as a
+// triangle strip of 6 n + 2 vertices. Per point i the ends A (x1, y, z1)
+// and B (x2, y, z2), uv (a + u, fmod(b x 0.05, 1) + v) and + 1 in v for B,
+// colour SHORE_WAVE_COLOUR with alpha 0; between them (0x454660, the
+// position and uv lerped by t^2 = 1/9 and 4/9) the rows L1 / L2 with alpha
+// SHORE_WAVE_INTENSITY x alpha x 0.9921, or 0 on the first and last point.
+// The strip: A / L1 from the last point to the first, a repeat, L1 / L2
+// from the first to the last, a repeat, L2 / B from the last to the first.
+void CityRenderer::BuildShoreStrip(const ShoreLine& line, char* out, float a, float b, float alpha) const
+{
+    struct Vertex { float pos[3], normal[3], uv[2], colour[4]; };
+    static_assert(sizeof(Vertex) == 48, "shore vertex");
+    Vertex* v = reinterpret_cast<Vertex*>(out);
+    const size_t n = line.Count();
+    const float y = city_->water.height;  // [0x8ac384] = the water object, vtbl+0x24 = 0x450fc0 (traced: -2.5)
+    const float voff = std::fmod(b * 0.05f, 1.0f);
+    const float inner = mood_.shoreWave[3] * alpha * 0.9921f;
+    auto make = [&](const float* p, int end) {
+        Vertex r = {};
+        r.pos[0] = p[end * 2];
+        r.pos[1] = y;
+        r.pos[2] = p[end * 2 + 1];
+        r.normal[1] = 1.0f;
+        r.uv[0] = a + p[4];
+        r.uv[1] = voff + p[5] + (end ? 1.0f : 0.0f);
+        memcpy(r.colour, mood_.shoreWave, 3 * sizeof(float));
+        r.colour[3] = 0.0f;
+        return r;
+    };
+    auto lerp = [](const Vertex& p, const Vertex& q, float t, float al) {
+        Vertex r = p;
+        for (int k = 0; k < 3; ++k) r.pos[k] = (q.pos[k] - p.pos[k]) * t + p.pos[k];
+        for (int k = 0; k < 2; ++k) r.uv[k] = (q.uv[k] - p.uv[k]) * t + p.uv[k];
+        r.colour[3] = al;
+        return r;
+    };
+    for (size_t i = 0; i < n; ++i) {
+        const float* p = &line.points[i * 6];
+        Vertex A = make(p, 0), B = make(p, 1);
+        float al = (i == 0 || i + 1 == n) ? 0.0f : inner;
+        Vertex L1 = lerp(A, B, 1.0f / 9.0f, al), L2 = lerp(A, B, 4.0f / 9.0f, al);
+        v[2 * n - 2 - 2 * i] = A;
+        v[2 * n - 1 - 2 * i] = L1;
+        v[2 * n + 1 + 2 * i] = L1;
+        v[2 * n + 2 + 2 * i] = L2;
+        v[6 * n - 2 * i] = L2;
+        v[6 * n + 1 - 2 * i] = B;
+    }
+    v[2 * n] = v[2 * n - 1];
+    v[4 * n + 1] = v[4 * n];
+}
+
+// 0x454cf0: the lines whose centre (at the water height) is within 300
+// units of the camera after subtracting their radius (0x78edd0; the game
+// also drops lines whose box is outside the view, 0x57a410 / 0x579fa0 /
+// 0x57a150, not reproduced), the nearest min(lines, 8) of them into the
+// slot cache (a slot that gets another line is rebuilt). 0x455840: a slot is
+// rebuilt when its last build is older than 0.09 / 0.06 / 0.03 / 0 s for a
+// distance above 150 / 75 / 25 / below, with alpha 1, fading to 0 from 275
+// to 300 (x 0.04); strip k = (a 0, b time), strip k + slots = (a fmod(time
+// x 0.0005 + 0.333, 1), b time x 0.78578). The game's clock here is the
+// update counter / 120 ([0x8ac434] +4 x 0x78e8d4).
+void CityRenderer::UpdateShore(const float eye[3])
+{
+    shoreDrawn_ = 0;
+    if (!shoreVb_ || !city_) return;
+    const CityWater& w = city_->water;
+    struct Cand { int line; float dist; };
+    std::vector<Cand> cand;
+    for (size_t i = 0; i < w.shore.size(); ++i) {
+        const ShoreLine& l = w.shore[i];
+        if (l.Count() < 2) continue;  // 0x4546f0 keeps nothing for them
+        float d[3] = { eye[0] - l.centre[0], eye[1] - w.height, eye[2] - l.centre[1] };
+        float dist = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) - l.radius;
+        if (dist <= 300.0f) cand.push_back({ int(i), dist });
+    }
+    shoreDrawn_ = std::min(cand.size(), shoreSlots_);
+    for (size_t k = 0; k < shoreDrawn_; ++k) {
+        size_t best = 0;
+        for (size_t j = 1; j < cand.size(); ++j)
+            if (cand[best].dist > cand[j].dist) best = j;
+        ShoreSlot& s = shoreCache_[k];
+        if (s.line != cand[best].line) {
+            s.line = cand[best].line;
+            s.valid = false;  // last = -FLT_MAX
+        }
+        s.dist = cand[best].dist;
+        cand[best].dist = 3.402823466e38f;
+    }
+    for (size_t k = 0; k < shoreDrawn_; ++k) {
+        ShoreSlot& s = shoreCache_[k];
+        float interval = s.dist > 150.0f ? 0.09f : s.dist > 75.0f ? 0.06f : s.dist > 25.0f ? 0.03f : 0.0f;
+        if (s.valid && !(s.last < time_ - interval)) continue;
+        float alpha = s.dist > 275.0f ? 1.0f - (s.dist - 275.0f) * 0.04f : 1.0f;
+        const ShoreLine& l = w.shore[size_t(s.line)];
+        UINT verts = UINT(l.Count() * 6 + 2), bytes = UINT(shoreMaxVerts_ * 48);
+        for (int strip = 0; strip < 2; ++strip) {
+            size_t slot = k + size_t(strip) * shoreSlots_;
+            void* ptr = nullptr;
+            if (FAILED(shoreVb_->Lock(UINT(slot) * bytes, bytes, &ptr, 0))) continue;
+            if (strip == 0) BuildShoreStrip(l, static_cast<char*>(ptr), 0.0f, time_, alpha);
+            else BuildShoreStrip(l, static_cast<char*>(ptr), std::fmod(time_ * 0.0005f + 0.333f, 1.0f), time_ * 0.78578f, alpha);
+            shoreVb_->Unlock();
+            shoreVerts_[slot] = verts;
+        }
+        s.last = time_;
+        s.valid = true;
+    }
+}
+
+// 0x454cf0 draws per chosen slot k strip k and strip k + slots through the
+// buffer object (vtbl+0x10) with an identity matrix (the vertices are in
+// world space). g_fAlpha is the traced 0.65098 (the value of g_fBrightness;
+// where kind 0xa gets it was not followed). Effect 1 does not read the
+// vertex colour, so its alpha (0 at the edges) does not show.
+void CityRenderer::DrawShore(bool redraw, int& applied)
+{
+    const Package::Group& info = shoreGroup_;
+    if (!shoreVb_ || !shoreDrawn_ || info.fx < 0) return;    int state = redraw ? info.redraw : info.state;
+    if (state < 0 || (!redraw && !DrawnInMode(info.type, 2))) return;
+    Effect& e = fx_[info.fx];
+    UINT passes = 0;
+    if (FAILED(e.fx->Begin(&passes, D3DXFX_DONOTSAVESTATE)) || FAILED(e.fx->BeginPass(0))) return;
+    static const float kIdentity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    uint32_t bits = 0x3f26a6a7;
+    float alpha;
+    memcpy(&alpha, &bits, 4);
+    BindGroup(info, state, kIdentity, applied, alpha, 0);
+    device_->SetStreamSource(0, shoreVb_, 0, 48);
+    for (size_t k = 0; k < shoreDrawn_; ++k)
+        for (int strip = 0; strip < 2; ++strip) {
+            size_t slot = k + size_t(strip) * shoreSlots_;
+            if (shoreVerts_[slot] < 3) continue;
+            device_->DrawPrimitive(D3DPT_TRIANGLESTRIP, UINT(slot * shoreMaxVerts_), shoreVerts_[slot] - 2);
+            ++frameDraws;
+        }
+    e.fx->EndPass();
+    e.fx->End();
+    if (!redraw) frameShore = shoreDrawn_;
 }
 
 // 0x5cdb20: a cube texture from a material's six substances: edge and
@@ -1288,12 +1479,12 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
     // 0x5dbfc0 / 0x5e05b0: one list in one mode; per effect Begin(&passes, 1 =
     // D3DXFX_DONOTSAVESTATE) and pass 0 (0x5dfdb0); the groups the mode does
     // not draw are left out (0x5e06f0).
-    auto drawList = [&](const std::vector<Item>& list, bool redraw) {
-        for (size_t i = 0; i < list.size();) {
+    auto drawRange = [&](const std::vector<Item>& list, size_t from, size_t to, bool redraw) {
+        for (size_t i = from; i < to;) {
             Effect& e = fx_[list[i].fx];
             size_t end = i;
             bool any = false;
-            for (; end < list.size() && &fx_[list[end].fx] == &e; ++end)
+            for (; end < to && &fx_[list[end].fx] == &e; ++end)
                 any |= redraw ? list[end].info->redraw >= 0 : DrawnInMode(list[end].info->type, 2);
             UINT passes = 0;
             if (!any || FAILED(e.fx->Begin(&passes, D3DXFX_DONOTSAVESTATE)) || FAILED(e.fx->BeginPass(0))) {
@@ -1316,8 +1507,19 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
             e.fx->End();
         }
     };
+    auto drawList = [&](const std::vector<Item>& list, bool redraw) { drawRange(list, 0, list.size(), redraw); };
 
-    drawList(items, false);  // list 0, mode 2
+    // List 0 in mode 2. The shore strips (type 0x0e) come between the
+    // opaque and the blended groups: in the trace they follow the far quad
+    // (type 9) and come before the sea tiles' type 0x0f groups (stand-in for
+    // the scene's sort order, which was not decoded).
+    UpdateShore(eye);
+    frameShore = 0;
+    size_t firstBlended = 0;
+    while (firstBlended < items.size() && !states_[items[firstBlended].info->state].blend) ++firstBlended;
+    drawRange(items, 0, firstBlended, false);
+    DrawShore(false, applied);
+    drawRange(items, firstBlended, items.size(), false);
     if (!volumes.empty()) {
         // Modes 4 and 5: every volume twice, effect 0x2b with the request's
         // type 8 (the state sets of Upload).
@@ -1348,7 +1550,7 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
         static const float kZero[4] = {};
         SetLight(mood_.ambient, kZero, dir);
         SetEnvSpec(kZero);
-        drawList(items, true);
+        drawList(items, true);  // (the shore strips are not redrawn: mode 2 only in the trace)
         SetLight(mood_.ambient, mood_.directional, dir);
         SetEnvSpec(mood_.directional);
     }
@@ -1384,6 +1586,13 @@ void CityRenderer::Release()
     packages_.clear();
     instances_.clear();
     waterTiles_.clear();
+    if (shoreVb_) shoreVb_->Release();
+    shoreVb_ = nullptr;
+    shoreSlots_ = shoreMaxVerts_ = shoreDrawn_ = 0;
+    shoreCache_.clear();
+    shoreVerts_.clear();
+    shoreLines = 0;
+    shoreInfo.clear();
     anims_.clear();
     animOf_.clear();
     for (IDirect3DCubeTexture9*& c : cubes_) {

@@ -105,8 +105,9 @@ public:
     // The ride's time of day (game setup +0x34, vtbl+0x64): 3 (night) picks
     // the sky's material 0 as the environment cube and no shine (0x57c092).
     void SetTimeOfDay(int time) { timeOfDay_ = time; }
-    // The clock of animated materials ([0x8d6d90]; stand-in: seconds since
-    // the level started).
+    // The game time in seconds ([0x8d6d90]; in the trace it follows the
+    // update counter [[0x8ac434] +4] / 120 from the level start): animated
+    // materials and the shore waves. Here: seconds since the first frame.
     void SetTime(float seconds) { time_ = seconds; }
     // viewProj: row-vector view x projection (Direct3D); eye: the camera;
     // back: the camera's z axis (it looks along -back); fov / aspect: the
@@ -131,7 +132,10 @@ public:
     // Cells with a quadtree, instances not reached by any (logged once).
     size_t cells = 0, unindexed = 0;
     // The sea's groups (all tiles) and last frame's submitted tiles.
-    size_t waterGroups = 0, frameWater = 0;    // Placed models with a shadow volume, groups in list 2, groups whose
+    size_t waterGroups = 0, frameWater = 0;
+    // Shore lines with at least two points, and last frame's drawn lines.
+    size_t shoreLines = 0, frameShore = 0;
+    std::string shoreInfo;  // the shore material's effect / preset ("": none)    // Placed models with a shadow volume, groups in list 2, groups whose
     // type (0..5) keeps them out of mode 2; last frame's shadow volume and
     // shadow redraw draw calls.
     size_t shadowInstances = 0, lateGroups = 0, hiddenGroups = 0, frameShadowDraws = 0, frameRedraws = 0;
@@ -224,9 +228,18 @@ private:
     int StateFor(const uint8_t s[8], int mode = 2);
     void ApplyState(const StateSet& set);
     void AddPackage(const MdpcPackage& data);
+    Package::Group GroupFor(uint32_t material, int id, bool modelSubstance, bool layout,
+                            const std::map<uint32_t, int>& byUid);
     void ResolveGroups(Package& p, const std::map<uint32_t, int>& byUid);
+    // The shore waves (0x454cf0, 0x455840, 0x454820): pick the lines, rebuild
+    // the strips that are due, and draw them with the given states.
+    void UpdateShore(const float eye[3]);
+    void BuildShoreStrip(const ShoreLine& line, char* out, float a, float b, float alpha) const;
+    void DrawShore(bool redraw, int& applied);
     void DrawGroup(const Package& p, const MdpcModel& m, const MdpcGroup& g, const Package::Group& info, int state,
                    const float world[16], int& applied, float alpha = 1.0f, uint32_t substance = 0);
+    void BindGroup(const Package::Group& info, int state, const float world[16], int& applied, float alpha,
+                   uint32_t substance);
     // A cell's distance / detail table (the cell slot's +0x40..+0xc4 of
     // [0x8ac44c]): distances per quadtree level, then six (mask, ratio
     // limit, fade width) entries.
@@ -288,6 +301,16 @@ private:
     const CityPlacement* city_ = nullptr;
     std::vector<int> instanceOf_;  // per city instance: index into instances_, -1: not drawn
     std::vector<int> waterTiles_;  // the sea's tiles: indices into instances_
+    // Shore waves: the material's group (GWTR reference 0, render id 1), a
+    // managed vertex buffer of 2 x slots strips of maxVerts vertices
+    // (48 bytes: position, normal, uv, colour as the tangent), the slot
+    // cache [+0x738] {line, distance, last build} and this frame's count.
+    Package::Group shoreGroup_;
+    IDirect3DVertexBuffer9* shoreVb_ = nullptr;
+    size_t shoreSlots_ = 0, shoreMaxVerts_ = 0, shoreDrawn_ = 0;
+    struct ShoreSlot { int line = -1; float dist = 0, last = 0; bool valid = false; };
+    std::vector<ShoreSlot> shoreCache_;
+    std::vector<uint32_t> shoreVerts_;  // per strip (2 x slots): vertices written
     LodTable tables_[2];           // mode 1 (0x4ddc50) and mode 3 (0x4dde20)
     std::vector<StateSet> states_;
     // What the device has (valid: set by ApplyState since the last reset).

@@ -73,14 +73,26 @@ struct CityCell
 // texture references (u32 each, 0x450fd0) and the shore lines (0x454b00).
 // Each tile is a model of the city's packages (flat at y 0), drawn with
 // an identity rotation at the tile's point (0x451030).
+// A shore line (0x4546f0): 0x18-byte header {+0 point count, +4 ?, +8 / +0xc
+// centre x / z, +0x10 / +0x14 half size x / z} and per point 6 floats: the
+// two ends (x1, z1, x2, z2) of a cross-section, then u and v.
+struct ShoreLine
+{
+    float centre[2] = {}, half[2] = {};
+    float radius = 0;           // |half| (record +4)
+    std::vector<float> points;  // 6 per point
+    size_t Count() const { return points.size() / 6; }
+};
+
 struct CityWater
 {
     float height = -10.0f;
     std::vector<CityInstance> tiles;  // column / row -2 (the GESR's)
     int colourSteps = 0, colourSets = 0;
     std::vector<float> colours;      // sets x steps x 4
-    std::vector<uint32_t> textures;  // texture references
+    std::vector<uint32_t> textures;  // texture references (materials: [2] the shore waves, [6] the far quad)
     uint32_t shoreLines = 0;
+    std::vector<ShoreLine> shore;
 };
 
 class CityPlacement

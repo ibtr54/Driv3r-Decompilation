@@ -1,5 +1,6 @@
 #include "city.h"
 
+#include <cmath>
 #include <cstring>
 
 namespace {
@@ -152,6 +153,22 @@ bool CityPlacement::LoadGwtr(const std::vector<uint8_t>& d, size_t off, size_t s
     }
     for (size_t i = 0; i < size_t(steps) * sets * 4; ++i) water.colours.push_back(F32(d, colours + 4 * i));
     for (int i = 0; i < textures; ++i) water.textures.push_back(U32(d, refs + 4 * size_t(i)));
+    // The shore lines (0x454b00 -> 0x4546f0, records of 0x18 + points x 0x18).
+    size_t p = refs + size_t(textures) * 4;
+    for (uint32_t i = 0; i < water.shoreLines; ++i) {
+        if (p + 0x18 > off + size) { error_ = "GWTR shore lines"; return false; }
+        uint32_t n = U32(d, p);
+        if (p + 0x18 + size_t(n) * 0x18 > off + size) { error_ = "GWTR shore points"; return false; }
+        ShoreLine line;
+        for (int k = 0; k < 2; ++k) {
+            line.centre[k] = F32(d, p + 8 + 4 * k);
+            line.half[k] = F32(d, p + 0x10 + 4 * k);
+        }
+        line.radius = std::sqrt(line.half[0] * line.half[0] + line.half[1] * line.half[1]);
+        for (size_t k = 0; k < size_t(n) * 6; ++k) line.points.push_back(F32(d, p + 0x18 + 4 * k));
+        water.shore.push_back(std::move(line));
+        p += 0x18 + size_t(n) * 0x18;
+    }
     return true;
 }
 
