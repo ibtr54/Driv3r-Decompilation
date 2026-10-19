@@ -47,6 +47,8 @@ void LevelLoader::Start(const std::string& gameDir, const std::vector<std::strin
     firstOf_.clear();
     city_ = CityPlacement();
     cityFirst_ = cityEnd_ = 0;
+    vehicles_.clear();
+    vehiclePackages_.clear();
     worker_ = std::thread([this, gameDir, files] {
         auto t0 = std::chrono::steady_clock::now();
         for (const std::string& f : files) {
@@ -69,12 +71,15 @@ void LevelLoader::DecodePackages(const std::string& f, const std::vector<uint8_t
     auto chunks = FindMdpcChunks(d);
     size_t first = packages_.size(), models = 0, tris = 0, failed = 0;
     std::vector<uint32_t> t;
+    std::vector<int> chunkPackage;  // per MDPC chunk: index into packages_, -1: not read
     for (const auto& c : chunks) {
         MdpcPackage p;
+        chunkPackage.push_back(-1);
         if (!p.Load(d, c.first, c.second)) {
             ++failed;
             continue;
         }
+        chunkPackage.back() = int(packages_.size());
         models += p.models.size();
         for (const MdpcModel& m : p.models)
             for (const MdpcSubmesh& sm : m.lods[0])
@@ -86,6 +91,10 @@ void LevelLoader::DecodePackages(const std::string& f, const std::vector<uint8_t
         packages_.push_back(std::move(p));
     }
     if (packages_.size() > first) firstOf_[f] = first;
+    // A .vvs: its vehicle entries, the k-th with the k-th MDPC (vehicle.h).
+    if (f.size() > 4 && _stricmp(f.c_str() + f.size() - 4, ".vvs") == 0 && ReadVehicles(d, vehicles_))
+        for (const VehicleData& v : vehicles_)
+            vehiclePackages_.push_back(v.mdpc >= 0 && size_t(v.mdpc) < chunkPackage.size() ? chunkPackage[size_t(v.mdpc)] : -1);
     if (!chunks.empty()) {
         char line[256];
         snprintf(line, sizeof(line), "%s: %zu model packages, %zu models, %zu triangles (level 0)%s", f.c_str(),

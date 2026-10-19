@@ -85,6 +85,26 @@ void CameraMatrix(const float eye[3], const float at[3], float fov, float aspect
 struct ID3DXEffect;
 struct ID3DXEffectPool;
 
+// The player's vehicle (vehicle.h, BOOT_TO_MENU.md section 58): its package
+// (Vehicles\<City>.vvs; its materials name it as package 0xfffd), the
+// shared vehicle materials (CarGlobals<City>.vgt, package uid 0x1d), the
+// models drawn with their World (row vector, applied to the vertices as
+// stored), and the object's colour (+0x50, g_colourWeightsVec of 0x5df200)
+// and damage (+0x70, g_DamageFactor of 0x5defb0).
+struct VehicleDraw
+{
+    const MdpcPackage* package = nullptr;
+    const MdpcPackage* globals = nullptr;
+    struct Part
+    {
+        int model = 0;
+        float world[16] = {};
+    };
+    std::vector<Part> parts;
+    float colour[3] = {};
+    float damage = 0;
+};
+
 class CityRenderer
 {
 public:
@@ -94,8 +114,9 @@ public:
     // The city's packages (packages[first, end)), its placement, the sky
     // dome's package (nullptr: no sky) and sfx.pmu's (uid 0x1f: the tree
     // shadow materials; nullptr: no tree shadows).
+    // vehicle: the player's vehicle (nullptr: none).
     bool Upload(const std::vector<MdpcPackage>& packages, size_t first, size_t end, const CityPlacement& city,
-                const MdpcPackage* sky = nullptr, const MdpcPackage* sfx = nullptr);
+                const MdpcPackage* sky = nullptr, const MdpcPackage* sfx = nullptr, const VehicleDraw* vehicle = nullptr);
     // The level's light, fog and sky matrix (used from the next Draw).
     void SetMood(const Mood& mood) { mood_ = mood; }
     // The profile's Shadows setting (+0xc8c).
@@ -160,6 +181,8 @@ public:
     size_t stateSets = 0;
     // The sky's drawn groups and their effect / base preset ("" without sky).
     std::string skyInfo;
+    // The vehicle's drawn groups per effect / base preset ("": none).
+    std::string vehicleInfo;
 
 private:
     struct Package
@@ -179,6 +202,15 @@ private:
             bool late = false;  // list 2
             bool normalBound = false;  // the binder sets the normal map (substance +6 is 1 or 4)
             int anim = -1;  // anims_ (a material with several substances), -1: one substance
+            // A vehicle's group (draw kind 3 / 0x10003): the textures of
+            // 0x5e0b20 (nullptr: the white one, standing in for the global
+            // texture 0xf00d0004) and the substance's colour mode (+0x15) and
+            // texture count (+0x14) for g_colourWeightsVec (0x5df200).
+            bool vehicle = false;
+            IDirect3DTexture9* clean = nullptr;
+            IDirect3DTexture9* damage = nullptr;
+            IDirect3DTexture9* mask = nullptr;
+            uint8_t colourMode = 0, textureCount = 0;
         };
         // Per model, per detail slot 0..4, per submesh, per group.
         std::vector<std::vector<std::vector<std::vector<Group>>>> groupOf;
@@ -195,6 +227,8 @@ private:
         // of the substance its groups draw with (0x5d92b0; 0 for the city,
         // SEA_COLOUR - 1 for the sea's tiles).
         uint32_t substance = 0;
+        // A vehicle's part: its World (no city instance; in is nullptr).
+        const float* world = nullptr;
     };
     struct Effect
     {
@@ -211,6 +245,12 @@ private:
         const char* lerp = nullptr;
         const char* diffuse2[2] = {};  // g_TextureDiffuse1 / 2
         const char* normal2[2] = {};   // g_TextureNormalMap1 / 2
+        // The vehicle parameters (0x5e1080 textures, 0x5df370 constants).
+        const char* clean = nullptr;      // g_TextureClean
+        const char* damageTex = nullptr;  // g_TextureDamage
+        const char* mask = nullptr;       // g_TextureColourednessMask
+        const char* colourWeights = nullptr;  // g_colourWeightsVec
+        const char* damageFactor = nullptr;   // g_DamageFactor
     };
     // A material with several substances: per substance the first and
     // second texture (nullptr: none). Animated (entry +8 bit 0): the
@@ -238,9 +278,11 @@ private:
     int StateFor(const uint8_t s[8], int mode = 2);
     void ApplyState(const StateSet& set);
     void AddPackage(const MdpcPackage& data);
+    // self: the package that material uid 0xfffd names (a vehicle's own);
+    // vehicle: the texture binder of draw kind 3 / 0x10003 (0x5e0b20).
     Package::Group GroupFor(uint32_t material, int id, bool modelSubstance, bool layout,
-                            const std::map<uint32_t, int>& byUid);
-    void ResolveGroups(Package& p, const std::map<uint32_t, int>& byUid);
+                            const std::map<uint32_t, int>& byUid, int self = -1, bool vehicle = false);
+    void ResolveGroups(Package& p, const std::map<uint32_t, int>& byUid, int self = -1, bool vehicle = false);
     // The shore waves (0x454cf0, 0x455840, 0x454820): pick the lines, rebuild
     // the strips that are due, and draw them with the given states.
     void UpdateShore(const float eye[3]);
@@ -287,7 +329,8 @@ private:
     bool NodeVisible(const View& v, const CityCell& cell, int mode, const CityNode& n, float size, Lod& lod) const;
     void WalkNode(const View& v, const CityCell& cell, int mode, const CityNode& n, std::vector<Submit>& out) const;
     void SetLight(const float ambient[4], const float colour[4], const float direction[4]);
-    void SetEnvSpec(const float colour[4]);
+    // redraw: the shadow redraw's modes 6 / 7 (0x5e0f20 reads the mode).
+    void SetEnvSpec(const float colour[4], bool redraw = false);
     void DrawSky(const float eye[3]);
     IDirect3DCubeTexture9* CubeFrom(const Package& p, size_t material);
 
@@ -316,6 +359,20 @@ private:
     int skyPackage_ = -1;  // index into packages_
     Effect fx_[0x30];
     IDirect3DVertexDeclaration9* decl_ = nullptr;
+    // Declaration index 5 (0x5d099b, 60 bytes: the vehicles) and the one set.
+    IDirect3DVertexDeclaration9* decl5_ = nullptr;
+    IDirect3DVertexDeclaration9* currentDecl_ = nullptr;
+    void SetDecl(IDirect3DVertexDeclaration9* decl)
+    {
+        if (decl == currentDecl_) return;
+        device_->SetVertexDeclaration(decl);
+        currentDecl_ = decl;
+    }
+    // The vehicle: its parts (indices into instances_, submitted every frame
+    // with mask 0x22: slot 0 and the shadow volume), Worlds, colour, damage.
+    std::vector<int> vehicleParts_;
+    std::vector<std::vector<float>> vehicleWorlds_;
+    float vehicleColour_[3] = {}, vehicleDamage_ = 0;
     IDirect3DTexture9* white_ = nullptr;
     std::vector<Package> packages_;
     std::vector<Instance> instances_;

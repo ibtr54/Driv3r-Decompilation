@@ -32,6 +32,11 @@ struct Mood
     // g_envSpecColourAndLerpFactor of effects 9 and 0xb (light state
     // L+0x140, 0x5e1130); the original's water draws have it as ps c2.
     float shinyWaterTint[4] = { 1, 1, 1, 1 };
+    // +0x1d0 CAR_SPECULAR_COLOUR (w 1, then +0x1dc CAR_SPECULAR_INTENSITY;
+    // default 1, 1, 1, 1 from 0x471c91..): the light state's +0x100, the
+    // g_envSpecColourAndLerpFactor of effects 0x1d, 0x1f, 0x20, 0x21 (the
+    // vehicles; ps c0 of the original's car draws).
+    float carSpecular[4] = { 1, 1, 1, 1 };
     // +0x15c SEA_COLOUR ("%d"): the water object keeps it - 1 (0..3, else
     // 0; 0x450c84) as the sea tiles' substance index (object +0x50).
     int seaColour = 1;

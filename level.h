@@ -19,6 +19,7 @@
 #include "city.h"
 #include "mdpc.h"
 #include "mec.h"
+#include "vehicle.h"
 
 // The files the level loader queues (vtbl+8 0x44b360, in its order) for a
 // Take A Ride level; city 0 Miami, 1 Nice, 2 Istanbul.
@@ -63,6 +64,10 @@ public:
     size_t CityEnd() const { return cityEnd_; }
     // The first package decoded from a file of the list (nullptr: none).
     const MdpcPackage* FirstPackageOf(const std::string& file) const;
+    // The vehicles of the .vvs (vehicle.h) and the package of each (index
+    // into Packages(), -1: its MDPC was not read).
+    const std::vector<VehicleData>& Vehicles() const { return vehicles_; }
+    const std::vector<int>& VehiclePackages() const { return vehiclePackages_; }
 
 private:
     void DecodePackages(const std::string& f, const std::vector<uint8_t>& d);
@@ -76,6 +81,8 @@ private:
     std::map<std::string, size_t> firstOf_;  // file -> its first package
     CityPlacement city_;
     size_t cityFirst_ = 0, cityEnd_ = 0;
+    std::vector<VehicleData> vehicles_;
+    std::vector<int> vehiclePackages_;
 };
 
 // OVERLAYS\*.GFX: CHNK { UPST, MDPC }. UPST (as found in LOADING.GFX, not

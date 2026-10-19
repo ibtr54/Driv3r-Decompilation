@@ -3048,6 +3048,53 @@ static bool RideGround(const CityGround& city, const float pose[4], float& groun
     return city.Probe(pose[0], pose[1] + 4.5f, pose[2], ground, normal);
 }
 
+// The static compression of the vehicle's suspension (0x5138c0: -[+0x125c]
+// x [+0x102c] x 0.01 / [+0x1030], clamped, from the handling of
+// Configs\Vehicles\BigVO3\<city>.BO3 through the vehicle's parameter table;
+// not decoded). Stand-in for every vehicle: the value of the traced creation
+// frame at start point 0 (vehicle 6: wheels 0.029 above their hardpoints,
+// body at radius + 0.17745 - 0.029049 = 0.487739 over the ground).
+static const float kRideCompression = 0.029049f;
+
+// The player's vehicle as the game creates it at the start pose (0x476480
+// -> 0x50e940, vehicle.h): its package in Vehicles\<City>.vvs, the shared
+// vehicle materials, the body parts with the body's World and the wheels
+// with theirs. The object's colour (+0x50) is black, as traced for the
+// default vehicle 6 (g_colourWeightsVec (0, 0, 0, 0) on its paint); where
+// the game takes it from was not traced. False when the vehicle is not in
+// the file.
+static bool RideVehicleDraw(const LevelLoader& loader, int id, const float pose[4], float ground, VehicleDraw& out,
+                            float& height)
+{
+    const std::vector<VehicleData>& vehicles = loader.Vehicles();
+    for (size_t k = 0; k < vehicles.size(); ++k) {
+        const VehicleData& v = vehicles[k];
+        int pkg = loader.VehiclePackages()[k];
+        if (v.id != id || pkg < 0) continue;
+        const MdpcPackage& p = loader.Packages()[size_t(pkg)];
+        out = VehicleDraw();
+        out.package = &p;
+        out.globals = loader.FirstPackageOf("Vehicles\\Miami\\CarGlobalsMiami.vgt");
+        float body[16];
+        std::vector<float> wheels;
+        VehicleCreationPose(v, p, pose, ground, kRideCompression, body, wheels, height);
+        for (int m : v.body) {
+            VehicleDraw::Part part;
+            part.model = m;
+            memcpy(part.world, body, sizeof(body));
+            out.parts.push_back(part);
+        }
+        for (size_t w = 0; w < v.wheels.size(); ++w) {
+            VehicleDraw::Part part;
+            part.model = v.wheels[w].model;
+            memcpy(part.world, &wheels[w * 16], sizeof(part.world));
+            out.parts.push_back(part);
+        }
+        return true;
+    }
+    return false;
+}
+
 // The game's camera at the start of a ride. In the original it is a chase
 // camera on the player's vehicle (created at the start pose by 0x476480);
 // the chase cameras (0x567430, 0x567b70, 0x567e30, 0x566d10: field of view
@@ -3148,9 +3195,14 @@ public:
             // Draw distance +0xc88 (0x4ddc50) and a night city (setup vtbl+0x60).
             city_.SetDrawDistance(g.drawdist, rideTime == 3);
             city_.SetTimeOfDay(rideTime);  // setup +0x34: the environment cube (0x57c092)
+            // The player's vehicle (boats are not drawn yet).
+            VehicleDraw car;
+            float carHeight = 0;
+            bool haveCar = !boat && RideVehicleDraw(loader_, rideVehicle, pose, ground, car, carHeight);
             if (city_.Init(view_.Device(), g.gameDir + "\\Driv3r.exe") &&
                 city_.Upload(loader_.Packages(), loader_.CityFirst(), loader_.CityEnd(), loader_.City(),
-                             loader_.FirstPackageOf(mood_.skydome), loader_.FirstPackageOf("sfx\\sfx.pmu")))
+                             loader_.FirstPackageOf(mood_.skydome), loader_.FirstPackageOf("sfx\\sfx.pmu"),
+                             haveCar ? &car : nullptr))
                 Log("Level 0x%02x: Direct3D 9 view (back buffer %s), %d effects from Driv3r.exe%s%s, %zu city groups "
                     "drawn, %zu left out",
                     mission, view_.HasAlpha() ? "A8R8G8B8" : "desktop format, no alpha", city_.effects,
@@ -3181,6 +3233,18 @@ public:
                 for (const CityTreeCell& c : loader_.City().treeCells) trees += c.trees.size();
                 Log("Level 0x%02x: tree shadows: %zu ATRD chunks, %zu trees; %s", mission,
                     loader_.City().treeCells.size(), trees, city_.treeInfo.empty() ? "not drawn" : city_.treeInfo.c_str());
+                if (haveCar) {
+                    size_t wheels = 0;
+                    for (const VehicleData& v : loader_.Vehicles())
+                        if (v.id == rideVehicle) wheels = v.wheels.size();
+                    Log("Level 0x%02x: vehicle %d: %zu parts (%zu wheels), %s; created at (%.2f, %.6f, %.2f) = ground "
+                        "%.3f + %.6f; groups: %s", mission, rideVehicle, car.parts.size(), wheels,
+                        car.globals ? "CarGlobals materials" : "no CarGlobals", car.parts[0].world[12],
+                        car.parts[0].world[13], car.parts[0].world[14], ground, carHeight,
+                        city_.vehicleInfo.empty() ? "none" : city_.vehicleInfo.c_str());
+                } else
+                    Log("Level 0x%02x: vehicle %d not drawn (%s)", mission, rideVehicle,
+                        boat ? "a boat" : "not in the vehicle file");
             } else
                 Log("Level 0x%02x: Direct3D 9 view (black), city not drawn: %s", mission, city_.Error().c_str());
             drawn_ = 0;

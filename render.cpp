@@ -329,20 +329,27 @@ bool LateType(int type) { return type == 0x11 || type == 0x1d || type == 0x1e; }
 // +0x70, is +0x20 of the next vtable 0x78e510.)
 const float kExtrusion = 20.0f;
 
+// A vehicle part's model id (object +0x60) as the shadow volume sees it:
+// package uid 0x39 (the 0xe400 branch of 0x5dedf0; which uid the vehicle
+// packages get at run time was taken from that trace, not from the loader).
+const uint16_t kVehicleModelId = 0xe400;
+
 // 0x5dedf0: the volume's World. d = camera position (camera +0x70) - the
 // object's position (+0x40, row 3); the position moves by -0.1 x d
 // normalized (0x4025d0, length of x, y, z), or by -0.005 x d for models
 // whose id (+0x60) & 0xfc00 is 0xe400 (package uid 0x39; none placed in
-// the cities), i.e. away from the camera; then transposed. It replaces the
+// the cities; the vehicles: the original's car volumes at start point 0 are
+// moved by -0.005 x d, e.g. (0, -0.01385, -0.027) for d = (0, 2.77, 5.34)),
+// i.e. away from the camera; then transposed. It replaces the
 // World of 0x5de4e0 (slot +0x24, called first by 0x5e05b0), so the submesh
 // matrix is not used (no volume submesh in the cities has one).
-void VolumeWorld(const CityInstance& in, const float* matrix, const float eye[3], float world[16])
+void VolumeWorld(uint16_t model, const float* matrix, const float eye[3], float world[16])
 {
     float object[16];
     memcpy(object, matrix, sizeof(object));
     float d[3] = { eye[0] - object[12], eye[1] - object[13], eye[2] - object[14] };
     float s = -0.005f;
-    if ((in.model & 0xfc00) != 0xe400) {
+    if ((model & 0xfc00) != 0xe400) {
         float n = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
         s = n > 0 ? -0.1f / n : 0.0f;
     }
@@ -364,6 +371,16 @@ void ModelSubstance(uint8_t s[8])
         s[2] &= 0xfb;
         s[6] = 4;
     }
+}
+
+// The models the renderer can draw: declaration index 1 / 2 with 48-byte
+// vertices, or 5 (the vehicles) with 60.
+bool Drawable(const MdpcModel& m, const MdpcPackage& data)
+{
+    if (m.vertexBuffer >= data.vertexBuffers.size()) return false;
+    uint32_t stride = data.vertexBuffers[m.vertexBuffer].stride;
+    int decl = DeclIndex(m.vertexType);
+    return ((decl == 1 || decl == 2) && stride == 48) || (decl == 5 && stride == 60);
 }
 
 }  // namespace
@@ -426,6 +443,19 @@ bool CityRenderer::Init(IDirect3DDevice9* device, const std::string& exePath)
         D3DDECL_END(),
     };
     if (FAILED(device_->CreateVertexDeclaration(elems, &decl_))) { error_ = "vertex declaration"; return false; }
+    // Declaration index 5 (0x5d099b, handle 0x8acc84; the vehicles' vertex
+    // type 5): position, normal, texcoord, position 1, normal 1 (the damaged
+    // shape, blended by g_DamageFactor), tangent float1; 60 bytes.
+    const D3DVERTEXELEMENT9 elems5[] = {
+        { 0, 0, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_NORMAL, 0 },
+        { 0, 24, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0 },
+        { 0, 32, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 1 },
+        { 0, 44, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_NORMAL, 1 },
+        { 0, 56, D3DDECLTYPE_FLOAT1, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TANGENT, 0 },
+        D3DDECL_END(),
+    };
+    if (FAILED(device_->CreateVertexDeclaration(elems5, &decl5_))) { error_ = "vertex declaration 5"; return false; }
     if (FAILED(createPool(&pool_))) { error_ = "effect pool"; return false; }
     // The data sections are mapped at file offset + 0x400000.
     for (const FxEntry& e : kFx) {
@@ -477,6 +507,13 @@ bool CityRenderer::Init(IDirect3DDevice9* device, const std::string& exePath)
         f.normalMap = fx->GetParameterByName(nullptr, "g_TextureNormalMap");
         f.envSpec = fx->GetParameterByName(nullptr, "g_envSpecColourAndLerpFactor");
         f.extrusion = e.id == 0x2b ? fx->GetParameterByName(nullptr, "g_fExtrusion") : nullptr;
+        // 0x5e1080 (every effect's texture binder) and 0x5df370 (the vehicle
+        // effects' class, vtbl 0x78e510).
+        f.clean = fx->GetParameterByName(nullptr, "g_TextureClean");
+        f.damageTex = fx->GetParameterByName(nullptr, "g_TextureDamage");
+        f.mask = fx->GetParameterByName(nullptr, "g_TextureColourednessMask");
+        f.colourWeights = fx->GetParameterByName(nullptr, "g_colourWeightsVec");
+        f.damageFactor = fx->GetParameterByName(nullptr, "g_DamageFactor");
         if (f.extrusion) fx->SetFloat(f.extrusion, kExtrusion);
         if (e.id == 7 || e.id == 9) {  // class 0x5d3da0, handles 0x5deaa0
             f.lerp = fx->GetParameterByName(nullptr, "g_TextureLerp");
@@ -533,15 +570,18 @@ void CityRenderer::AddPackage(const MdpcPackage& data)
 // | index) and the render id (0x5d68e0, 0x5e0970, first substance);
 // modelSubstance: the model's substance changes (model flag 2 clear).
 CityRenderer::Package::Group CityRenderer::GroupFor(uint32_t material, int id, bool modelSubstance, bool layout,
-                                                   const std::map<uint32_t, int>& byUid)
+                                                   const std::map<uint32_t, int>& byUid, int self, bool vehicle)
 {
     Package::Group gr;
     gr.fx = id;
+    gr.vehicle = vehicle;
     // No substance: the binder's request keeps type 8 (0x5e0900).
     uint8_t s[8] = { 8 };
+    // Package 0xfffd: the model's own (0x5cbea0; the vehicles' materials).
     auto it = byUid.find(material >> 16);
-    if (material != 0xffff0000 && material != 0xcccccccc && it != byUid.end()) {
-        const Package& owner = packages_[it->second];
+    int ownerIndex = (material >> 16) == 0xfffd ? self : it != byUid.end() ? it->second : -1;
+    if (material != 0xffff0000 && material != 0xcccccccc && ownerIndex >= 0) {
+        const Package& owner = packages_[size_t(ownerIndex)];
         uint32_t mi = material & 0xffff;
         if (mi < owner.data->materials.size() && !owner.data->materials[mi].empty()) {
             const MdpcSubstance& sub = owner.data->materials[mi][0];
@@ -555,6 +595,35 @@ CityRenderer::Package::Group CityRenderer::GroupFor(uint32_t material, int id, b
             gr.normalBound = s[6] == 1 || s[6] == 4;
             if (gr.normalBound && sub.textures.size() >= 2 && size_t(sub.textures[1]) < owner.textures.size())
                 gr.normal = owner.textures[sub.textures[1]];
+            if (vehicle) {
+                // 0x5e0b20 by the substance's +0x15: texture n is entry n, or
+                // entry 0 past the count (0x5d8830); nullptr where the game
+                // binds the global texture 0xf00d0004.
+                gr.colourMode = sub.colourMode;
+                gr.textureCount = uint8_t(sub.textures.size());
+                auto tex = [&](size_t n) {
+                    if (sub.textures.empty()) return static_cast<IDirect3DTexture9*>(nullptr);
+                    size_t t = size_t(sub.textures[n < sub.textures.size() ? n : 0]);
+                    return t < owner.textures.size() ? owner.textures[t] : nullptr;
+                };
+                switch (sub.colourMode) {
+                case 0x10:  // 0x5e0b40
+                    gr.clean = tex(0), gr.mask = tex(1), gr.damage = tex(2);
+                    break;
+                case 4:  // 0x5e0bab
+                    gr.clean = tex(0), gr.mask = tex(1), gr.damage = tex(1);
+                    break;
+                case 8:  // 0x5e0c3a
+                    gr.clean = tex(0), gr.damage = tex(1);
+                    break;
+                case 0:  // 0x5e0ce3: only with one texture
+                    if (sub.textures.size() == 1) gr.clean = tex(0);
+                    break;
+                default:  // 0x5e0db3
+                    gr.clean = tex(0), gr.mask = tex(1), gr.damage = tex(2);
+                    break;
+                }
+            }
             // Several substances: their textures (0x5d92b0, 0x5de890).
             if (owner.data->materials[mi].size() > 1 && mi < owner.data->materialFlags.size()) {
                 auto key = std::make_pair(it->second, mi);
@@ -588,22 +657,20 @@ CityRenderer::Package::Group CityRenderer::GroupFor(uint32_t material, int id, b
 }
 
 // The groups of every model's slots 0..4; byUid: package uid -> index into
-// packages_.
-void CityRenderer::ResolveGroups(Package& p, const std::map<uint32_t, int>& byUid)
+// packages_; self: the package itself (uid 0xfffd); vehicle: kind 3.
+void CityRenderer::ResolveGroups(Package& p, const std::map<uint32_t, int>& byUid, int self, bool vehicle)
 {
     p.groupOf.resize(p.data->models.size());
     for (size_t m = 0; m < p.data->models.size(); ++m) {
         const MdpcModel& model = p.data->models[m];
         int id = RenderId(model);
-        bool layout = (DeclIndex(model.vertexType) == 1 || DeclIndex(model.vertexType) == 2) &&
-                      model.vertexBuffer < p.data->vertexBuffers.size() &&
-                      p.data->vertexBuffers[model.vertexBuffer].stride == 48;
+        bool layout = Drawable(model, *p.data);
         p.groupOf[m].resize(5);
         for (int lod = 0; lod < 5; ++lod)
         for (const MdpcSubmesh& sm : model.lods[lod]) {
             std::vector<Package::Group> groups;
             for (const MdpcGroup& g : sm.groups)
-                groups.push_back(GroupFor(g.material, id, !(model.flags & 2), layout, byUid));
+                groups.push_back(GroupFor(g.material, id, !(model.flags & 2), layout, byUid, self, vehicle));
             p.groupOf[m][lod].push_back(std::move(groups));
         }
     }
@@ -612,17 +679,14 @@ void CityRenderer::ResolveGroups(Package& p, const std::map<uint32_t, int>& byUi
     p.shadowSlot.assign(p.data->models.size(), -1);
     for (size_t m = 0; m < p.data->models.size(); ++m) {
         const MdpcModel& model = p.data->models[m];
-        bool layout = (DeclIndex(model.vertexType) == 1 || DeclIndex(model.vertexType) == 2) &&
-                      model.vertexBuffer < p.data->vertexBuffers.size() &&
-                      p.data->vertexBuffers[model.vertexBuffer].stride == 48;
-        if (!layout || !fx_[0x2b].fx) continue;
+        if (!Drawable(model, *p.data) || !fx_[0x2b].fx) continue;
         if (!model.lods[5].empty()) p.shadowSlot[m] = 5;
         else if (!model.lods[6].empty()) p.shadowSlot[m] = 6;
     }
 }
 
 bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first, size_t end, const CityPlacement& city,
-                          const MdpcPackage* sky, const MdpcPackage* sfx)
+                          const MdpcPackage* sky, const MdpcPackage* sfx, const VehicleDraw* vehicle)
 {
     if (!device_) { error_ = "no device"; return false; }
     std::map<uint32_t, int> byUid;  // the table 0x8b5310 (0x57c058)
@@ -800,6 +864,44 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
             treeInfo = buf;
         }
     }
+    // The player's vehicle: its package and the shared vehicle materials
+    // (CarGlobals, uid 0x1d), its groups bound as draw kind 3 (0x5e0b20);
+    // each part an object of its own with the vehicle's World.
+    vehicleParts_.clear();
+    vehicleWorlds_.clear();
+    vehicleInfo.clear();
+    if (vehicle && vehicle->package) {
+        std::map<uint32_t, int> carUid;
+        if (vehicle->globals) {
+            carUid[vehicle->globals->uid] = int(packages_.size());
+            AddPackage(*vehicle->globals);
+        }
+        int car = int(packages_.size());
+        AddPackage(*vehicle->package);
+        ResolveGroups(packages_.back(), carUid, car, true);
+        memcpy(vehicleColour_, vehicle->colour, sizeof(vehicleColour_));
+        vehicleDamage_ = vehicle->damage;
+        std::map<int, size_t> perFx;
+        vehicleWorlds_.reserve(vehicle->parts.size());
+        for (const VehicleDraw::Part& part : vehicle->parts) {
+            if (part.model < 0 || size_t(part.model) >= vehicle->package->models.size()) continue;
+            vehicleWorlds_.emplace_back(part.world, part.world + 16);
+            Instance inst;
+            inst.package = car;
+            inst.model = uint32_t(part.model);
+            inst.world = vehicleWorlds_.back().data();
+            memcpy(inst.centre, part.world + 12, sizeof(inst.centre));
+            for (const auto& sm : packages_[size_t(car)].groupOf[inst.model][0])
+                for (const Package::Group& g : sm) ++perFx[g.fx];
+            vehicleParts_.push_back(int(instances_.size()));
+            instances_.push_back(inst);
+        }
+        for (const auto& e : perFx) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%seffect %d x%zu", vehicleInfo.empty() ? "" : ", ", e.first, e.second);
+            vehicleInfo += buf;
+        }
+    }
     // Instances no quadtree reaches are not drawn (as in the game).
     std::vector<bool> reached(city.instances.size(), false);
     for (const CityCell& c : city.cells)
@@ -894,11 +996,13 @@ void CityRenderer::SetLight(const float ambient[4], const float colour[4], const
 // 0x5e0f20 (per group, from the texture binder): g_envSpecColourAndLerpFactor
 // by effect id from the light state (0x8d6c9c + 0x100, copied by 0x5e1130):
 // ids 2, 3, 5, 6, 0x24, 0x25 the directional colour (colour) with w 0; 0x1d,
-// 0x1f, 0x20, 0x21 the ambient colour with w 0.35; 0x23 zero; 9 and 0xb the
-// light state's +0x140 with w 0: the mood's SHINY_WATER_TINT (the value of
-// the original's water draws, ps c2 = (1, 0.9, 0.73, 0) with Mood33; where
-// the mood copies it to +0x140 is not traced); others unchanged.
-void CityRenderer::SetEnvSpec(const float colour[4])
+// 0x1f, 0x20, 0x21 the light state's +0x100 with w 0.35 (0.35 alone in modes
+// 6 / 7): the mood's CAR_SPECULAR_COLOUR (+0x1d0; the original's car draws
+// have ps c0 = (0.62, 0.58, 0.54, 0.35) with Mood33); 0x23 zero; 9 and 0xb
+// the light state's +0x140 with w 0: the mood's SHINY_WATER_TINT (the value
+// of the original's water draws, ps c2 = (1, 0.9, 0.73, 0) with Mood33;
+// where the mood copies it to +0x140 is not traced); others unchanged.
+void CityRenderer::SetEnvSpec(const float colour[4], bool redraw)
 {
     for (int id = 0; id < 0x30; ++id) {
         Effect& e = fx_[id];
@@ -907,7 +1011,8 @@ void CityRenderer::SetEnvSpec(const float colour[4])
         if (id == 2 || id == 3 || id == 5 || id == 6 || id == 0x24 || id == 0x25)
             v = D3DXVECTOR4(colour[0], colour[1], colour[2], 0);
         else if (id == 0x1d || id == 0x1f || id == 0x20 || id == 0x21)
-            v = D3DXVECTOR4(mood_.ambient[0], mood_.ambient[1], mood_.ambient[2], 0.35f);
+            v = redraw ? D3DXVECTOR4(0, 0, 0, 0.35f)
+                       : D3DXVECTOR4(mood_.carSpecular[0], mood_.carSpecular[1], mood_.carSpecular[2], 0.35f);
         else if (id == 9 || id == 0xb)
             v = D3DXVECTOR4(mood_.shinyWaterTint[0], mood_.shinyWaterTint[1], mood_.shinyWaterTint[2], 0);
         else if (id != 0x23)
@@ -925,6 +1030,7 @@ void CityRenderer::DrawGroup(const Package& p, const MdpcModel& m, const MdpcGro
     BindGroup(info, state, world, applied, alpha, substance);
     IDirect3DVertexBuffer9* vb = p.vbs[m.vertexBuffer];
     if (!vb || !p.ib) return;
+    SetDecl(DeclIndex(m.vertexType) == 5 ? decl5_ : decl_);
     device_->SetStreamSource(0, vb, 0, p.data->vertexBuffers[m.vertexBuffer].stride);
     device_->SetIndices(p.ib);
     // 0x5dfe20: the group's six DrawIndexedPrimitive values.
@@ -970,6 +1076,32 @@ void CityRenderer::BindGroup(const Package::Group& info, int state, const float 
     }
     if (e.diffuse) e.fx->SetTexture(e.diffuse, diffuse ? diffuse : white_);
     if (e.normalMap) e.fx->SetTexture(e.normalMap, normal ? normal : white_);
+    if (info.vehicle) {
+        if (e.clean) e.fx->SetTexture(e.clean, info.clean ? info.clean : white_);
+        if (e.damageTex) e.fx->SetTexture(e.damageTex, info.damage ? info.damage : white_);
+        if (e.mask) e.fx->SetTexture(e.mask, info.mask ? info.mask : white_);
+        // 0x5defb0: g_DamageFactor = (damage, damage, 0, 0) (object +0x70).
+        if (e.damageFactor) {
+            const D3DXVECTOR4 d(vehicleDamage_, vehicleDamage_, 0, 0);
+            e.fx->SetVector(e.damageFactor, &d);
+        }
+        // 0x5df200 by the substance's +0x15: 0 (one texture only) (1, 1, 1,
+        // 0); 4 (colour, 0); 8 (0.5, 0.5, 0.5, damage); 0x10 (colour,
+        // damage), the colour being the object's +0x50; others unchanged.
+        if (e.colourWeights) {
+            const float* c = vehicleColour_;
+            D3DXVECTOR4 w;
+            bool set = true;
+            switch (info.colourMode) {
+            case 0: w = D3DXVECTOR4(1, 1, 1, 0); set = info.textureCount == 1; break;
+            case 4: w = D3DXVECTOR4(c[0], c[1], c[2], 0); break;
+            case 8: w = D3DXVECTOR4(0.5f, 0.5f, 0.5f, vehicleDamage_); break;
+            case 0x10: w = D3DXVECTOR4(c[0], c[1], c[2], vehicleDamage_); break;
+            default: set = false; break;
+            }
+            if (set) e.fx->SetVector(e.colourWeights, &w);
+        }
+    }
     e.fx->CommitChanges();
     if (state != applied) {
         ApplyState(states_[state]);
@@ -1248,6 +1380,7 @@ void CityRenderer::DrawShadowAlpha(int& applied)
         ++frameDraws;
     }
     device_->SetVertexDeclaration(decl_);
+    currentDecl_ = decl_;
 }
 
 // 0x5616c0: each buffer object with vertices draws its list (D3DPT_TRIANGLELIST,
@@ -1515,6 +1648,7 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
     const D3DXVECTOR4 cam(eye[0], eye[1], eye[2], 1.0f);
     if (camPos_) shared_->SetVector(camPos_, &cam);
     device_->SetVertexDeclaration(decl_);
+    currentDecl_ = decl_;
     // 0x5dc35a: s_TextureEnvironment / s_TextureShine = the cubes when there
     // are (else the texture the caller passes; here the white one).
     if (envTex_) shared_->SetTexture(envTex_, cubes_[1] ? static_cast<IDirect3DBaseTexture9*>(cubes_[1]) : white_);
@@ -1593,6 +1727,14 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
         submitted.push_back({ idx, lod });
         ++frameWater;
     }
+    // The player's vehicle: every part with mask 0x22 (slot 0, whose mask
+    // 0x1e has bit 2, and the shadow volume; the vehicle's own detail choice
+    // was not traced: the traced start frames draw slot 0).
+    for (int idx : vehicleParts_) {
+        Lod lod;
+        lod.mask = 0x22;
+        submitted.push_back({ idx, lod });
+    }
 
     // The scene's lists (0x5d2ca0): 0 = items, 1 = volumes, 2 = late. Each
     // submitted object draws the slots 0..4 whose mask shares a bit with
@@ -1616,7 +1758,7 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
         const MdpcModel& m = p.data->models[inst.model];
         Object o;
         o.inst = &inst;
-        memcpy(o.world, inst.in->world, sizeof(o.world));
+        memcpy(o.world, inst.world ? inst.world : inst.in->world, sizeof(o.world));
         if (s.lod.offset != 0.0f) {  // 0x4def90: away from the camera
             float d[3] = { o.world[12] - eye[0], o.world[13] - eye[1], o.world[14] - eye[2] };
             float n = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
@@ -1706,7 +1848,10 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
                 const Object& o = objects[it.object];
                 const Package& p = packages_[o.inst->package];
                 float world[16];
-                worldOf(o.world, *it.sm, world);
+                // A vehicle part: its World alone (the traced draws have it as
+                // g_ObjectToWorld with the vertices as stored).
+                if (o.inst->world) Transpose(o.world, world);
+                else worldOf(o.world, *it.sm, world);
                 DrawGroup(p, p.data->models[o.inst->model], *it.g, *it.info, state, world, applied, o.alpha,
                           o.inst->substance);
                 if (redraw) ++frameRedraws;
@@ -1726,6 +1871,7 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
     size_t firstBlended = 0;
     while (firstBlended < items.size() && !states_[items[firstBlended].info->state].blend) ++firstBlended;
     drawRange(items, 0, firstBlended, false);
+    SetDecl(decl_);  // the buffer objects' vertices have declaration 1
     DrawFar(eye, back, applied);
     DrawShore(false, applied);
     drawRange(items, firstBlended, items.size(), false);
@@ -1743,7 +1889,7 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
                 const Package& p = packages_[inst->package];
                 const MdpcModel& m = p.data->models[inst->model];
                 float world[16];
-                VolumeWorld(*inst->in, objects[oi].world, eye, world);
+                VolumeWorld(inst->in ? inst->in->model : kVehicleModelId, objects[oi].world, eye, world);
                 for (const MdpcSubmesh& sm : m.lods[p.shadowSlot[inst->model]]) {
                     for (const MdpcGroup& g : sm.groups) {
                         DrawGroup(p, m, g, volume, shadowState_[pass], world, applied);
@@ -1758,8 +1904,9 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
         // (0x5dc1e0), list 0 in mode 7 / 6, then the colour back.
         static const float kZero[4] = {};
         SetLight(mood_.ambient, kZero, dir);
-        SetEnvSpec(kZero);
+        SetEnvSpec(kZero, true);
         DrawShadowAlpha(applied);
+        SetDecl(decl_);
         DrawTreeShadows(applied);
         drawList(items, true);  // (the shore strips are not redrawn: mode 2 only in the trace)
         SetLight(mood_.ambient, mood_.directional, dir);
@@ -1832,6 +1979,12 @@ void CityRenderer::Release()
     if (shared_) shared_->Release();
     if (pool_) pool_->Release();
     if (decl_) decl_->Release();
+    if (decl5_) decl5_->Release();
+    decl5_ = nullptr;
+    currentDecl_ = nullptr;
+    vehicleParts_.clear();
+    vehicleWorlds_.clear();
+    vehicleInfo.clear();
     if (white_) white_->Release();
     shared_ = nullptr;
     pool_ = nullptr;

@@ -78,6 +78,12 @@ struct MdpcVertexBuffer
 struct MdpcSubstance
 {
     uint8_t bytes[8] = {};
+    // The file's byte 7 before the conversion: the runtime substance's
+    // +0x15 that the vehicle binders switch on (0x5e0b20 textures, 0x5df200
+    // g_colourWeightsVec: 0, 4, 8, 0x10); inferred from every traced car
+    // draw (vehicle 6 and CarGlobals), where the conversion keeps it was
+    // not traced.
+    uint8_t colourMode = 0;
     // +0x10 / +0x14: offsets of its texture entries (index into
     // MdpcPackage::textures); 0x5e0af0 binds the first as the diffuse
     // texture, 0x5e0e70 the second as the normal map.

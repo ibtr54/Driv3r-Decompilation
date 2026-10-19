@@ -272,6 +272,7 @@ bool MdpcPackage::Load(const std::vector<uint8_t>& file, size_t mdpc, size_t siz
                 MdpcSubstance sub;
                 if (h.Has(so, 8)) {
                     memcpy(sub.bytes, &file[mdpc + so], 8);
+                    sub.colourMode = sub.bytes[7];
                     ConvertSubstance(sub.bytes);
                 }
                 uint32_t refs = h.U32(so + 0x10), refCount = h.U32(so + 0x14);

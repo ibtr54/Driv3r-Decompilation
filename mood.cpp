@@ -72,6 +72,10 @@ bool Mood::Load(const std::string& path)
             sscanf(l, "SHORE_WAVE_INTENSITY: %f", &shoreWave[3]);
         } else if (is(l, "SEA_COLOUR")) {
             sscanf(l, "SEA_COLOUR: %d", &seaColour);
+        } else if (is(l, "CAR_SPECULAR_COLOUR")) {
+            rgb(l, "CAR_SPECULAR_COLOUR: %f, %f, %f", carSpecular, 1);
+        } else if (is(l, "CAR_SPECULAR_INTENSITY")) {
+            sscanf(l, "CAR_SPECULAR_INTENSITY: %f", &carSpecular[3]);
         } else if (is(l, "SHINY_WATER_TINT")) {
             rgb(l, "SHINY_WATER_TINT: %f, %f, %f", shinyWaterTint, 1);
         }
