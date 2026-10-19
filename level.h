@@ -108,6 +108,9 @@ public:
     bool Frame(D3DCOLOR clear, const std::function<void(IDirect3DDevice9*)>& draw = nullptr);
     IDirect3DDevice9* Device() const { return device_; }
     float Aspect() const;
+    // The back buffer keeps alpha (A8R8G8B8, as the game asks: the shadow
+    // redraw blends by the destination alpha); false: the desktop's format.
+    bool HasAlpha() const { return alpha_; }
     // Called around a device reset (effects must release and recreate
     // their default-pool resources).
     std::function<void()> onLost, onReset;
@@ -118,5 +121,6 @@ private:
     IDirect3D9* d3d_ = nullptr;
     IDirect3DDevice9* device_ = nullptr;
     D3DPRESENT_PARAMETERS pp_ = {};
+    bool alpha_ = false;
     std::string error_;
 };

@@ -622,7 +622,7 @@ void CityRenderer::ResolveGroups(Package& p, const std::map<uint32_t, int>& byUi
 }
 
 bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first, size_t end, const CityPlacement& city,
-                          const MdpcPackage* sky)
+                          const MdpcPackage* sky, const MdpcPackage* sfx)
 {
     if (!device_) { error_ = "no device"; return false; }
     std::map<uint32_t, int> byUid;  // the table 0x8b5310 (0x57c058)
@@ -637,6 +637,11 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
     static const uint8_t kVolume[8] = { 8 };
     shadowState_[0] = StateFor(kVolume, 4);
     shadowState_[1] = StateFor(kVolume, 5);
+    // The screen quads of the shadow pass: types 2 (preset 0x20) and 3 (0x1f),
+    // requests of mode 7 (no mode preset for types 2..4).
+    static const uint8_t kQuad[2][8] = { { 2 }, { 3 } };
+    alphaState_[0] = StateFor(kQuad[0], 7);
+    alphaState_[1] = StateFor(kQuad[1], 7);
     // The sky's materials are its own (uid 0x34; city packages may use the
     // same small uid).
     skyInfo.clear();
@@ -750,6 +755,49 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
                      unsigned(city.water.textures[0]), shoreGroup_.fx, unsigned(states_[shoreGroup_.state].base),
                      shoreSlots_, shoreMaxVerts_);
             shoreInfo = buf;
+        }
+    }
+    // The far quad (0x450d90, once there are tiles): the manager's create
+    // (0x57b180) with 1 strip of 4 vertices and the water's reference 6
+    // (0x450fd0: 0xffff0000 past the texture count; Miami 0x424, type 9),
+    // drawn as kind 0xa like the shore: render id 1.
+    farInfo.clear();
+    if (!city.water.tiles.empty()) {
+        uint32_t ref = city.water.textures.size() > 6 ? city.water.textures[6] : 0xffff0000u;
+        farGroup_ = GroupFor(ref, 1, false, true, byUid);
+        if (farGroup_.fx >= 0 &&
+            SUCCEEDED(device_->CreateVertexBuffer(4 * 48, D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, &farVb_, nullptr))) {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "material 0x%x, effect %d, preset 0x%02x", unsigned(ref), farGroup_.fx,
+                     unsigned(states_[farGroup_.state].base));
+            farInfo = buf;
+        }
+    }
+    // The tree shadows (0x5613f0, not for a night ride): three buffer
+    // objects of the manager with sfx.pmu's materials 0x1f0016, 0x1f0016 and
+    // 0x1f0015 (0x800, 0x800, 0x100 vertices), drawn as kind 0xa: render id 1.
+    // The device buffer holds the triangle list: 1.5 x the written vertices.
+    treeInfo.clear();
+    trees_.Reset();
+    if (sfx && sfx->uid == 0x1f && timeOfDay_ != 3) {
+        int sfxPackage = int(packages_.size());
+        AddPackage(*sfx);
+        const std::map<uint32_t, int> sfxUid = { { sfx->uid, sfxPackage } };
+        static const uint32_t kMaterial[3] = { 0x1f0016, 0x1f0016, 0x1f0015 };
+        static const UINT kWritten[3] = { 0x800, 0x800, 0x100 };
+        for (int b = 0; b < 3; ++b) {
+            treeGroup_[b] = GroupFor(kMaterial[b], 1, false, true, sfxUid);
+            if (treeGroup_[b].fx < 0 ||
+                FAILED(device_->CreateVertexBuffer(kWritten[b] * 3 / 2 * 48, D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED,
+                                                   &treeVb_[b], nullptr)))
+                treeVb_[b] = nullptr;
+        }
+        if (treeVb_[0] && treeVb_[2]) {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "materials 0x1f0016 / 0x1f0015, effect %d / %d, type %d / %d, preset 0x%02x / 0x%02x",
+                     treeGroup_[0].fx, treeGroup_[2].fx, int(treeGroup_[0].type), int(treeGroup_[2].type),
+                     unsigned(states_[treeGroup_[0].state].base), unsigned(states_[treeGroup_[2].state].base));
+            treeInfo = buf;
         }
     }
     // Instances no quadtree reaches are not drawn (as in the game).
@@ -1070,6 +1118,261 @@ void CityRenderer::DrawShore(bool redraw, int& applied)
     if (!redraw) frameShore = shoreDrawn_;
 }
 
+// 0x451030 (camera matrix, SEA_COLOUR index, water height), part 1: the
+// camera's row 2 (back) flattened (y = 0) and normalized (0x417ea0) is f;
+// 0x41ea80 gives the World rows f x up = (-f.z, 0, f.x), (0, 1, 0), f and
+// the position eye - 4000 f with y = 0 (0x78f048 = -4000). In it the strip
+// (-4800, top), (4800, top), (-4800, bottom), (4800, bottom), z 0, normal
+// (0, 1, 0), uv (0, 0), (1, 0), (0, 1), (1, 1), colour (1, 1, 1, 0) where
+// declaration 1 has the tangent; top = eye.y x (1/6750) x 2750 + 2
+// (0x78f044, 0x78f040, 0x78e8bc), bottom = height - 2: a wall from below
+// the sea up to the camera's horizon. Type 9 -> preset 0x1e: colour writes
+// off, so it only writes depth (at 4000 units the sea behind it is less
+// than a pixel high). Drawn through the buffer object's vtbl+0x10 (0x57b490:
+// kind 0xa) before the shore; its lock (vtbl+8, 0x57b430) is the static
+// 0x7ec220, copied to the device buffer at the unlock (0x57b440). Checked
+// in the traces (boat, start point 3): type 9, mode 2 only, a 2-triangle
+// strip, World (-1, 0, 0), (0, 1, 0), (0, 0, 1), (cam.x, 0, cam.z - 4000)
+// for a camera looking along -z, ZENABLE 1, ZFUNC 4, ZWRITE 1,
+// COLORWRITEENABLE 0, SRCALPHA / INVSRCALPHA, fog off, alpha test, CULL 2,
+// g_fAlpha 0.65098; the vertices as built here (top 1.58915 for s_CamPos.y
+// -1.00845, bottom -4.5).
+void CityRenderer::DrawFar(const float eye[3], const float back[3], int& applied)
+{
+    frameFar = false;
+    const Package::Group& info = farGroup_;
+    if (!farVb_ || !city_ || info.fx < 0 || info.state < 0 || !DrawnInMode(info.type, 2)) return;    float f[3] = { back[0], 0.0f, back[2] };
+    float len = std::sqrt(f[0] * f[0] + f[2] * f[2]);
+    if (len <= 0.0f) return;
+    f[0] /= len;
+    f[2] /= len;
+    const float object[16] = {
+        -f[2], 0, f[0], 0,
+        0, 1, 0, 0,
+        f[0], 0, f[2], 0,
+        f[0] * -4000.0f + eye[0], 0, f[2] * -4000.0f + eye[2], 1,
+    };
+    float world[16];
+    Transpose(object, world);  // as for every object (0x5de4e0)
+    uint32_t bits = 0x391b5837;  // 0x78f044
+    float k;
+    memcpy(&k, &bits, 4);
+    const float top = eye[1] * k * 2750.0f + 2.0f, bottom = city_->water.height - 2.0f;
+    struct Vertex { float pos[3], normal[3], uv[2], colour[4]; };
+    static_assert(sizeof(Vertex) == 48, "far vertex");
+    const Vertex quad[4] = {
+        { { -4800.0f, top, 0 }, { 0, 1, 0 }, { 0, 0 }, { 1, 1, 1, 0 } },
+        { { 4800.0f, top, 0 }, { 0, 1, 0 }, { 1, 0 }, { 1, 1, 1, 0 } },
+        { { -4800.0f, bottom, 0 }, { 0, 1, 0 }, { 0, 1 }, { 1, 1, 1, 0 } },
+        { { 4800.0f, bottom, 0 }, { 0, 1, 0 }, { 1, 1 }, { 1, 1, 1, 0 } },
+    };
+    void* ptr = nullptr;
+    if (FAILED(farVb_->Lock(0, sizeof(quad), &ptr, 0))) return;
+    memcpy(ptr, quad, sizeof(quad));
+    farVb_->Unlock();
+    Effect& e = fx_[info.fx];
+    UINT passes = 0;
+    if (FAILED(e.fx->Begin(&passes, D3DXFX_DONOTSAVESTATE)) || FAILED(e.fx->BeginPass(0))) return;
+    uint32_t alphaBits = 0x3f26a6a7;  // g_fAlpha as traced (see DrawShore)
+    float alpha;
+    memcpy(&alpha, &alphaBits, 4);
+    BindGroup(info, info.state, world, applied, alpha, 0);
+    device_->SetStreamSource(0, farVb_, 0, 48);
+    device_->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2);
+    ++frameDraws;
+    e.fx->EndPass();
+    e.fx->End();
+    frameFar = true;
+}
+
+// The ground for the tree shadows: the slot 0 triangles of the groups drawn
+// opaque in mode 2, of the instances whose centre is within 320 units of
+// (x, z), in 4-unit squares over 520 x 520 units around it.
+void CityRenderer::BuildGround(float x, float z)
+{
+    const float kHalf = 260.0f, kCell = 4.0f;
+    groundSide_ = int(2 * kHalf / kCell);
+    groundOrigin_[0] = x - kHalf;
+    groundOrigin_[1] = z - kHalf;
+    groundTris_.clear();
+    groundGrid_.assign(size_t(groundSide_) * size_t(groundSide_), {});
+    std::vector<uint32_t> t;
+    for (const Instance& inst : instances_) {
+        float dx = inst.centre[0] - x, dz = inst.centre[2] - z;
+        if (dx * dx + dz * dz > 320.0f * 320.0f) continue;
+        const Package& p = packages_[size_t(inst.package)];
+        const MdpcModel& m = p.data->models[inst.model];
+        if (m.vertexBuffer >= p.data->vertexBuffers.size()) continue;
+        const MdpcVertexBuffer& vb = p.data->vertexBuffers[m.vertexBuffer];
+        for (size_t s = 0; s < m.lods[0].size() && s < p.groupOf[inst.model][0].size(); ++s) {
+            const MdpcSubmesh& sm = m.lods[0][s];
+            for (size_t gi = 0; gi < sm.groups.size(); ++gi) {
+                const Package::Group& info = p.groupOf[inst.model][0][s][gi];
+                if (info.fx < 0 || !DrawnInMode(info.type, 2) || states_[info.state].blend) continue;
+                t.clear();
+                p.data->Triangles(sm.groups[gi], t);
+                for (size_t i = 0; i + 2 < t.size(); i += 3) {
+                    GroundTri tri;
+                    bool ok = true;
+                    for (int c = 0; c < 3 && ok; ++c) {
+                        if (t[i + c] >= vb.count) { ok = false; break; }
+                        float ms[3];
+                        sm.Transform(vb.Position(t[i + c]), ms);
+                        inst.in->Transform(ms, tri.p[c]);
+                    }
+                    if (!ok) continue;
+                    float e1[3], e2[3];
+                    for (int k = 0; k < 3; ++k) {
+                        e1[k] = tri.p[1][k] - tri.p[0][k];
+                        e2[k] = tri.p[2][k] - tri.p[0][k];
+                    }
+                    float n[3] = { e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0] };
+                    float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                    if (len <= 0 || std::fabs(n[1]) < 0.1f * len) continue;  // walls: never under a point
+                    float sign = n[1] < 0 ? -1.0f : 1.0f;
+                    for (int k = 0; k < 3; ++k) tri.n[k] = n[k] * sign / len;
+                    float lo[2] = { 1e30f, 1e30f }, hi[2] = { -1e30f, -1e30f };
+                    for (int c = 0; c < 3; ++c) {
+                        lo[0] = std::min(lo[0], tri.p[c][0]); hi[0] = std::max(hi[0], tri.p[c][0]);
+                        lo[1] = std::min(lo[1], tri.p[c][2]); hi[1] = std::max(hi[1], tri.p[c][2]);
+                    }
+                    int c0 = std::max(0, int(std::floor((lo[0] - groundOrigin_[0]) / kCell)));
+                    int c1 = std::min(groundSide_ - 1, int(std::floor((hi[0] - groundOrigin_[0]) / kCell)));
+                    int r0 = std::max(0, int(std::floor((lo[1] - groundOrigin_[1]) / kCell)));
+                    int r1 = std::min(groundSide_ - 1, int(std::floor((hi[1] - groundOrigin_[1]) / kCell)));
+                    if (c0 > c1 || r0 > r1) continue;
+                    uint32_t index = uint32_t(groundTris_.size());
+                    groundTris_.push_back(tri);
+                    for (int r = r0; r <= r1; ++r)
+                        for (int c = c0; c <= c1; ++c) groundGrid_[size_t(r) * groundSide_ + c].push_back(index);
+                }
+            }
+        }
+    }
+}
+
+// The highest ground surface at (x, z) not above y, and its up normal.
+bool CityRenderer::GroundAt(float x, float y, float z, float& height, float normal[3]) const
+{
+    int c = int(std::floor((x - groundOrigin_[0]) / 4.0f)), r = int(std::floor((z - groundOrigin_[1]) / 4.0f));
+    if (c < 0 || r < 0 || c >= groundSide_ || r >= groundSide_) return false;
+    bool found = false;
+    for (uint32_t i : groundGrid_[size_t(r) * groundSide_ + c]) {
+        const GroundTri& t = groundTris_[i];
+        const float* a = t.p[0];
+        const float* b = t.p[1];
+        const float* d = t.p[2];
+        float den = (b[2] - d[2]) * (a[0] - d[0]) + (d[0] - b[0]) * (a[2] - d[2]);
+        if (std::fabs(den) < 1e-9f) continue;
+        float u = ((b[2] - d[2]) * (x - d[0]) + (d[0] - b[0]) * (z - d[2])) / den;
+        float v = ((d[2] - a[2]) * (x - d[0]) + (a[0] - d[0]) * (z - d[2])) / den;
+        if (u < 0 || v < 0 || u + v > 1) continue;
+        float h = u * a[1] + v * b[1] + (1 - u - v) * d[1];
+        if (h > y || (found && h <= height)) continue;
+        height = h;
+        memcpy(normal, t.n, sizeof(t.n));
+        found = true;
+    }
+    return found;
+}
+
+// 0x5616f0 with the camera's x / z as the point (the game passes the
+// player's); the ground is collected at the first probe of a rebuild.
+void CityRenderer::UpdateTreeShadows(const float eye[3])
+{
+    if (!treeVb_[0] || !city_) return;
+    const float point[2] = { eye[0], eye[2] };
+    bool ground = false;
+    auto probe = [&](float x, float y, float z, float& h, float n[3]) {
+        if (!ground) {
+            BuildGround(point[0], point[1]);
+            ground = true;
+        }
+        return GroundAt(x, y, z, h, n);
+    };
+    if (!trees_.Update(*city_, point, mood_.direction, probe)) return;
+    for (int b = 0; b < 3; ++b) {
+        if (!treeVb_[b] || trees_.list[b].empty()) continue;
+        void* ptr = nullptr;
+        UINT bytes = UINT(trees_.list[b].size() * sizeof(TreeShadowVertex));
+        if (SUCCEEDED(treeVb_[b]->Lock(0, bytes, &ptr, 0))) {
+            memcpy(ptr, trees_.list[b].data(), bytes);
+            treeVb_[b]->Unlock();
+        }
+    }
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+             "at (%.1f, %.1f): %d trees found, %d without ground; buffers %d / %d / %d trees, %d / %d / %d triangles "
+             "drawn; ground %zu triangles",
+             point[0], point[1], trees_.found, trees_.noGround, trees_.trees[0], trees_.trees[1], trees_.trees[2],
+             trees_.triangles[0], trees_.triangles[1], trees_.triangles[2], groundTris_.size());
+    treeBuild = buf;
+}
+
+// The shadow pass's two screen quads (traced at the start of mode 7, from the
+// buffer object path 0x5dfe4d, owner not decoded): six vertices each of
+// 24 bytes, clip-space corners (+-1, +-1, 0), a D3DCOLOR and uv; type 2
+// (preset 0x20: z ALWAYS, colour writes alpha only, no stencil test) with
+// colour 0x00ffffff, then type 3 (0x1f: the same where stencil >= 1) with
+// 0xffffffff. So the destination alpha is 0, and 1 in the volumes' shadow;
+// the tree shadows add to it and the mode 7 redraw blends the shadowed
+// colour by it (DESTALPHA / INVDESTALPHA). Drawn here without an effect
+// (pre-transformed, alpha from the vertex colour: the same values written).
+void CityRenderer::DrawShadowAlpha(int& applied)
+{
+    D3DVIEWPORT9 vp = {};
+    device_->GetViewport(&vp);
+    struct Q { float x, y, z, rhw; D3DCOLOR c; };
+    const float x0 = float(vp.X) - 0.5f, y0 = float(vp.Y) - 0.5f, x1 = x0 + float(vp.Width), y1 = y0 + float(vp.Height);
+    device_->SetVertexShader(nullptr);
+    device_->SetPixelShader(nullptr);
+    device_->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+    device_->SetTexture(0, nullptr);
+    device_->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    device_->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+    device_->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    device_->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+    for (int k = 0; k < 2; ++k) {
+        if (alphaState_[k] < 0) continue;
+        ApplyState(states_[alphaState_[k]]);
+        applied = alphaState_[k];
+        // Cull mode 1 (none) in the trace; the preset leaves the default.
+        device_->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+        rsValid_[D3DRS_CULLMODE] = false;
+        D3DCOLOR c = k == 0 ? 0x00ffffff : 0xffffffff;
+        const Q quad[4] = { { x0, y0, 0, 1, c }, { x1, y0, 0, 1, c }, { x0, y1, 0, 1, c }, { x1, y1, 0, 1, c } };
+        device_->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Q));
+        ++frameDraws;
+    }
+    device_->SetVertexDeclaration(decl_);
+}
+
+// 0x5616c0: each buffer object with vertices draws its list (D3DPT_TRIANGLELIST,
+// World identity) with its group's states (type 4 -> preset 0x27: stencil
+// REPLACE 1, colour writes alpha only, SRCALPHA / ONE). The game draws them
+// as mode 7 requests, before the list 0 redraw (the trace's order).
+void CityRenderer::DrawTreeShadows(int& applied)
+{
+    frameTreeTriangles = 0;
+    static const float kIdentity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    for (int b = 0; b < 3; ++b) {
+        const Package::Group& info = treeGroup_[b];
+        int n = trees_.triangles[b];
+        if (!treeVb_[b] || n <= 0 || info.fx < 0 || !DrawnInMode(info.type, 7)) continue;
+        n = std::min(n, int(trees_.list[b].size() / 3));
+        Effect& e = fx_[info.fx];
+        UINT passes = 0;
+        if (FAILED(e.fx->Begin(&passes, D3DXFX_DONOTSAVESTATE)) || FAILED(e.fx->BeginPass(0))) continue;
+        BindGroup(info, info.state, kIdentity, applied, 1.0f, 0);
+        device_->SetStreamSource(0, treeVb_[b], 0, sizeof(TreeShadowVertex));
+        device_->DrawPrimitive(D3DPT_TRIANGLELIST, 0, UINT(n));
+        ++frameDraws;
+        frameTreeTriangles += n;
+        e.fx->EndPass();
+        e.fx->End();
+    }
+}
+
 // 0x5cdb20: a cube texture from a material's six substances: edge and
 // format of the first one's texture, one level, managed; face i (+x, -x,
 // +y, -y, +z, -z) = substance i's first texture, copied by
@@ -1343,6 +1646,8 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
         shared_->SetMatrix(worldToEnv_, reinterpret_cast<const D3DXMATRIX*>(mt));
     }
 
+    frameTreeTriangles = 0;
+    UpdateTreeShadows(eye);
     // The cells (0x4e7e30): every cell's quadtree from its root, the GESR
     // in mode 3, the others in mode 1.
     View v;
@@ -1509,15 +1814,16 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
     };
     auto drawList = [&](const std::vector<Item>& list, bool redraw) { drawRange(list, 0, list.size(), redraw); };
 
-    // List 0 in mode 2. The shore strips (type 0x0e) come between the
-    // opaque and the blended groups: in the trace they follow the far quad
-    // (type 9) and come before the sea tiles' type 0x0f groups (stand-in for
-    // the scene's sort order, which was not decoded).
+    // List 0 in mode 2. The far quad (type 9) and the shore strips (type
+    // 0x0e) come between the opaque and the blended groups: in the traces the
+    // far quad comes first, then the shore, then the sea tiles' type 0x0f
+    // groups (stand-in for the scene's sort order, which was not decoded).
     UpdateShore(eye);
     frameShore = 0;
     size_t firstBlended = 0;
     while (firstBlended < items.size() && !states_[items[firstBlended].info->state].blend) ++firstBlended;
     drawRange(items, 0, firstBlended, false);
+    DrawFar(eye, back, applied);
     DrawShore(false, applied);
     drawRange(items, firstBlended, items.size(), false);
     if (!volumes.empty()) {
@@ -1550,6 +1856,8 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
         static const float kZero[4] = {};
         SetLight(mood_.ambient, kZero, dir);
         SetEnvSpec(kZero);
+        DrawShadowAlpha(applied);
+        DrawTreeShadows(applied);
         drawList(items, true);  // (the shore strips are not redrawn: mode 2 only in the trace)
         SetLight(mood_.ambient, mood_.directional, dir);
         SetEnvSpec(mood_.directional);
@@ -1588,6 +1896,17 @@ void CityRenderer::Release()
     waterTiles_.clear();
     if (shoreVb_) shoreVb_->Release();
     shoreVb_ = nullptr;
+    if (farVb_) farVb_->Release();
+    farVb_ = nullptr;
+    farInfo.clear();
+    for (IDirect3DVertexBuffer9*& b : treeVb_) {
+        if (b) b->Release();
+        b = nullptr;
+    }
+    treeInfo.clear();
+    treeBuild.clear();
+    groundTris_.clear();
+    groundGrid_.clear();
     shoreSlots_ = shoreMaxVerts_ = shoreDrawn_ = 0;
     shoreCache_.clear();
     shoreVerts_.clear();

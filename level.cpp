@@ -177,7 +177,14 @@ bool D3DView::Open(HWND hwnd)
     pp_ = {};
     pp_.Windowed = TRUE;
     pp_.SwapEffect = D3DSWAPEFFECT_DISCARD;
-    pp_.BackBufferFormat = D3DFMT_UNKNOWN;  // the desktop's format; size from the client area
+    // The game asks for A8R8G8B8 (traced: format 21): the shadow pass keeps
+    // its strength in the destination alpha. Windowed that needs the
+    // conversion to the desktop's format; without it the desktop's format.
+    // Size from the client area.
+    D3DDISPLAYMODE mode = {};
+    alpha_ = SUCCEEDED(d3d_->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &mode)) &&
+             SUCCEEDED(d3d_->CheckDeviceType(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, mode.Format, D3DFMT_A8R8G8B8, TRUE));
+    pp_.BackBufferFormat = alpha_ ? D3DFMT_A8R8G8B8 : D3DFMT_UNKNOWN;
     pp_.hDeviceWindow = hwnd;
     pp_.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
     pp_.EnableAutoDepthStencil = TRUE;
@@ -187,6 +194,12 @@ bool D3DView::Open(HWND hwnd)
     if (FAILED(hr))
         hr = d3d_->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp_,
                                 &device_);
+    if (FAILED(hr) && alpha_) {
+        alpha_ = false;
+        pp_.BackBufferFormat = D3DFMT_UNKNOWN;
+        hr = d3d_->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp_,
+                                &device_);
+    }
     if (FAILED(hr)) {
         char msg[64];
         snprintf(msg, sizeof(msg), "CreateDevice failed (0x%08lx)", hr);

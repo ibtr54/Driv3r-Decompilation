@@ -70,6 +70,7 @@
 #include "city.h"
 #include "mdpc.h"
 #include "mood.h"
+#include "treeshadow.h"
 
 // The camera's view-projection (+0xc0 = view +0x40 x projection +0x80,
 // 0x57ce50): right-handed look-at (y up) times the game's projection, row
@@ -90,10 +91,11 @@ public:
     ~CityRenderer() { Release(); }
     // Loads the effects out of the game's executable.
     bool Init(IDirect3DDevice9* device, const std::string& exePath);
-    // The city's packages (packages[first, end)), its placement and the
-    // sky dome's package (nullptr: no sky).
+    // The city's packages (packages[first, end)), its placement, the sky
+    // dome's package (nullptr: no sky) and sfx.pmu's (uid 0x1f: the tree
+    // shadow materials; nullptr: no tree shadows).
     bool Upload(const std::vector<MdpcPackage>& packages, size_t first, size_t end, const CityPlacement& city,
-                const MdpcPackage* sky = nullptr);
+                const MdpcPackage* sky = nullptr, const MdpcPackage* sfx = nullptr);
     // The level's light, fog and sky matrix (used from the next Draw).
     void SetMood(const Mood& mood) { mood_ = mood; }
     // The profile's Shadows setting (+0xc8c).
@@ -135,7 +137,15 @@ public:
     size_t waterGroups = 0, frameWater = 0;
     // Shore lines with at least two points, and last frame's drawn lines.
     size_t shoreLines = 0, frameShore = 0;
-    std::string shoreInfo;  // the shore material's effect / preset ("": none)    // Placed models with a shadow volume, groups in list 2, groups whose
+    std::string shoreInfo;  // the shore material's effect / preset ("": none)
+    // The far quad's material / effect / preset ("": none), last frame drawn.
+    std::string farInfo;
+    bool frameFar = false;
+    // The tree shadows' materials / effects / presets ("": none); the last
+    // rebuild ("": none yet, cleared when logged) and last frame's triangles.
+    std::string treeInfo, treeBuild;
+    int frameTreeTriangles = 0;
+    // Placed models with a shadow volume, groups in list 2, groups whose
     // type (0..5) keeps them out of mode 2; last frame's shadow volume and
     // shadow redraw draw calls.
     size_t shadowInstances = 0, lateGroups = 0, hiddenGroups = 0, frameShadowDraws = 0, frameRedraws = 0;
@@ -236,6 +246,18 @@ private:
     void UpdateShore(const float eye[3]);
     void BuildShoreStrip(const ShoreLine& line, char* out, float a, float b, float alpha) const;
     void DrawShore(bool redraw, int& applied);
+    // The far quad (0x451030 part 1): a wall 4000 units ahead of the camera.
+    void DrawFar(const float eye[3], const float back[3], int& applied);
+    // The tree shadows (treeshadow.h): rebuilt around the camera's x / z
+    // when it has moved far enough, drawn in the mode 7 pass before the
+    // redraw. Ground: the highest opaque slot 0 surface (Ground*).
+    void UpdateTreeShadows(const float eye[3]);
+    void DrawTreeShadows(int& applied);
+    // The two screen quads before the tree shadows (type 2: alpha 0
+    // everywhere; type 3: alpha 1 where the volumes left stencil >= 1).
+    void DrawShadowAlpha(int& applied);
+    void BuildGround(float x, float z);
+    bool GroundAt(float x, float y, float z, float& height, float normal[3]) const;
     void DrawGroup(const Package& p, const MdpcModel& m, const MdpcGroup& g, const Package::Group& info, int state,
                    const float world[16], int& applied, float alpha = 1.0f, uint32_t substance = 0);
     void BindGroup(const Package::Group& info, int state, const float world[16], int& applied, float alpha,
@@ -292,6 +314,7 @@ private:
     Mood mood_;
     bool shadows_ = true;
     int shadowState_[2] = { -1, -1 };  // states_ of modes 4 and 5
+    int alphaState_[2] = { -1, -1 };   // states_ of the screen quads (types 2 and 3)
     int skyPackage_ = -1;  // index into packages_
     Effect fx_[0x30];
     IDirect3DVertexDeclaration9* decl_ = nullptr;
@@ -311,6 +334,25 @@ private:
     struct ShoreSlot { int line = -1; float dist = 0, last = 0; bool valid = false; };
     std::vector<ShoreSlot> shoreCache_;
     std::vector<uint32_t> shoreVerts_;  // per strip (2 x slots): vertices written
+    // The far quad: GWTR reference 6 with render id 1 (0x450d90: a buffer
+    // object of the same manager, 1 strip of 4 vertices), refilled per frame.
+    Package::Group farGroup_;
+    IDirect3DVertexBuffer9* farVb_ = nullptr;
+    // Tree shadows: sfx.pmu materials 0x16 (buffers 0 and 1) and 0x15
+    // (buffer 2) with render id 1, a managed vertex buffer per buffer
+    // object holding its triangle list.
+    TreeShadows trees_;
+    Package::Group treeGroup_[3];
+    IDirect3DVertexBuffer9* treeVb_[3] = {};
+    // The ground the tree shadows lie on (stand-in for the game's height
+    // data [0x8ac448] / 0x4e9da0, not decoded): the opaque slot 0 triangles
+    // of the instances around the last build point, in a grid of 4-unit
+    // squares.
+    struct GroundTri { float p[3][3]; float n[3]; };
+    std::vector<GroundTri> groundTris_;
+    std::vector<std::vector<uint32_t>> groundGrid_;
+    float groundOrigin_[2] = {};
+    int groundSide_ = 0;
     LodTable tables_[2];           // mode 1 (0x4ddc50) and mode 3 (0x4dde20)
     std::vector<StateSet> states_;
     // What the device has (valid: set by ApplyState since the last reset).

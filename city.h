@@ -90,9 +90,31 @@ struct CityWater
     std::vector<CityInstance> tiles;  // column / row -2 (the GESR's)
     int colourSteps = 0, colourSets = 0;
     std::vector<float> colours;      // sets x steps x 4
-    std::vector<uint32_t> textures;  // texture references (materials: [2] the shore waves, [6] the far quad)
+    std::vector<uint32_t> textures;  // texture references (materials: [0] the shore waves, [6] the far quad)
     uint32_t shoreLines = 0;
     std::vector<ShoreLine> shore;
+};
+
+// ATRD (a GEIR child; handler [0x8ac358], per-chunk object vtbl 0x7811e0,
+// tag method 0x456590): a cell's points by kind. Header: 4 floats (the
+// cell's lowest corner x / z and its size x / z, 480), then 21 offsets from
+// the chunk start, kind k's records being [offset k, offset k + 1); records
+// of 16 bytes. Position (0x40fa80): x = int32 +0 / 2^19, y = (+0 & 0x1fff)
+// / 64 - 10, z = int32 +4 / 2^19; +0xa a type byte; +0xb the kd split of the
+// kind's records (0 x, 2 z, 0xff leaf; the tree is implicit: the node of
+// [lo, hi) is (lo + hi) / 2). Kept here: kind 14, the trees whose ground
+// shadows 0x561800 draws (type 0x11 palms, 0x12..0x14 other trees in the
+// rows of the shadow atlas, 0x1d round trees), y the crown's height.
+struct CityTree
+{
+    float position[3] = {};
+    uint8_t type = 0, axis = 0xff;
+};
+
+struct CityTreeCell
+{
+    float corner[2] = {}, size[2] = {};
+    std::vector<CityTree> trees;  // kind 14, in file (kd) order
 };
 
 class CityPlacement
@@ -107,6 +129,9 @@ public:
     std::vector<CityCell> cells;
     // The GESR's GWTR (no tiles: the city has none).
     CityWater water;
+    // The ATRD chunks' trees, one entry per chunk in file order (the order
+    // the query of 0x561800 visits them).
+    std::vector<CityTreeCell> treeCells;
     // GEIR cells per side (12 in Miami, 15 in Nice and Istanbul); a cell
     // is 480 units and the grid is centred on 0, so column c starts at
     // x = 480 * (c - gridSide / 2) and row r ends at z = -480 * (r - gridSide / 2)
@@ -117,5 +142,6 @@ private:
     bool LoadGebi(const std::vector<uint8_t>& d, size_t off, size_t size);
     bool LoadScnd(const std::vector<uint8_t>& d, size_t off, size_t size, CityCell& cell);
     bool LoadGwtr(const std::vector<uint8_t>& d, size_t off, size_t size);
+    bool LoadAtrd(const std::vector<uint8_t>& d, size_t off, size_t size);
     std::string error_;
 };

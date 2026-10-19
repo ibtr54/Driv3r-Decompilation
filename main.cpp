@@ -3033,21 +3033,81 @@ static bool RideStartPose(int level, int vehicleId, int point, float out[4])
     return true;
 }
 
+// Where a car comes to rest at a start point: the height of the city's
+// surface (slot 0 geometry) straight below / above (x, z). The pose's y is
+// not it: at Miami start point 3 it is 1.0 while the raised road there is
+// at 2.252, and the traced camera stands on that road from the first
+// frame. How the game puts the vehicle on the road (0x476480 creates it at
+// the pose through [0x8ac45c] - 4 vtbl+0xc, then vtbl+0x40) was not found;
+// as a stand-in the highest surface not more than 5 above the pose is
+// taken, so that a bridge over the point is not. False when there is none.
+static bool RideGround(const std::vector<MdpcPackage>& packages, size_t first, size_t end, const CityPlacement& city,
+                       const float pose[4], float& ground)
+{
+    std::map<uint32_t, const MdpcPackage*> byUid;
+    for (size_t k = first; k < end && k < packages.size(); ++k) byUid[packages[k].uid] = &packages[k];
+    const float X = pose[0], Z = pose[2], top = pose[1] + 5.0f;
+    bool found = false;
+    for (const CityInstance& in : city.instances) {
+        if (!in.HasModel()) continue;
+        float dx = in.position[0] - X, dz = in.position[2] - Z;
+        if (dx * dx + dz * dz > 500.0f * 500.0f) continue;  // a cell is 480 wide
+        auto it = byUid.find(in.PackageUid());
+        if (it == byUid.end() || in.ModelIndex() >= it->second->models.size()) continue;
+        const MdpcPackage& p = *it->second;
+        const MdpcModel& m = p.models[in.ModelIndex()];
+        if (m.vertexBuffer >= p.vertexBuffers.size()) continue;
+        const MdpcVertexBuffer& vb = p.vertexBuffers[m.vertexBuffer];
+        std::vector<uint32_t> t;
+        for (const MdpcSubmesh& sm : m.lods[0])
+            for (const MdpcGroup& group : sm.groups) {
+                t.clear();
+                p.Triangles(group, t);
+                for (size_t i = 0; i + 2 < t.size(); i += 3) {
+                    float w[3][3];
+                    bool ok = true;
+                    for (int c = 0; c < 3 && ok; ++c) {
+                        if (t[i + c] >= vb.count) { ok = false; break; }
+                        float ms[3];
+                        sm.Transform(vb.Position(t[i + c]), ms);
+                        in.Transform(ms, w[c]);
+                    }
+                    if (!ok) continue;
+                    // (X, Z) in the triangle seen from above
+                    float d = (w[1][2] - w[2][2]) * (w[0][0] - w[2][0]) + (w[2][0] - w[1][0]) * (w[0][2] - w[2][2]);
+                    if (std::fabs(d) < 1e-9f) continue;
+                    float a = ((w[1][2] - w[2][2]) * (X - w[2][0]) + (w[2][0] - w[1][0]) * (Z - w[2][2])) / d;
+                    float b = ((w[2][2] - w[0][2]) * (X - w[2][0]) + (w[0][0] - w[2][0]) * (Z - w[2][2])) / d;
+                    if (a < 0 || b < 0 || a + b > 1) continue;
+                    float y = a * w[0][1] + b * w[1][1] + (1 - a - b) * w[2][1];
+                    if (y <= top && (!found || y > ground)) { ground = y; found = true; }
+                }
+            }
+    }
+    return found;
+}
+
 // The game's camera at the start of a ride. In the original it is a chase
 // camera on the player's vehicle (created at the start pose by 0x476480);
 // the chase cameras (0x567430, 0x567b70, 0x567e30, 0x566d10: field of view
 // pi / 3 at +0xc4 / +0xcc and their spring constants) follow the
 // vehicle's physics, which are not implemented. Their resting place is
-// taken from traces of the original at Miami start points 0, 1 and 2 (car
-// 12, vehicle 6, standing): eye = start + (0, 0.754, 0) - 6.28 x forward,
-// looking along forward raised by 0.0029.
-static void RideCamera(const float pose[4], float eye[3], float& yaw, float& pitch)
+// taken from traces of the original (Miami, standing):
+// - a car (vehicle 6 at start points 0, 1, 2; car 12 at 3): eye = (start
+//   x, ground + 1.754, start z) - 6.28 x forward, looking along forward
+//   raised by 0.0029, the ground from RideGround (0 at points 0..2, 2.252
+//   at 3: camera y 4.006);
+// - a boat (id 45 at boat points 0 and 1): eye = start + (0, 1.0, 0) - 9.8
+//   x forward, looking level. That is the first frame; after it the boat
+//   rides the waves (camera y -1.06 .. -0.95, pitch about 0.05).
+static void RideCamera(const float pose[4], bool boat, float ground, float eye[3], float& yaw, float& pitch)
 {
     yaw = pose[3];
-    pitch = 0.0029f;
-    eye[0] = pose[0] - 6.28f * std::sin(yaw);
-    eye[1] = pose[1] + 0.754f;
-    eye[2] = pose[2] - 6.28f * std::cos(yaw);
+    pitch = boat ? 0.0f : 0.0029f;
+    float back = boat ? 9.8f : 6.28f;
+    eye[0] = pose[0] - back * std::sin(yaw);
+    eye[1] = boat ? pose[1] + 1.0f : ground + 1.754f;
+    eye[2] = pose[2] - back * std::cos(yaw);
 }
 
 // Gameplay is not implemented. This screen stands for one level (a story
@@ -3107,13 +3167,20 @@ public:
             float pose[4] = {};
             if (!RideStartPose(mission, rideVehicle, rideStart, pose))
                 Log("Level 0x%02x: no start pose for start point %d", mission, rideStart);
-            RideCamera(pose, startEye_, startYaw_, startPitch_);            free_ = false;
+            bool boat = VehicleClass(rideVehicle) == 2;
+            float ground = pose[1] - 1.0f;  // no surface found: as at points 0..2
+            bool onGround = !boat && RideGround(loader_.Packages(), loader_.CityFirst(), loader_.CityEnd(),
+                                                loader_.City(), pose, ground);
+            RideCamera(pose, boat, ground, startEye_, startYaw_, startPitch_);
+            free_ = false;
             lastFrame_ = 0;
             levelTime_ = 0;
             OnKeyUp(0);
+            char rest[48];
+            snprintf(rest, sizeof(rest), boat ? "boat" : onGround ? "ground %.3f" : "no ground, %.3f", ground);
             Log("Level 0x%02x: start point %d, vehicle %d (class %d): pose (%.2f, %.2f, %.2f) heading %.4f; "
-                "camera (%.2f, %.3f, %.2f)", mission, rideStart, rideVehicle, VehicleClass(rideVehicle), pose[0],
-                pose[1], pose[2], pose[3], startEye_[0], startEye_[1], startEye_[2]);
+                "%s; camera (%.2f, %.3f, %.2f)", mission, rideStart, rideVehicle, VehicleClass(rideVehicle), pose[0],
+                pose[1], pose[2], pose[3], rest, startEye_[0], startEye_[1], startEye_[2]);
             view_.onLost = [this] { city_.OnLostDevice(); };
             view_.onReset = [this] { city_.OnResetDevice(); };
             city_.SetMood(mood_);
@@ -3123,9 +3190,11 @@ public:
             city_.SetTimeOfDay(rideTime);  // setup +0x34: the environment cube (0x57c092)
             if (city_.Init(view_.Device(), g.gameDir + "\\Driv3r.exe") &&
                 city_.Upload(loader_.Packages(), loader_.CityFirst(), loader_.CityEnd(), loader_.City(),
-                             loader_.FirstPackageOf(mood_.skydome)))
-                Log("Level 0x%02x: Direct3D 9 view, %d effects from Driv3r.exe%s%s, %zu city groups drawn, %zu left out",
-                    mission, city_.effects, city_.failedEffects.empty() ? "" : " (not created:",
+                             loader_.FirstPackageOf(mood_.skydome), loader_.FirstPackageOf("sfx\\sfx.pmu")))
+                Log("Level 0x%02x: Direct3D 9 view (back buffer %s), %d effects from Driv3r.exe%s%s, %zu city groups "
+                    "drawn, %zu left out",
+                    mission, view_.HasAlpha() ? "A8R8G8B8" : "desktop format, no alpha", city_.effects,
+                    city_.failedEffects.empty() ? "" : " (not created:",
                     city_.failedEffects.empty() ? "" : (city_.failedEffects + ")").c_str(), city_.groupsDrawn,
                     city_.groupsSkipped);
             if (city_.effects) {
@@ -3146,6 +3215,12 @@ public:
                     w.textures.size(), w.shoreLines);
                 Log("Level 0x%02x: shore waves: %zu lines with points, %s", mission, city_.shoreLines,
                     city_.shoreInfo.empty() ? "not drawn" : city_.shoreInfo.c_str());
+                Log("Level 0x%02x: far quad: %s", mission,
+                    city_.farInfo.empty() ? "not drawn" : city_.farInfo.c_str());
+                size_t trees = 0;
+                for (const CityTreeCell& c : loader_.City().treeCells) trees += c.trees.size();
+                Log("Level 0x%02x: tree shadows: %zu ATRD chunks, %zu trees; %s", mission,
+                    loader_.City().treeCells.size(), trees, city_.treeInfo.empty() ? "not drawn" : city_.treeInfo.c_str());
             } else
                 Log("Level 0x%02x: Direct3D 9 view (black), city not drawn: %s", mission, city_.Error().c_str());
             drawn_ = 0;
@@ -3177,12 +3252,18 @@ public:
         CameraMatrix(eye, at, fov, aspect, vp);
         float back[3] = { -std::sin(yaw) * std::cos(pitch), -std::sin(pitch), -std::cos(yaw) * std::cos(pitch) };
         bool ok = view_.Frame(D3DCOLOR_XRGB(0, 0, 0), [&](IDirect3DDevice9*) { city_.Draw(vp, eye, back, fov, aspect); });
+        if (!city_.treeBuild.empty()) {
+            Log("Level 0x%02x: tree shadows rebuilt %s", mission, city_.treeBuild.c_str());
+            city_.treeBuild.clear();
+        }
         if (drawn_++ == 1)
             Log("Level 0x%02x: frame: %zu objects (%zu shadow only; slots 0..4: %zu / %zu / %zu / %zu / %zu), detail "
-                "scale %.2f, %zu draw calls (%zu shadow volume, %zu shadow redraw), %zu sea tiles, %zu shore lines",
+                "scale %.2f, %zu draw calls (%zu shadow volume, %zu shadow redraw), %zu sea tiles, %zu shore lines, far quad %s",
                 mission, city_.frameInstances, city_.frameShadowOnly, city_.frameSlots[0], city_.frameSlots[1],
                 city_.frameSlots[2], city_.frameSlots[3], city_.frameSlots[4], city_.lodScale, city_.frameDraws,
-                city_.frameShadowDraws, city_.frameRedraws, city_.frameWater, city_.frameShore);        return ok;
+                city_.frameShadowDraws, city_.frameRedraws, city_.frameWater, city_.frameShore,
+                city_.frameFar ? "drawn" : "not drawn");
+        return ok;
     }
 
     void Render(HDC, Canvas& cv) override

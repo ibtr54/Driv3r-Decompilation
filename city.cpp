@@ -51,6 +51,7 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
     instances.clear();
     cells.clear();
     water = CityWater();
+    treeCells.clear();
     error_.clear();
     if (d.size() < 16 || memcmp(d.data(), "CHNK", 4) != 0) { error_ = "not a CHNK file"; return false; }
     // Top level: GESR regions, GEIR cells, IRCT, PINF, GEGL, PCSL. The GEBI
@@ -73,6 +74,7 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
             if (c + 16 > d.size()) break;
             if (memcmp(&d[c], "GWTR", 4) == 0 && d[c + 8] == 5 && !LoadGwtr(d, g + U32(d, c + 4), U32(d, c + 12)))
                 return false;
+            if (memcmp(&d[c], "ATRD", 4) == 0 && !LoadAtrd(d, g + U32(d, c + 4), U32(d, c + 12))) return false;
             if (memcmp(&d[c], "SCND", 4) == 0 && !scnd) {
                 scnd = g + U32(d, c + 4);
                 scndSize = U32(d, c + 12);
@@ -90,6 +92,31 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
         }
     }
     while ((gridSide + 1) * (gridSide + 1) <= geirCells) ++gridSide;
+    return true;
+}
+
+bool CityPlacement::LoadAtrd(const std::vector<uint8_t>& d, size_t off, size_t size)
+{
+    if (off + size > d.size() || size < 0x64) { error_ = "ATRD header"; return false; }
+    CityTreeCell cell;
+    for (int k = 0; k < 2; ++k) {
+        cell.corner[k] = F32(d, off + 4 * k);
+        cell.size[k] = F32(d, off + 8 + 4 * k);
+    }
+    uint32_t from = U32(d, off + 0x10 + 14 * 4), to = U32(d, off + 0x10 + 15 * 4);
+    if (from > to || to > size || (to - from) % 16) { error_ = "ATRD kind 14"; return false; }
+    for (uint32_t r = from; r < to; r += 16) {
+        size_t p = off + r;
+        int32_t w0 = int32_t(U32(d, p)), w1 = int32_t(U32(d, p + 4));
+        CityTree t;
+        t.position[0] = float(w0) * (1.0f / 524288.0f);
+        t.position[1] = float(w0 & 0x1fff) * (1.0f / 64.0f) - 10.0f;
+        t.position[2] = float(w1) * (1.0f / 524288.0f);
+        t.type = d[p + 10];
+        t.axis = d[p + 11];
+        cell.trees.push_back(t);
+    }
+    treeCells.push_back(std::move(cell));
     return true;
 }
 
