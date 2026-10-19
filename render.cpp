@@ -1185,112 +1185,15 @@ void CityRenderer::DrawFar(const float eye[3], const float back[3], int& applied
     frameFar = true;
 }
 
-// The ground for the tree shadows: the slot 0 triangles of the groups drawn
-// opaque in mode 2, of the instances whose centre is within 320 units of
-// (x, z), in 4-unit squares over 520 x 520 units around it.
-void CityRenderer::BuildGround(float x, float z)
-{
-    const float kHalf = 260.0f, kCell = 4.0f;
-    groundSide_ = int(2 * kHalf / kCell);
-    groundOrigin_[0] = x - kHalf;
-    groundOrigin_[1] = z - kHalf;
-    groundTris_.clear();
-    groundGrid_.assign(size_t(groundSide_) * size_t(groundSide_), {});
-    std::vector<uint32_t> t;
-    for (const Instance& inst : instances_) {
-        float dx = inst.centre[0] - x, dz = inst.centre[2] - z;
-        if (dx * dx + dz * dz > 320.0f * 320.0f) continue;
-        const Package& p = packages_[size_t(inst.package)];
-        const MdpcModel& m = p.data->models[inst.model];
-        if (m.vertexBuffer >= p.data->vertexBuffers.size()) continue;
-        const MdpcVertexBuffer& vb = p.data->vertexBuffers[m.vertexBuffer];
-        for (size_t s = 0; s < m.lods[0].size() && s < p.groupOf[inst.model][0].size(); ++s) {
-            const MdpcSubmesh& sm = m.lods[0][s];
-            for (size_t gi = 0; gi < sm.groups.size(); ++gi) {
-                const Package::Group& info = p.groupOf[inst.model][0][s][gi];
-                if (info.fx < 0 || !DrawnInMode(info.type, 2) || states_[info.state].blend) continue;
-                t.clear();
-                p.data->Triangles(sm.groups[gi], t);
-                for (size_t i = 0; i + 2 < t.size(); i += 3) {
-                    GroundTri tri;
-                    bool ok = true;
-                    for (int c = 0; c < 3 && ok; ++c) {
-                        if (t[i + c] >= vb.count) { ok = false; break; }
-                        float ms[3];
-                        sm.Transform(vb.Position(t[i + c]), ms);
-                        inst.in->Transform(ms, tri.p[c]);
-                    }
-                    if (!ok) continue;
-                    float e1[3], e2[3];
-                    for (int k = 0; k < 3; ++k) {
-                        e1[k] = tri.p[1][k] - tri.p[0][k];
-                        e2[k] = tri.p[2][k] - tri.p[0][k];
-                    }
-                    float n[3] = { e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0] };
-                    float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-                    if (len <= 0 || std::fabs(n[1]) < 0.1f * len) continue;  // walls: never under a point
-                    float sign = n[1] < 0 ? -1.0f : 1.0f;
-                    for (int k = 0; k < 3; ++k) tri.n[k] = n[k] * sign / len;
-                    float lo[2] = { 1e30f, 1e30f }, hi[2] = { -1e30f, -1e30f };
-                    for (int c = 0; c < 3; ++c) {
-                        lo[0] = std::min(lo[0], tri.p[c][0]); hi[0] = std::max(hi[0], tri.p[c][0]);
-                        lo[1] = std::min(lo[1], tri.p[c][2]); hi[1] = std::max(hi[1], tri.p[c][2]);
-                    }
-                    int c0 = std::max(0, int(std::floor((lo[0] - groundOrigin_[0]) / kCell)));
-                    int c1 = std::min(groundSide_ - 1, int(std::floor((hi[0] - groundOrigin_[0]) / kCell)));
-                    int r0 = std::max(0, int(std::floor((lo[1] - groundOrigin_[1]) / kCell)));
-                    int r1 = std::min(groundSide_ - 1, int(std::floor((hi[1] - groundOrigin_[1]) / kCell)));
-                    if (c0 > c1 || r0 > r1) continue;
-                    uint32_t index = uint32_t(groundTris_.size());
-                    groundTris_.push_back(tri);
-                    for (int r = r0; r <= r1; ++r)
-                        for (int c = c0; c <= c1; ++c) groundGrid_[size_t(r) * groundSide_ + c].push_back(index);
-                }
-            }
-        }
-    }
-}
-
-// The highest ground surface at (x, z) not above y, and its up normal.
-bool CityRenderer::GroundAt(float x, float y, float z, float& height, float normal[3]) const
-{
-    int c = int(std::floor((x - groundOrigin_[0]) / 4.0f)), r = int(std::floor((z - groundOrigin_[1]) / 4.0f));
-    if (c < 0 || r < 0 || c >= groundSide_ || r >= groundSide_) return false;
-    bool found = false;
-    for (uint32_t i : groundGrid_[size_t(r) * groundSide_ + c]) {
-        const GroundTri& t = groundTris_[i];
-        const float* a = t.p[0];
-        const float* b = t.p[1];
-        const float* d = t.p[2];
-        float den = (b[2] - d[2]) * (a[0] - d[0]) + (d[0] - b[0]) * (a[2] - d[2]);
-        if (std::fabs(den) < 1e-9f) continue;
-        float u = ((b[2] - d[2]) * (x - d[0]) + (d[0] - b[0]) * (z - d[2])) / den;
-        float v = ((d[2] - a[2]) * (x - d[0]) + (a[0] - d[0]) * (z - d[2])) / den;
-        if (u < 0 || v < 0 || u + v > 1) continue;
-        float h = u * a[1] + v * b[1] + (1 - u - v) * d[1];
-        if (h > y || (found && h <= height)) continue;
-        height = h;
-        memcpy(normal, t.n, sizeof(t.n));
-        found = true;
-    }
-    return found;
-}
-
 // 0x5616f0 with the camera's x / z as the point (the game passes the
-// player's); the ground is collected at the first probe of a rebuild.
+// player's); the ground probe is 0x4e9da0 over the city's GRTD chunks.
 void CityRenderer::UpdateTreeShadows(const float eye[3])
 {
     if (!treeVb_[0] || !city_) return;
     const float point[2] = { eye[0], eye[2] };
-    bool ground = false;
-    auto probe = [&](float x, float y, float z, float& h, float n[3]) {
-        if (!ground) {
-            BuildGround(point[0], point[1]);
-            ground = true;
-        }
-        return GroundAt(x, y, z, h, n);
-    };
-    if (!trees_.Update(*city_, point, mood_.direction, probe)) return;
+    const CityGround& ground = city_->ground;
+    auto probe = [&](float x, float y, float z, float& h, float n[3]) { return ground.Probe(x, y, z, h, n); };
+    if (!trees_.Update(*city_, point, mood_.sun, probe)) return;
     for (int b = 0; b < 3; ++b) {
         if (!treeVb_[b] || trees_.list[b].empty()) continue;
         void* ptr = nullptr;
@@ -1303,9 +1206,9 @@ void CityRenderer::UpdateTreeShadows(const float eye[3])
     char buf[192];
     snprintf(buf, sizeof(buf),
              "at (%.1f, %.1f): %d trees found, %d without ground; buffers %d / %d / %d trees, %d / %d / %d triangles "
-             "drawn; ground %zu triangles",
+             "drawn",
              point[0], point[1], trees_.found, trees_.noGround, trees_.trees[0], trees_.trees[1], trees_.trees[2],
-             trees_.triangles[0], trees_.triangles[1], trees_.triangles[2], groundTris_.size());
+             trees_.triangles[0], trees_.triangles[1], trees_.triangles[2]);
     treeBuild = buf;
 }
 
@@ -1905,8 +1808,6 @@ void CityRenderer::Release()
     }
     treeInfo.clear();
     treeBuild.clear();
-    groundTris_.clear();
-    groundGrid_.clear();
     shoreSlots_ = shoreMaxVerts_ = shoreDrawn_ = 0;
     shoreCache_.clear();
     shoreVerts_.clear();

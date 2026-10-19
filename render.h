@@ -250,14 +250,12 @@ private:
     void DrawFar(const float eye[3], const float back[3], int& applied);
     // The tree shadows (treeshadow.h): rebuilt around the camera's x / z
     // when it has moved far enough, drawn in the mode 7 pass before the
-    // redraw. Ground: the highest opaque slot 0 surface (Ground*).
+    // redraw. Ground: the city's GRTD heights (CityGround, 0x4e9da0).
     void UpdateTreeShadows(const float eye[3]);
     void DrawTreeShadows(int& applied);
     // The two screen quads before the tree shadows (type 2: alpha 0
     // everywhere; type 3: alpha 1 where the volumes left stencil >= 1).
     void DrawShadowAlpha(int& applied);
-    void BuildGround(float x, float z);
-    bool GroundAt(float x, float y, float z, float& height, float normal[3]) const;
     void DrawGroup(const Package& p, const MdpcModel& m, const MdpcGroup& g, const Package::Group& info, int state,
                    const float world[16], int& applied, float alpha = 1.0f, uint32_t substance = 0);
     void BindGroup(const Package::Group& info, int state, const float world[16], int& applied, float alpha,
@@ -344,15 +342,6 @@ private:
     TreeShadows trees_;
     Package::Group treeGroup_[3];
     IDirect3DVertexBuffer9* treeVb_[3] = {};
-    // The ground the tree shadows lie on (stand-in for the game's height
-    // data [0x8ac448] / 0x4e9da0, not decoded): the opaque slot 0 triangles
-    // of the instances around the last build point, in a grid of 4-unit
-    // squares.
-    struct GroundTri { float p[3][3]; float n[3]; };
-    std::vector<GroundTri> groundTris_;
-    std::vector<std::vector<uint32_t>> groundGrid_;
-    float groundOrigin_[2] = {};
-    int groundSide_ = 0;
     LodTable tables_[2];           // mode 1 (0x4ddc50) and mode 3 (0x4dde20)
     std::vector<StateSet> states_;
     // What the device has (valid: set by ApplyState since the last reset).

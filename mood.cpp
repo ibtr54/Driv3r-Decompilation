@@ -100,6 +100,14 @@ void Mood::BuildSkyMatrix()
         for (float& v : c) v /= len;
     const float m[16] = { h[0], h[1], h[2], h[3], up[0], up[1], up[2], 0, c[0], c[1], c[2], 0, 0, 0, 0, 1 };
     memcpy(skyMatrix, m, sizeof(m));
+    // +0x170: the normalized horizontal direction, y = -sin(e) / cos(e)
+    // (0x401160 / 0x401070, the game's sine / cosine; e = SUN_ELEVATION),
+    // normalized again (0x4025d0): (cos e x h, -sin e).
+    memcpy(sun, h, sizeof(sun));
+    sun[1] = -std::sin(sunElevation) / std::cos(sunElevation);
+    len = std::sqrt(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
+    if (len > 0)
+        for (float& v : sun) v /= len;
 }
 
 void Mood::FogParams(float out[4]) const

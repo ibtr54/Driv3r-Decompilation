@@ -20,6 +20,10 @@ struct Mood
     float directional[4] = { 1.1015625f, 1.1015625f, 1.1015625f, 1 };  // +0x1c0 LIGHT_DIRECTIONAL_COLOUR
     float direction[4] = { 0.579f, -0.573f, -0.579f, 0 };             // +0x1b0 LIGHT_DIRECTIONAL_VECTOR
     float shadow[4] = { 0.455f, -0.766f, -0.455f, 0 };                // +0x190 SHADOW_VECTOR
+    // +0x170 (0x472fc0, BuildSkyMatrix): the light's horizontal direction
+    // tilted down by SUN_ELEVATION, normalized: the tree shadows' direction
+    // (0x562070). Mood 33 in the running game: (0.683665, -0.531186, -0.500443).
+    float sun[4] = {};
     float fogNearDistance = 50, fogNearValue = 0;    // +0x230 / +0x234 FOG_NEARDISTANCE / FOG_NEARVALUE
     float fogFarDistance = 1050, fogFarValue = 1350; // +0x238 / +0x23c FOG_FARDISTANCE / FOG_FARVALUE
     float fogColour[4] = { 0.5f, 0.5f, 0.6f, 1 };    // +0x240 FOG_COLOUR

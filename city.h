@@ -117,6 +117,45 @@ struct CityTreeCell
     std::vector<CityTree> trees;  // kind 14, in file (kd) order
 };
 
+// GRTD (a GEIR child, tag method 0x44d220, handler vtbl 0x780e1c; checked
+// by 0x4e9fe0, registered in the nine slots of [0x8ac344]): the cell's
+// ground heights, "THD v3.0" at +4. Header: +0xc node count, +0x10 / +0x14
+// squares per row / column, +0x18 / +0x1c / +0x20 origin x / y / z (the
+// cell's lowest corner), +0x24 / +0x28 square size (20), +0x2c / +0x30
+// their inverses, then offsets from the chunk: +0x34 node types (a nibble
+// per node, the high one for even nodes), +0x38 a u16 per node, +0x3c child
+// pairs (two u32 node numbers), +0x40 layer lists (8 bytes: offsets into the
+// +0x44 lines and +0x48 leaves), +0x44 lines (s16 a, b, c, s8 front, back),
+// +0x48 leaves (u16 plane numbers), +0x4c planes (20 bytes: a, b, c, d,
+// two u16 ids). Nodes 0 .. squares-1 are the squares (row-major).
+class CityGround
+{
+public:
+    bool Add(const std::vector<uint8_t>& d, size_t off, size_t size);
+    void Clear() { chunks_.clear(); }
+    size_t Chunks() const { return chunks_.size(); }
+    // 0x4e9da0: the ground at (x, z) for a point at height y: the chunk
+    // whose squares hold (x, z) (0x4ea060, then 0x4ea170): a split node
+    // (type 0xe) halves the square, x then z, down to a plane (0xf) or to
+    // n stacked layers, each a 2D BSP (0x4ea380) of lines a x fx + b x fz +
+    // c (fx, fz in the node, > -1e-5: front) ending in a plane; 0x4e9ef0
+    // keeps the highest layer below y + 0.5 (else a lower one). Height =
+    // (d - a lx - c lz) / b (lx, lz from the origin); normal (a, b, c).
+    // False: no ground (the game's -500).
+    bool Probe(float x, float y, float z, float& height, float normal[3]) const;
+
+private:
+    struct Chunk
+    {
+        std::vector<uint8_t> d;
+        int cols = 0, rows = 0, nodes = 0;
+        float ox = 0, oz = 0, sx = 0, sz = 0, ix = 0, iz = 0;
+        uint32_t types = 0, words = 0, pairs = 0, layers = 0, lines = 0, leaves = 0, planes = 0;
+    };
+    bool Query(const Chunk& c, float x, float y, float z, float& height, uint32_t& plane) const;
+    std::vector<Chunk> chunks_;
+};
+
 class CityPlacement
 {
 public:
@@ -132,6 +171,8 @@ public:
     // The ATRD chunks' trees, one entry per chunk in file order (the order
     // the query of 0x561800 visits them).
     std::vector<CityTreeCell> treeCells;
+    // The GRTD chunks: the ground heights of the cells.
+    CityGround ground;
     // GEIR cells per side (12 in Miami, 15 in Nice and Istanbul); a cell
     // is 480 units and the grid is centred on 0, so column c starts at
     // x = 480 * (c - gridSide / 2) and row r ends at z = -480 * (r - gridSide / 2)

@@ -3033,58 +3033,19 @@ static bool RideStartPose(int level, int vehicleId, int point, float out[4])
     return true;
 }
 
-// Where a car comes to rest at a start point: the height of the city's
-// surface (slot 0 geometry) straight below / above (x, z). The pose's y is
-// not it: at Miami start point 3 it is 1.0 while the raised road there is
-// at 2.252, and the traced camera stands on that road from the first
-// frame. How the game puts the vehicle on the road (0x476480 creates it at
-// the pose through [0x8ac45c] - 4 vtbl+0xc, then vtbl+0x40) was not found;
-// as a stand-in the highest surface not more than 5 above the pose is
-// taken, so that a bridge over the point is not. False when there is none.
-static bool RideGround(const std::vector<MdpcPackage>& packages, size_t first, size_t end, const CityPlacement& city,
-                       const float pose[4], float& ground)
+// Where a car comes to rest at a start point: the ground under the pose
+// from the city's GRTD heights (CityGround: 0x4e9da0, the game's height
+// probe). The pose's y is not it: at Miami start point 3 it is 1.0 while
+// the raised road there is at 2.252, and the traced camera stands on that
+// road from the first frame. How the game puts the vehicle on the road
+// (0x476480 creates it at the pose through [0x8ac45c] - 4 vtbl+0xc, then
+// vtbl+0x40) was not found; the probe starts 4.5 above the pose (it keeps
+// layers up to 0.5 above that), a choice of the program's, so that a
+// bridge over the point is not taken. False when there is no ground.
+static bool RideGround(const CityGround& city, const float pose[4], float& ground)
 {
-    std::map<uint32_t, const MdpcPackage*> byUid;
-    for (size_t k = first; k < end && k < packages.size(); ++k) byUid[packages[k].uid] = &packages[k];
-    const float X = pose[0], Z = pose[2], top = pose[1] + 5.0f;
-    bool found = false;
-    for (const CityInstance& in : city.instances) {
-        if (!in.HasModel()) continue;
-        float dx = in.position[0] - X, dz = in.position[2] - Z;
-        if (dx * dx + dz * dz > 500.0f * 500.0f) continue;  // a cell is 480 wide
-        auto it = byUid.find(in.PackageUid());
-        if (it == byUid.end() || in.ModelIndex() >= it->second->models.size()) continue;
-        const MdpcPackage& p = *it->second;
-        const MdpcModel& m = p.models[in.ModelIndex()];
-        if (m.vertexBuffer >= p.vertexBuffers.size()) continue;
-        const MdpcVertexBuffer& vb = p.vertexBuffers[m.vertexBuffer];
-        std::vector<uint32_t> t;
-        for (const MdpcSubmesh& sm : m.lods[0])
-            for (const MdpcGroup& group : sm.groups) {
-                t.clear();
-                p.Triangles(group, t);
-                for (size_t i = 0; i + 2 < t.size(); i += 3) {
-                    float w[3][3];
-                    bool ok = true;
-                    for (int c = 0; c < 3 && ok; ++c) {
-                        if (t[i + c] >= vb.count) { ok = false; break; }
-                        float ms[3];
-                        sm.Transform(vb.Position(t[i + c]), ms);
-                        in.Transform(ms, w[c]);
-                    }
-                    if (!ok) continue;
-                    // (X, Z) in the triangle seen from above
-                    float d = (w[1][2] - w[2][2]) * (w[0][0] - w[2][0]) + (w[2][0] - w[1][0]) * (w[0][2] - w[2][2]);
-                    if (std::fabs(d) < 1e-9f) continue;
-                    float a = ((w[1][2] - w[2][2]) * (X - w[2][0]) + (w[2][0] - w[1][0]) * (Z - w[2][2])) / d;
-                    float b = ((w[2][2] - w[0][2]) * (X - w[2][0]) + (w[0][0] - w[2][0]) * (Z - w[2][2])) / d;
-                    if (a < 0 || b < 0 || a + b > 1) continue;
-                    float y = a * w[0][1] + b * w[1][1] + (1 - a - b) * w[2][1];
-                    if (y <= top && (!found || y > ground)) { ground = y; found = true; }
-                }
-            }
-    }
-    return found;
+    float normal[3];
+    return city.Probe(pose[0], pose[1] + 4.5f, pose[2], ground, normal);
 }
 
 // The game's camera at the start of a ride. In the original it is a chase
@@ -3169,8 +3130,7 @@ public:
                 Log("Level 0x%02x: no start pose for start point %d", mission, rideStart);
             bool boat = VehicleClass(rideVehicle) == 2;
             float ground = pose[1] - 1.0f;  // no surface found: as at points 0..2
-            bool onGround = !boat && RideGround(loader_.Packages(), loader_.CityFirst(), loader_.CityEnd(),
-                                                loader_.City(), pose, ground);
+            bool onGround = !boat && RideGround(loader_.City().ground, pose, ground);
             RideCamera(pose, boat, ground, startEye_, startYaw_, startPitch_);
             free_ = false;
             lastFrame_ = 0;

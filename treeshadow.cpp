@@ -190,10 +190,9 @@ bool TreeShadows::Update(const CityPlacement& city, const float point[2], const 
     built_ = true;
     last_[0] = point[0];
     last_[1] = point[1];
-    // Mood +0x170 (0x472fc0): LIGHT_DIRECTIONAL_VECTOR with y = 0, normalized.
-    V4 d = { light[0], 0, light[2] };
-    float len = std::sqrt(Dot(d, d));
-    if (len > 0) d = Scale(d, 1.0f / len);
+    // Mood +0x170 (0x472fc0): the light's horizontal direction tilted down by
+    // SUN_ELEVATION (Mood::sun; read in the running game).
+    const V4 d = { light[0], light[1], light[2] };
     std::vector<const CityTree*> query;
     for (const CityTreeCell& cell : city.treeCells) {
         float x0 = cell.corner[0], z0 = cell.corner[1];

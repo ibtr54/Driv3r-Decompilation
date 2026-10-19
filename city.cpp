@@ -52,6 +52,7 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
     cells.clear();
     water = CityWater();
     treeCells.clear();
+    ground.Clear();
     error_.clear();
     if (d.size() < 16 || memcmp(d.data(), "CHNK", 4) != 0) { error_ = "not a CHNK file"; return false; }
     // Top level: GESR regions, GEIR cells, IRCT, PINF, GEGL, PCSL. The GEBI
@@ -75,6 +76,10 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
             if (memcmp(&d[c], "GWTR", 4) == 0 && d[c + 8] == 5 && !LoadGwtr(d, g + U32(d, c + 4), U32(d, c + 12)))
                 return false;
             if (memcmp(&d[c], "ATRD", 4) == 0 && !LoadAtrd(d, g + U32(d, c + 4), U32(d, c + 12))) return false;
+            if (memcmp(&d[c], "GRTD", 4) == 0 && !ground.Add(d, g + U32(d, c + 4), U32(d, c + 12))) {
+                error_ = "GRTD";
+                return false;
+            }
             if (memcmp(&d[c], "SCND", 4) == 0 && !scnd) {
                 scnd = g + U32(d, c + 4);
                 scndSize = U32(d, c + 12);
@@ -93,6 +98,131 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
     }
     while ((gridSide + 1) * (gridSide + 1) <= geirCells) ++gridSide;
     return true;
+}
+
+bool CityGround::Add(const std::vector<uint8_t>& d, size_t off, size_t size)
+{
+    // 0x4ea130 accepts "THD v3.0" (2 / 3: other versions, not loaded).
+    if (off + size > d.size() || size < 0x50 || memcmp(&d[off + 4], "THD v3.0", 8) != 0) return false;
+    Chunk c;
+    c.d.assign(d.begin() + ptrdiff_t(off), d.begin() + ptrdiff_t(off + size));
+    c.nodes = int32_t(U32(c.d, 0xc));
+    c.cols = int32_t(U32(c.d, 0x10));
+    c.rows = int32_t(U32(c.d, 0x14));
+    c.ox = F32(c.d, 0x18);
+    c.oz = F32(c.d, 0x20);
+    c.sx = F32(c.d, 0x24);
+    c.sz = F32(c.d, 0x28);
+    c.ix = F32(c.d, 0x2c);
+    c.iz = F32(c.d, 0x30);
+    uint32_t* t[7] = { &c.types, &c.words, &c.pairs, &c.layers, &c.lines, &c.leaves, &c.planes };
+    for (int k = 0; k < 7; ++k) {
+        *t[k] = U32(c.d, 0x34 + 4 * size_t(k));
+        if (*t[k] > size) return false;
+    }
+    if (c.cols <= 0 || c.rows <= 0 || c.nodes < c.cols * c.rows || c.types + size_t(c.nodes + 1) / 2 > size ||
+        c.words + size_t(c.nodes) * 2 > size)
+        return false;
+    chunks_.push_back(std::move(c));
+    return true;
+}
+
+bool CityGround::Query(const Chunk& c, float x, float y, float z, float& height, uint32_t& plane) const
+{
+    const std::vector<uint8_t>& d = c.d;
+    auto type = [&](uint32_t n) {
+        if (n >= uint32_t(c.nodes)) return 0;
+        uint8_t b = d[c.types + n / 2];
+        return int(n % 2 == 0 ? b >> 4 : b & 0xf);
+    };
+    auto word = [&](uint32_t n) { return uint32_t(d[c.words + 2 * n] | d[c.words + 2 * n + 1] << 8); };
+    auto planeHeight = [&](uint32_t i, float lx, float lz, float& h) {
+        size_t p = c.planes + size_t(i) * 20;
+        if (p + 16 > d.size()) return false;
+        float b = F32(d, p + 4);
+        if (b == 0.0f) return false;
+        h = (F32(d, p + 12) - F32(d, p) * lx - F32(d, p + 8) * lz) / b;
+        return true;
+    };
+    // 0x4ea170: the square, then the split nodes.
+    float lx = x - c.ox, lz = z - c.oz;
+    if (!(lx >= 0 && lx < float(c.cols) * c.sx && lz >= 0 && lz < float(c.rows) * c.sz)) return false;
+    float fx = c.ix * lx, fz = c.iz * lz;
+    int cx = int(fx), cz = int(fz);
+    fx -= float(cx);
+    fz -= float(cz);
+    uint32_t n = uint32_t(c.cols * cz + cx);
+    int t = type(n);
+    bool splitX = true;
+    for (int depth = 0; t == 0xe && depth < 32; ++depth) {
+        size_t pair = c.pairs + size_t(word(n)) * 8;
+        if (pair + 8 > d.size()) return false;
+        float& f = splitX ? fx : fz;
+        if (f < 0.5f) {
+            n = U32(d, pair);
+            f += f;
+        } else {
+            n = U32(d, pair + 4);
+            f = (f - 0.5f) * 2.0f;
+        }
+        splitX = !splitX;
+        t = type(n);
+    }
+    if (t == 0 || t == 0xe) return false;
+    if (t == 0xf) {
+        plane = word(n);
+        return planeHeight(plane, lx, lz, height);
+    }
+    // n stacked layers; 0x4e9ef0 chooses.
+    const float kNone = -500.0f;
+    float best = kNone;
+    bool found = false;
+    for (int k = 0; k < t; ++k) {
+        size_t entry = c.layers + (size_t(word(n)) + size_t(k)) * 8;
+        if (entry + 8 > d.size()) return found;
+        size_t first = c.lines + U32(d, entry), leaves = c.leaves + U32(d, entry + 4);
+        size_t line = first;
+        uint32_t pi = 0;
+        bool leaf = false;
+        for (int steps = 0; steps < 256 && line + 8 <= d.size(); ++steps) {
+            int16_t a, b, cc;
+            memcpy(&a, &d[line], 2);
+            memcpy(&b, &d[line + 2], 2);
+            memcpy(&cc, &d[line + 4], 2);
+            float v = float(b) * fz + float(a) * fx + float(cc);
+            int8_t child = int8_t(v > -1e-5f ? d[line + 6] : d[line + 7]);
+            if (child >= 0) {
+                size_t q = leaves + size_t(child) * 2;
+                if (q + 2 > d.size()) break;
+                pi = uint32_t(d[q] | d[q + 1] << 8);
+                leaf = true;
+                break;
+            }
+            line = first + size_t(-int(child)) * 8;
+        }
+        float h;
+        if (!leaf || !planeHeight(pi, lx, lz, h) || h == kNone) continue;
+        float top = y + 0.5f;
+        if ((best < h && h < top) || top < best || best == kNone) {
+            best = h;
+            plane = pi;
+            found = true;
+        }
+    }
+    if (found) height = best;
+    return found;
+}
+
+bool CityGround::Probe(float x, float y, float z, float& height, float normal[3]) const
+{
+    for (const Chunk& c : chunks_) {
+        uint32_t plane = 0;
+        if (!Query(c, x, y, z, height, plane)) continue;
+        size_t p = c.planes + size_t(plane) * 20;
+        for (int k = 0; k < 3; ++k) normal[k] = F32(c.d, p + 4 * size_t(k));
+        return true;
+    }
+    return false;
 }
 
 bool CityPlacement::LoadAtrd(const std::vector<uint8_t>& d, size_t off, size_t size)

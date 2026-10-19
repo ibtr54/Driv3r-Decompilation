@@ -32,7 +32,7 @@ public:
     using Probe = std::function<bool(float x, float y, float z, float& height, float normal[3])>;
 
     // 0x5616f0: rebuilds when the point (x, z) is 66.7 units from the last
-    // build's (or on the first call). light: the mood's directional vector.
+    // build's (or on the first call). light: the mood's +0x170 (Mood::sun).
     // True when it rebuilt.
     bool Update(const CityPlacement& city, const float point[2], const float light[3], const Probe& probe);
     void Reset() { built_ = false; }
