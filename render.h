@@ -361,6 +361,7 @@ private:
     IDirect3DVertexDeclaration9* decl_ = nullptr;
     // Declaration index 5 (0x5d099b, 60 bytes: the vehicles) and the one set.
     IDirect3DVertexDeclaration9* decl5_ = nullptr;
+    IDirect3DVertexDeclaration9* decl3_ = nullptr;  // declaration index 3 (the screen quads)
     IDirect3DVertexDeclaration9* currentDecl_ = nullptr;
     void SetDecl(IDirect3DVertexDeclaration9* decl)
     {

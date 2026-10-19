@@ -329,6 +329,12 @@ bool LateType(int type) { return type == 0x11 || type == 0x1d || type == 0x1e; }
 // +0x70, is +0x20 of the next vtable 0x78e510.)
 const float kExtrusion = 20.0f;
 
+// The effect of the shadow pass's screen quads: the traced draws' vertex
+// shader (hash 2fe74039, the HUD's too) is the pass-through one of effects
+// 0x29 and 0x2a (oPos = position, colour, uv; ps alpha = texture alpha x
+// colour alpha in both), which one was not told apart.
+const int kQuadEffect = 0x29;
+
 // A vehicle part's model id (object +0x60) as the shadow volume sees it:
 // package uid 0x39 (the 0xe400 branch of 0x5dedf0; which uid the vehicle
 // packages get at run time was taken from that trace, not from the loader).
@@ -456,6 +462,15 @@ bool CityRenderer::Init(IDirect3DDevice9* device, const std::string& exePath)
         D3DDECL_END(),
     };
     if (FAILED(device_->CreateVertexDeclaration(elems5, &decl5_))) { error_ = "vertex declaration 5"; return false; }
+    // Declaration index 3 (position, D3DCOLOR, texcoord; 24 bytes): the
+    // shadow pass's two screen quads (DrawShadowAlpha).
+    const D3DVERTEXELEMENT9 elems3[] = {
+        { 0, 0, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_D3DCOLOR, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_COLOR, 0 },
+        { 0, 16, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0 },
+        D3DDECL_END(),
+    };
+    if (FAILED(device_->CreateVertexDeclaration(elems3, &decl3_))) { error_ = "vertex declaration 3"; return false; }
     if (FAILED(createPool(&pool_))) { error_ = "effect pool"; return false; }
     // The data sections are mapped at file offset + 0x400000.
     for (const FxEntry& e : kFx) {
@@ -1355,18 +1370,16 @@ void CityRenderer::UpdateTreeShadows(const float eye[3])
 // (pre-transformed, alpha from the vertex colour: the same values written).
 void CityRenderer::DrawShadowAlpha(int& applied)
 {
-    D3DVIEWPORT9 vp = {};
-    device_->GetViewport(&vp);
-    struct Q { float x, y, z, rhw; D3DCOLOR c; };
-    const float x0 = float(vp.X) - 0.5f, y0 = float(vp.Y) - 0.5f, x1 = x0 + float(vp.Width), y1 = y0 + float(vp.Height);
-    device_->SetVertexShader(nullptr);
-    device_->SetPixelShader(nullptr);
-    device_->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
-    device_->SetTexture(0, nullptr);
-    device_->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
-    device_->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
-    device_->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
-    device_->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+    Effect& e = fx_[kQuadEffect];
+    if (!e.fx || !decl3_) return;
+    struct V { float x, y, z; D3DCOLOR c; float u, v; };
+    UINT passes = 0;
+    if (FAILED(e.fx->Begin(&passes, D3DXFX_DONOTSAVESTATE)) || FAILED(e.fx->BeginPass(0))) return;
+    // No texture at stage 0, as in the game: g_samDiffuse reads an unbound
+    // texture.
+    if (e.diffuse) e.fx->SetTexture(e.diffuse, nullptr);
+    e.fx->CommitChanges();
+    SetDecl(decl3_);
     for (int k = 0; k < 2; ++k) {
         if (alphaState_[k] < 0) continue;
         ApplyState(states_[alphaState_[k]]);
@@ -1375,12 +1388,15 @@ void CityRenderer::DrawShadowAlpha(int& applied)
         device_->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
         rsValid_[D3DRS_CULLMODE] = false;
         D3DCOLOR c = k == 0 ? 0x00ffffff : 0xffffffff;
-        const Q quad[4] = { { x0, y0, 0, 1, c }, { x1, y0, 0, 1, c }, { x0, y1, 0, 1, c }, { x1, y1, 0, 1, c } };
-        device_->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Q));
+        // The traced vertices: a list of two triangles.
+        const V quad[6] = { { -1, -1, 0, c, 0, 1 }, { -1, 1, 0, c, 0, 0 }, { 1, 1, 0, c, 1, 0 },
+                            { 1, -1, 0, c, 1, 1 }, { 1, 1, 0, c, 1, 0 }, { -1, -1, 0, c, 0, 1 } };
+        device_->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2, quad, sizeof(V));
         ++frameDraws;
     }
-    device_->SetVertexDeclaration(decl_);
-    currentDecl_ = decl_;
+    e.fx->EndPass();
+    e.fx->End();
+    if (e.diffuse) e.fx->SetTexture(e.diffuse, white_);
 }
 
 // 0x5616c0: each buffer object with vertices draws its list (D3DPT_TRIANGLELIST,
@@ -1981,6 +1997,8 @@ void CityRenderer::Release()
     if (decl_) decl_->Release();
     if (decl5_) decl5_->Release();
     decl5_ = nullptr;
+    if (decl3_) decl3_->Release();
+    decl3_ = nullptr;
     currentDecl_ = nullptr;
     vehicleParts_.clear();
     vehicleWorlds_.clear();
