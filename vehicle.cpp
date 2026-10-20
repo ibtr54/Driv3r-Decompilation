@@ -1,7 +1,9 @@
 #include "vehicle.h"
 
 #include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <map>
 
 namespace {
 
@@ -53,9 +55,12 @@ bool ReadUpvh(const std::vector<uint8_t>& d, size_t up, size_t size, VehicleData
                  size_t(U16(d, up + 0x26)) * 0x40;
     if (pdl + 0x20 > up + size || memcmp(&d[pdl + 0x10], "PDL001", 6) != 0) return false;
     size_t entries = pdl + U32(d, pdl + 8), nentries = U32(d, pdl);
+    size_t points = hard + nhard * 0x20 + size_t(U16(d, up + 0x24)) * 0x50, npoints = U16(d, up + 0x20);
     for (size_t i = 0; i < nparts; ++i) {
         size_t r = parts + i * 0x20;
         uint16_t type = U16(d, r), ref = U16(d, r + 0x12);
+        if (type == 3 && U16(d, r + 2) == 6 && U16(d, r + 0x16) < npoints)
+            for (int k = 0; k < 3; ++k) v.exhausts.push_back(F32(d, points + U16(d, r + 0x16) * 0x10 + k * 4));
         if ((ref >> 8) != 0xfc) continue;  // no model
         int model = ref & 0xff;
         if (type == 1) v.body.push_back(model);
@@ -147,4 +152,146 @@ void VehicleCreationPose(const VehicleData& v, const MdpcPackage& p, const float
                                  local[r * 4 + 3] * b[12 + k];
         wheels.insert(wheels.end(), out, out + 16);
     }
+}
+
+namespace {
+
+// Driv3r.exe mapped by its section headers: a virtual address's file offset
+// (SIZE_MAX outside the sections' raw data).
+size_t ExeOffset(const std::vector<uint8_t>& exe, uint32_t va)
+{
+    uint32_t pe = U32(exe, 0x3c);
+    if (pe + 0xf8 > exe.size()) return SIZE_MAX;
+    uint16_t n = U16(exe, pe + 6), opt = U16(exe, pe + 20);
+    uint32_t base = U32(exe, pe + 0x34);
+    for (uint16_t i = 0; i < n; ++i) {
+        size_t s = pe + 24 + opt + i * 40;
+        uint32_t lo = base + U32(exe, s + 12), raw = U32(exe, s + 16), ro = U32(exe, s + 20);
+        if (va >= lo && va < lo + raw) return ro + (va - lo);
+    }
+    return SIZE_MAX;
+}
+
+// The parameter blocks the static initialisers build in .bss (0x6da080 for
+// 0x8b4050, 0x6da7c0 for 0x8b4348, 0x6daf00 for 0x8b4640, 0x6db640 for
+// 0x8b4938), run on a copy of memory: dword / byte constant stores, mov
+// [abs], eax, or eax, -1, mov ecx / esi / edi, imm, rep movsd, push / pop
+// esi / edi, ret. False on any other instruction (another executable).
+bool RunInitialisers(const std::vector<uint8_t>& exe, std::map<uint32_t, uint32_t>& mem)
+{
+    auto rd = [&](uint32_t a) {
+        auto it = mem.find(a);
+        if (it != mem.end()) return it->second;
+        size_t o = ExeOffset(exe, a);
+        return o == SIZE_MAX ? 0u : U32(exe, o);
+    };
+    static const uint32_t kInit[4] = { 0x6da080, 0x6da7c0, 0x6daf00, 0x6db640 };
+    for (uint32_t start : kInit) {
+        size_t o = ExeOffset(exe, start);
+        if (o == SIZE_MAX) return false;
+        uint32_t eax = 0, ecx = 0, esi = 0, edi = 0;
+        for (int guard = 0;; ++guard) {
+            if (guard > 2000 || o + 10 > exe.size()) return false;
+            uint8_t b = exe[o];
+            if (b == 0x56 || b == 0x57 || b == 0x5e || b == 0x5f) { o += 1; continue; }
+            if (b == 0xc3) break;
+            if (b == 0xc7 && exe[o + 1] == 0x05) { mem[U32(exe, o + 2)] = U32(exe, o + 6); o += 10; continue; }
+            if (b == 0xc6 && exe[o + 1] == 0x05) {
+                uint32_t a = U32(exe, o + 2), w = rd(a & ~3u), sh = (a & 3) * 8;
+                mem[a & ~3u] = (w & ~(0xffu << sh)) | (uint32_t(exe[o + 6]) << sh);
+                o += 7;
+                continue;
+            }
+            if (b == 0xa3) { mem[U32(exe, o + 1)] = eax; o += 5; continue; }
+            if (b == 0x83 && exe[o + 1] == 0xc8 && exe[o + 2] == 0xff) { eax = 0xffffffffu; o += 3; continue; }
+            if (b == 0xb9) { ecx = U32(exe, o + 1); o += 5; continue; }
+            if (b == 0xbe) { esi = U32(exe, o + 1); o += 5; continue; }
+            if (b == 0xbf) { edi = U32(exe, o + 1); o += 5; continue; }
+            if (b == 0xf3 && exe[o + 1] == 0xa5) {
+                for (uint32_t i = 0; i < ecx; ++i) mem[edi + 4 * i] = rd(esi + 4 * i);
+                o += 2;
+                continue;
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+bool VehicleHandling(const std::vector<uint8_t>& exe, const std::vector<uint8_t>& bo3, int id, float out[kHandlingKeys])
+{
+    // 0x5142a0: ids 0x13..0x5b through the byte table 0x514308 and the jump
+    // table 0x5142e8 (each case mov eax, block; ret), else 0x7a3570.
+    uint32_t block = 0x7a3570;
+    if (id >= 0x13 && id - 0x13 <= 0x48) {
+        size_t t = ExeOffset(exe, 0x514308 + uint32_t(id - 0x13)), j = ExeOffset(exe, 0x5142e8);
+        if (t == SIZE_MAX || j == SIZE_MAX) return false;
+        size_t c = ExeOffset(exe, U32(exe, j + 4 * exe[t]));
+        if (c == SIZE_MAX || exe[c] != 0xb8) return false;
+        block = U32(exe, c + 1);
+    }
+    std::map<uint32_t, uint32_t> mem;
+    if (block >= 0x8b0000 && !RunInitialisers(exe, mem)) return false;
+    for (int k = 0; k < kHandlingKeys; ++k) {
+        uint32_t a = block + 4 * k, v = 0;
+        auto it = mem.find(a);
+        if (it != mem.end()) v = it->second;
+        else {
+            size_t o = ExeOffset(exe, a);
+            if (o == SIZE_MAX) return false;
+            v = U32(exe, o);
+        }
+        memcpy(&out[k], &v, 4);
+    }
+    // The BO3 record (0x511819 / 0x514360): offset table +0x380c = file +0x20
+    // (u16 per id, count +0x18), data +0x3808 = file +0x108.
+    if (bo3.size() < 0x108 || memcmp(bo3.data(), "BVO3", 4) != 0 || uint32_t(id) > U32(bo3, 0x18)) return true;
+    uint16_t rel = U16(bo3, 0x20 + size_t(id) * 2);
+    if (rel == 0xffff || rel >= 0x3000) return true;
+    size_t r = 0x108 + rel;
+    if (r + 12 > bo3.size() || memcmp(&bo3[r], "DVO3", 4) != 0) return true;
+    uint32_t count = U32(bo3, r + 8);
+    size_t p = r + 12;
+    for (uint32_t i = 0; i < count && p + 4 <= bo3.size(); ++i) {
+        uint32_t key = U32(bo3, p);
+        if (key == 0xaaaaffffu) break;
+        key &= 0x5555ffffu;
+        p += 4;
+        if (key < uint32_t(kHandlingKeys)) {
+            out[key] = F32(bo3, p);
+            p += 4;
+        }
+    }
+    return true;
+}
+
+int HandlingClass(int id)
+{
+    switch (id) {
+    case 0x1f: case 0x2c: case 0x43: case 0x44: case 0x51: case 0x52:
+        return 0x115;
+    case 0x2d: case 0x2e: case 0x2f: case 0x30: case 0x45: case 0x46: case 0x47:
+    case 0x53: case 0x54: case 0x55: case 0x59: case 0x5a: case 0x5b:
+        return 0x116;
+    case 0x31:
+        return 0x81;
+    case 0x56:
+        return 0x82;
+    default:
+        return 0x11b;
+    }
+}
+
+float RestCompression(const float t[kHandlingKeys])
+{
+    float c = -t[0x8c] * t[0] * 0.01f / t[1];  // [0x78e8dc] = 0.01
+    if (c > 1.0f) return 1.0f;
+    return c < 0.0f ? 0.0f : c;
+}
+
+float WheelOffset(const float t[kHandlingKeys], int cls)
+{
+    return cls == 0x11b ? -(t[3] * t[0x19]) : 0.0f;
 }

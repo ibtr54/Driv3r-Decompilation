@@ -37,6 +37,10 @@ struct Mood
     // g_envSpecColourAndLerpFactor of effects 0x1d, 0x1f, 0x20, 0x21 (the
     // vehicles; ps c0 of the original's car draws).
     float carSpecular[4] = { 1, 1, 1, 1 };
+    // +0x210 PARTICLE_COLOUR (w 1) and +0x21c PARTICLE_INTENSITY (defaults
+    // 1, 1, 1, 1 from 0x471cd5..): read by the particle emitters' makers
+    // (0x568e30, the exhaust) as their colour x intensity.
+    float particle[4] = { 1, 1, 1, 1 };
     // +0x15c SEA_COLOUR ("%d"): the water object keeps it - 1 (0..3, else
     // 0; 0x450c84) as the sea tiles' substance index (object +0x50).
     int seaColour = 1;

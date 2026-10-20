@@ -3048,13 +3048,28 @@ static bool RideGround(const CityGround& city, const float pose[4], float& groun
     return city.Probe(pose[0], pose[1] + 4.5f, pose[2], ground, normal);
 }
 
-// The static compression of the vehicle's suspension (0x5138c0: -[+0x125c]
-// x [+0x102c] x 0.01 / [+0x1030], clamped, from the handling of
-// Configs\Vehicles\BigVO3\<city>.BO3 through the vehicle's parameter table;
-// not decoded). Stand-in for every vehicle: the value of the traced creation
-// frame at start point 0 (vehicle 6: wheels 0.029 above their hardpoints,
-// body at radius + 0.17745 - 0.029049 = 0.487739 over the ground).
-static const float kRideCompression = 0.029049f;
+// The lift of the vehicle's wheel slots at rest (vehicle.h, BOOT_TO_MENU.md
+// section 61): the handling table of the id (the default block in
+// Driv3r.exe, then Configs\Vehicles\BigVO3\miami.BO3), the static
+// compression 0x5138c0 plus the slots' offset (class 0x11b). Vehicle 6:
+// 0.104801 - 0.0757526 = 0.0290484, the traced creation frame's. 0 when
+// the files cannot be read.
+static float RideLift(int id)
+{
+    static std::vector<uint8_t> exe, bo3;
+    if (exe.empty()) exe = ReadFile(g.gameDir + "\\Driv3r.exe");
+    if (bo3.empty()) bo3 = ReadFile(g.gameDir + "\\Configs\\Vehicles\\BigVO3\\miami.BO3");
+    float t[kHandlingKeys];
+    if (exe.empty() || !VehicleHandling(exe, bo3, id, t)) {
+        Log("Vehicle %d: handling not read (Driv3r.exe %zu bytes, BO3 %zu bytes)", id, exe.size(), bo3.size());
+        return 0.0f;
+    }
+    int cls = HandlingClass(id);
+    float c = RestCompression(t), o = WheelOffset(t, cls);
+    Log("Vehicle %d: class 0x%x, mass %g, spring %g, static compression %.6f, wheel offset %.7f, lift %.7f", id, cls,
+        t[0], t[1], c, o, c + o);
+    return c + o;
+}
 
 // The player's vehicle as the game creates it at the start pose (0x476480
 // -> 0x50e940, vehicle.h): its package in Vehicles\<City>.vvs, the shared
@@ -3077,7 +3092,9 @@ static bool RideVehicleDraw(const LevelLoader& loader, int id, const float pose[
         out.globals = loader.FirstPackageOf("Vehicles\\Miami\\CarGlobalsMiami.vgt");
         float body[16];
         std::vector<float> wheels;
-        VehicleCreationPose(v, p, pose, ground, kRideCompression, body, wheels, height);
+        VehicleCreationPose(v, p, pose, ground, RideLift(id), body, wheels, height);
+        memcpy(out.body, body, sizeof(body));
+        out.exhausts = v.exhausts;  // the exhaust smoke (standing: all four emitters on)
         for (int m : v.body) {
             VehicleDraw::Part part;
             part.model = m;
@@ -3205,7 +3222,7 @@ public:
                              haveCar ? &car : nullptr))
                 Log("Level 0x%02x: Direct3D 9 view (back buffer %s), %d effects from Driv3r.exe%s%s, %zu city groups "
                     "drawn, %zu left out",
-                    mission, view_.HasAlpha() ? "A8R8G8B8" : "desktop format, no alpha", city_.effects,
+                    mission, view_.HasAlpha() ? "A8R8G8B8" : "without alpha (X8R8G8B8: the shadow patch, or the desktop format)", city_.effects,
                     city_.failedEffects.empty() ? "" : " (not created:",
                     city_.failedEffects.empty() ? "" : (city_.failedEffects + ")").c_str(), city_.groupsDrawn,
                     city_.groupsSkipped);
@@ -3242,6 +3259,8 @@ public:
                         car.globals ? "CarGlobals materials" : "no CarGlobals", car.parts[0].world[12],
                         car.parts[0].world[13], car.parts[0].world[14], ground, carHeight,
                         city_.vehicleInfo.empty() ? "none" : city_.vehicleInfo.c_str());
+                    Log("Level 0x%02x: exhaust smoke: %s", mission,
+                        city_.smokeInfo.empty() ? "not drawn" : city_.smokeInfo.c_str());
                 } else
                     Log("Level 0x%02x: vehicle %d not drawn (%s)", mission, rideVehicle,
                         boat ? "a boat" : "not in the vehicle file");

@@ -471,6 +471,20 @@ bool CityRenderer::Init(IDirect3DDevice9* device, const std::string& exePath)
         D3DDECL_END(),
     };
     if (FAILED(device_->CreateVertexDeclaration(elems3, &decl3_))) { error_ = "vertex declaration 3"; return false; }
+    // The particles' declaration as traced (stream 0, 80 bytes; SmokeVertex).
+    const D3DVERTEXELEMENT9 elemsSmoke[] = {
+        { 0, 0, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 1 },
+        { 0, 12, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 1 },
+        { 0, 24, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 2 },
+        { 0, 36, D3DDECLTYPE_D3DCOLOR, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_COLOR, 0 },
+        { 0, 40, D3DDECLTYPE_D3DCOLOR, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_COLOR, 1 },
+        { 0, 44, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 2 },
+        { 0, 52, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 3 },
+        { 0, 60, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0 },
+        { 0, 68, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0 },
+        D3DDECL_END(),
+    };
+    if (FAILED(device_->CreateVertexDeclaration(elemsSmoke, &smokeDecl_))) { error_ = "particle declaration"; return false; }
     if (FAILED(createPool(&pool_))) { error_ = "effect pool"; return false; }
     // The data sections are mapped at file offset + 0x400000.
     for (const FxEntry& e : kFx) {
@@ -530,6 +544,11 @@ bool CityRenderer::Init(IDirect3DDevice9* device, const std::string& exePath)
         f.colourWeights = fx->GetParameterByName(nullptr, "g_colourWeightsVec");
         f.damageFactor = fx->GetParameterByName(nullptr, "g_DamageFactor");
         if (f.extrusion) fx->SetFloat(f.extrusion, kExtrusion);
+        if (e.id == 0x2c) {  // the particles (vs: c8 / c9, c10, c11)
+            cameraToScreen_ = fx->GetParameterByName(nullptr, "s_CameraToScreen");
+            timeAndConstants_ = fx->GetParameterByName(nullptr, "g_TimeAndConstants");
+            compression_ = fx->GetParameterByName(nullptr, "g_Compression");
+        }
         if (e.id == 7 || e.id == 9) {  // class 0x5d3da0, handles 0x5deaa0
             f.lerp = fx->GetParameterByName(nullptr, "g_TextureLerp");
             f.diffuse2[0] = fx->GetParameterByName(nullptr, "g_TextureDiffuse1");
@@ -916,6 +935,42 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
             snprintf(buf, sizeof(buf), "%seffect %d x%zu", vehicleInfo.empty() ? "" : ", ", e.first, e.second);
             vehicleInfo += buf;
         }
+    }
+    // The exhaust smoke (smoke.h): one emitter per tip of the vehicle, drawn
+    // with sfx.pmu's material 0x1f0000 and the particle manager's render id
+    // 0x2c (no substance entry: the effect is the id).
+    smokeInfo.clear();
+    smoke_.Setup({}, vehicle ? vehicle->body : nullptr, mood_.particle);
+    smokeTime_ = -1;
+    if (smokeVb_) smokeVb_->Release();
+    smokeVb_ = nullptr;
+    if (vehicle && !vehicle->exhausts.empty() && sfx && sfx->uid == 0x1f) {
+        int sfxPackage = -1;
+        for (size_t i = 0; i < packages_.size(); ++i)
+            if (packages_[i].data == sfx) sfxPackage = int(i);
+        if (sfxPackage < 0) {
+            sfxPackage = int(packages_.size());
+            AddPackage(*sfx);
+        }
+        const std::map<uint32_t, int> sfxUid = { { sfx->uid, sfxPackage } };
+        smokeGroup_ = GroupFor(0x1f0000, 0x2c, false, true, sfxUid);
+        smoke_.Setup(vehicle->exhausts, vehicle->body, mood_.particle);
+        UINT bytes = UINT(smoke_.Vertices().size() * sizeof(SmokeVertex));
+        if (smokeGroup_.fx == 0x2c && smokeDecl_ &&
+            SUCCEEDED(device_->CreateVertexBuffer(bytes, D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, &smokeVb_, nullptr))) {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "%d emitters x %d slots, material 0x1f0000, effect 0x%x, type %d, preset 0x%02x",
+                     smoke_.Emitters(), ExhaustSmoke::kSlots, unsigned(smokeGroup_.fx), int(smokeGroup_.type),
+                     unsigned(states_[smokeGroup_.state].base));
+            smokeInfo = buf;
+        } else {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "not drawn (material 0x1f0000: effect %d, type %d; %d emitters)", smokeGroup_.fx,
+                     int(smokeGroup_.type), smoke_.Emitters());
+            smokeInfo = buf;
+        }
+    } else if (vehicle) {
+        smokeInfo = vehicle->exhausts.empty() ? "not drawn (no exhaust tips)" : "not drawn (no sfx.pmu)";
     }
     // Instances no quadtree reaches are not drawn (as in the game).
     std::vector<bool> reached(city.instances.size(), false);
@@ -1397,6 +1452,43 @@ void CityRenderer::DrawShadowAlpha(int& applied)
     e.fx->EndPass();
     e.fx->End();
     if (e.diffuse) e.fx->SetTexture(e.diffuse, white_);
+}
+
+// The exhaust smoke: the emitters ticked up to the game time (60 ticks a
+// second), every ring copied to the buffer and drawn as the traced type 31
+// draws: one DrawPrimitive of 30 quads per emitter, World identity, effect
+// 0x2c with s_CameraToScreen = the projection's x / y scale rows (c8 / c9),
+// g_TimeAndConstants = (the emitters' clock, 0, 1, 0.5) and g_Compression
+// = (1, 1, 1, 1) (the traced c10 / c11).
+void CityRenderer::DrawSmoke(float fov, float aspect, int& applied)
+{
+    if (!smokeVb_ || smokeGroup_.fx != 0x2c || !fx_[0x2c].fx) return;
+    if (smokeTime_ >= 0 && time_ > smokeTime_) smoke_.Advance(time_ - smokeTime_);
+    smokeTime_ = time_;
+    const std::vector<SmokeVertex>& verts = smoke_.Vertices();
+    void* p = nullptr;
+    if (FAILED(smokeVb_->Lock(0, 0, &p, 0)) || !p) return;
+    memcpy(p, verts.data(), verts.size() * sizeof(SmokeVertex));
+    smokeVb_->Unlock();
+    Effect& e = fx_[0x2c];
+    float xs = 1.0f / std::tan(fov * 0.5f), ys = xs * aspect;
+    const D3DXMATRIX toScreen(xs, 0, 0, 0, 0, ys, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    if (cameraToScreen_) e.fx->SetMatrix(cameraToScreen_, &toScreen);
+    const D3DXVECTOR4 timeConst(smoke_.DrawTime(), 0, 1, 0.5f), compression(1, 1, 1, 1);
+    if (timeAndConstants_) e.fx->SetVector(timeAndConstants_, &timeConst);
+    if (compression_) e.fx->SetVector(compression_, &compression);
+    UINT passes = 0;
+    if (FAILED(e.fx->Begin(&passes, D3DXFX_DONOTSAVESTATE)) || FAILED(e.fx->BeginPass(0))) return;
+    static const float kIdentity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    BindGroup(smokeGroup_, smokeGroup_.state, kIdentity, applied, 1.0f, 0);
+    SetDecl(smokeDecl_);
+    device_->SetStreamSource(0, smokeVb_, 0, sizeof(SmokeVertex));
+    for (int i = 0; i < smoke_.Emitters(); ++i) {
+        device_->DrawPrimitive(D3DPT_TRIANGLELIST, UINT(i * ExhaustSmoke::kSlots * 6), ExhaustSmoke::kSlots * 2);
+        ++frameDraws;
+    }
+    e.fx->EndPass();
+    e.fx->End();
 }
 
 // 0x5616c0: each buffer object with vertices draws its list (D3DPT_TRIANGLELIST,
@@ -1928,6 +2020,9 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
         SetLight(mood_.ambient, mood_.directional, dir);
         SetEnvSpec(mood_.directional);
     }
+    // The particles: in the trace right after the tree shadows (the last
+    // draws of the shadow pass), before the HUD.
+    DrawSmoke(fov, aspect, applied);
     drawList(late, false);  // list 2, mode 2
 }
 
@@ -1999,6 +2094,12 @@ void CityRenderer::Release()
     decl5_ = nullptr;
     if (decl3_) decl3_->Release();
     decl3_ = nullptr;
+    if (smokeDecl_) smokeDecl_->Release();
+    smokeDecl_ = nullptr;
+    if (smokeVb_) smokeVb_->Release();
+    smokeVb_ = nullptr;
+    smokeInfo.clear();
+    cameraToScreen_ = timeAndConstants_ = compression_ = nullptr;
     currentDecl_ = nullptr;
     vehicleParts_.clear();
     vehicleWorlds_.clear();

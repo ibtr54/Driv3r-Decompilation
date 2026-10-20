@@ -76,11 +76,15 @@ bool Mood::Load(const std::string& path)
             rgb(l, "CAR_SPECULAR_COLOUR: %f, %f, %f", carSpecular, 1);
         } else if (is(l, "CAR_SPECULAR_INTENSITY")) {
             sscanf(l, "CAR_SPECULAR_INTENSITY: %f", &carSpecular[3]);
+        } else if (is(l, "PARTICLE_COLOUR")) {
+            rgb(l, "PARTICLE_COLOUR: %f, %f, %f", particle, 1);
+        } else if (is(l, "PARTICLE_INTENSITY")) {
+            sscanf(l, "PARTICLE_INTENSITY: %f", &particle[3]);
         } else if (is(l, "SHINY_WATER_TINT")) {
             rgb(l, "SHINY_WATER_TINT: %f, %f, %f", shinyWaterTint, 1);
         }
         // The other keys (street / head lights, car specular,
-        // rain, shiny road, sun flare, particles,
+        // rain, shiny road, sun flare,
         // music, light glow, time of day, weather, kerb height, headlight
         // colours) are not used here.
     }

@@ -40,6 +40,13 @@ struct VehicleData
     int mdpc = -1;            // the file's k-th MDPC chunk
     std::vector<int> body;    // models of the parts of type 1, in part order
     std::vector<VehicleWheel> wheels;  // the parts of type 2, in part order
+    // The exhaust tips (x, y, z in the vehicle's space, part after part):
+    // the parts of type 3 with id 6, whose u16 +0x16 indexes the table of
+    // +0x20 x 0x10 (vec4 points). Vehicle 6: four tips (+-0.300 / +-0.443,
+    // -0.133, -2.256), where the original's four exhaust emitters sit
+    // (section 60; the code that copies them to the vehicle's +0x1d4
+    // entries was not found).
+    std::vector<float> exhausts;
 };
 
 // Every vehicle entry of a .vvs file (false: not one).
@@ -51,8 +58,9 @@ bool ReadVehicles(const std::vector<uint8_t>& file, std::vector<VehicleData>& ou
 // plus 0x513c10 = radius - (hardpoint y + compression) of the wheel in slot
 // 0 (the first slot with a wheel), level; the wheels at their hardpoints
 // moved up by the compression, not turned. The traced creation frame
-// (start point 0, vehicle 6) has exactly this. compression is 0x5138c0
-// (from the handling, not decoded: a stand-in here).
+// (start point 0, vehicle 6) has exactly this. compression: the wheel slots'
+// lift, RestCompression + WheelOffset (0x5115c0 adds the slot's offset to
+// the hardpoint; 0x513c10 subtracts 0x5138c0).
 // Row-vector matrices (Direct3D): body, then 16 floats per wheel in
 // VehicleData::wheels order, to be applied to the models' vertices as
 // stored (the wheel model sits at one hardpoint, kept in the 4th row of its
@@ -60,3 +68,25 @@ bool ReadVehicles(const std::vector<uint8_t>& file, std::vector<VehicleData>& ou
 // degrees about y when on the other side; traced at the creation frame).
 void VehicleCreationPose(const VehicleData& v, const MdpcPackage& p, const float pose[4], float ground, float compression,
                          float body[16], std::vector<float>& wheels, float& height);
+
+// The handling (BOOT_TO_MENU.md section 61): the vehicle model's table of
+// 190 floats at +0x102c (0x511780): the default block of the id (0x5142a0:
+// 0x7a3570 for the cars, others for ids 0x13..0x5b, some of them built in
+// .bss by static initialisers), then the id's record of
+// Configs\Vehicles\BigVO3\<city>.BO3 ('BVO3', version 2, u16 offsets per id
+// at +0x20 from +0x108 to 'DVO3' records: count at +8, then {u16 key, 0xaaaa,
+// f32 value} up to 0xaaaaffff; keys >= 0xbe skipped, 0x514360); the loader's
+// vtbl+0x48 afterwards changed nothing in the traces. Key 0 is the mass, 1
+// the spring, 3 and 0x19 the wheel offset, 0x8c the gravity term. False when
+// the executable is not the one decoded.
+const int kHandlingKeys = 0xbe;
+bool VehicleHandling(const std::vector<uint8_t>& exe, const std::vector<uint8_t>& bo3, int id, float out[kHandlingKeys]);
+// 0x513d20: the vehicle model's class (+8) by id: 0x115, 0x116 (boats), 0x81
+// (id 0x31), 0x82 (id 0x56), else 0x11b (the cars).
+int HandlingClass(int id);
+// 0x5138c0: the static compression, -[0x8c] x [0] x 0.01 / [1], clamped to
+// 0..1 (vehicle 6: 0.104801).
+float RestCompression(const float t[kHandlingKeys]);
+// 0x511780: every wheel slot's offset (y of +0x92c + 0x10 x slot):
+// -[3] x [0x19] for class 0x11b, else 0 (vehicle 6: -0.0757526).
+float WheelOffset(const float t[kHandlingKeys], int cls);

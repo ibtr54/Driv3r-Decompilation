@@ -70,6 +70,7 @@
 #include "city.h"
 #include "mdpc.h"
 #include "mood.h"
+#include "smoke.h"
 #include "treeshadow.h"
 
 // The camera's view-projection (+0xc0 = view +0x40 x projection +0x80,
@@ -103,6 +104,10 @@ struct VehicleDraw
     std::vector<Part> parts;
     float colour[3] = {};
     float damage = 0;
+    // The body's World and the exhaust tips in the vehicle's space (x, y, z
+    // per tip; VehicleData::exhausts): the exhaust smoke (smoke.h).
+    float body[16] = {};
+    std::vector<float> exhausts;
 };
 
 class CityRenderer
@@ -183,6 +188,10 @@ public:
     std::string skyInfo;
     // The vehicle's drawn groups per effect / base preset ("": none).
     std::string vehicleInfo;
+    // The exhaust smoke's material / effect / preset ("": none) and the
+    // particles spawned so far.
+    std::string smokeInfo;
+    int SmokeSpawned() const { return smoke_.Spawned(); }
 
 private:
     struct Package
@@ -298,6 +307,9 @@ private:
     // The two screen quads before the tree shadows (type 2: alpha 0
     // everywhere; type 3: alpha 1 where the volumes left stencil >= 1).
     void DrawShadowAlpha(int& applied);
+    // The exhaust emitters' rings (smoke.h), effect 0x2c, after the shadow
+    // pass. fov / aspect: s_CameraToScreen.
+    void DrawSmoke(float fov, float aspect, int& applied);
     void DrawGroup(const Package& p, const MdpcModel& m, const MdpcGroup& g, const Package::Group& info, int state,
                    const float world[16], int& applied, float alpha = 1.0f, uint32_t substance = 0);
     void BindGroup(const Package::Group& info, int state, const float world[16], int& applied, float alpha,
@@ -362,6 +374,8 @@ private:
     // Declaration index 5 (0x5d099b, 60 bytes: the vehicles) and the one set.
     IDirect3DVertexDeclaration9* decl5_ = nullptr;
     IDirect3DVertexDeclaration9* decl3_ = nullptr;  // declaration index 3 (the screen quads)
+    // The particles' declaration (80 bytes, the traced one; SmokeVertex).
+    IDirect3DVertexDeclaration9* smokeDecl_ = nullptr;
     IDirect3DVertexDeclaration9* currentDecl_ = nullptr;
     void SetDecl(IDirect3DVertexDeclaration9* decl)
     {
@@ -400,6 +414,17 @@ private:
     TreeShadows trees_;
     Package::Group treeGroup_[3];
     IDirect3DVertexBuffer9* treeVb_[3] = {};
+    // Exhaust smoke: sfx.pmu material 0x1f0000 with render id 0x2c (the
+    // particle manager's draw, 0x56e500 -> 0x5cfd00), the emitters, a
+    // managed buffer of every ring refilled per frame, effect 0x2c's
+    // s_CameraToScreen / g_TimeAndConstants / g_Compression.
+    ExhaustSmoke smoke_;
+    Package::Group smokeGroup_;
+    IDirect3DVertexBuffer9* smokeVb_ = nullptr;
+    const char* cameraToScreen_ = nullptr;
+    const char* timeAndConstants_ = nullptr;
+    const char* compression_ = nullptr;
+    float smokeTime_ = -1;  // time_ of the last Advance
     LodTable tables_[2];           // mode 1 (0x4ddc50) and mode 3 (0x4dde20)
     std::vector<StateSet> states_;
     // What the device has (valid: set by ApplyState since the last reset).
