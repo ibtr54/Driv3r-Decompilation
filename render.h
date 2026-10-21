@@ -122,6 +122,10 @@ public:
     // vehicle: the player's vehicle (nullptr: none).
     bool Upload(const std::vector<MdpcPackage>& packages, size_t first, size_t end, const CityPlacement& city,
                 const MdpcPackage* sky = nullptr, const MdpcPackage* sfx = nullptr, const VehicleDraw* vehicle = nullptr);
+    // The player's vehicle moved: the parts' World (VehicleDraw::parts order,
+    // 16 floats each), from the next Draw. (The exhaust smoke keeps the
+    // tips it was set up with.)
+    void SetVehiclePose(const std::vector<float>& worlds);
     // The level's light, fog and sky matrix (used from the next Draw).
     void SetMood(const Mood& mood) { mood_ = mood; }
     // The profile's Shadows setting (+0xc8c).
@@ -387,6 +391,7 @@ private:
     // with mask 0x22: slot 0 and the shadow volume), Worlds, colour, damage.
     std::vector<int> vehicleParts_;
     std::vector<std::vector<float>> vehicleWorlds_;
+    std::vector<size_t> vehicleWorldPart_;  // the VehicleDraw part of each vehicleWorlds_ entry
     float vehicleColour_[3] = {}, vehicleDamage_ = 0;
     IDirect3DTexture9* white_ = nullptr;
     std::vector<Package> packages_;

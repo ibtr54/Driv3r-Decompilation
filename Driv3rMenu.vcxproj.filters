@@ -32,6 +32,12 @@
     <ClCompile Include="vehicle.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="physics.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="carsim.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="mood.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -60,6 +66,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="vehicle.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="physics.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="carsim.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="mood.h">

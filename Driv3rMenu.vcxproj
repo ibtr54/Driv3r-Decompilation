@@ -86,6 +86,8 @@
     <ClCompile Include="treeshadow.cpp" />
     <ClCompile Include="smoke.cpp" />
     <ClCompile Include="vehicle.cpp" />
+    <ClCompile Include="physics.cpp" />
+    <ClCompile Include="carsim.cpp" />
     <ClCompile Include="mood.cpp" />
     <ClCompile Include="render.cpp" />
     <ClCompile Include="mec.cpp" />
@@ -98,6 +100,8 @@
     <ClInclude Include="treeshadow.h" />
     <ClInclude Include="smoke.h" />
     <ClInclude Include="vehicle.h" />
+    <ClInclude Include="physics.h" />
+    <ClInclude Include="carsim.h" />
     <ClInclude Include="mood.h" />
     <ClInclude Include="render.h" />
     <ClInclude Include="mec.h" />

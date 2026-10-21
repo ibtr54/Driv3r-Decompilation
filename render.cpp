@@ -903,6 +903,7 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
     // each part an object of its own with the vehicle's World.
     vehicleParts_.clear();
     vehicleWorlds_.clear();
+    vehicleWorldPart_.clear();
     vehicleInfo.clear();
     if (vehicle && vehicle->package) {
         std::map<uint32_t, int> carUid;
@@ -917,9 +918,11 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
         vehicleDamage_ = vehicle->damage;
         std::map<int, size_t> perFx;
         vehicleWorlds_.reserve(vehicle->parts.size());
-        for (const VehicleDraw::Part& part : vehicle->parts) {
+        for (size_t pi = 0; pi < vehicle->parts.size(); ++pi) {
+            const VehicleDraw::Part& part = vehicle->parts[pi];
             if (part.model < 0 || size_t(part.model) >= vehicle->package->models.size()) continue;
             vehicleWorlds_.emplace_back(part.world, part.world + 16);
+            vehicleWorldPart_.push_back(pi);
             Instance inst;
             inst.package = car;
             inst.model = uint32_t(part.model);
@@ -2103,6 +2106,7 @@ void CityRenderer::Release()
     currentDecl_ = nullptr;
     vehicleParts_.clear();
     vehicleWorlds_.clear();
+    vehicleWorldPart_.clear();
     vehicleInfo.clear();
     if (white_) white_->Release();
     shared_ = nullptr;
@@ -2118,4 +2122,14 @@ void CityRenderer::Release()
     shadowInstances = lateGroups = hiddenGroups = 0;
     shadowState_[0] = shadowState_[1] = -1;
     textures = texturesSkipped = groupsUntextured = 0;
+}
+
+void CityRenderer::SetVehiclePose(const std::vector<float>& worlds)
+{
+    for (size_t i = 0; i < vehicleWorlds_.size() && i < vehicleParts_.size(); ++i) {
+        size_t part = vehicleWorldPart_[i];
+        if ((part + 1) * 16 > worlds.size()) continue;
+        memcpy(vehicleWorlds_[i].data(), &worlds[part * 16], 16 * sizeof(float));
+        memcpy(instances_[size_t(vehicleParts_[i])].centre, &worlds[part * 16 + 12], 3 * sizeof(float));
+    }
 }

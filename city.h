@@ -141,8 +141,10 @@ public:
     // c (fx, fz in the node, > -1e-5: front) ending in a plane; 0x4e9ef0
     // keeps the highest layer below y + 0.5 (else a lower one). Height =
     // (d - a lx - c lz) / b (lx, lz from the origin); normal (a, b, c).
-    // False: no ground (the game's -500).
-    bool Probe(float x, float y, float z, float& height, float normal[3]) const;
+    // surface: the plane's u16 +0x10 (the probe's +0x14, the ground's
+    // surface for the physics rays, 0x4e9e46). False: no ground (the game's
+    // -500, surface 0).
+    bool Probe(float x, float y, float z, float& height, float normal[3], int* surface = nullptr) const;
 
 private:
     struct Chunk
@@ -154,6 +156,25 @@ private:
     };
     bool Query(const Chunk& c, float x, float y, float z, float& height, uint32_t& plane) const;
     std::vector<Chunk> chunks_;
+};
+
+// A region's collision shapes (BOOT_TO_MENU.md section 63): the GESR
+// children GEPM (handler vtbl 0x780d90, tag 0x44ce20, register 0x44ce50:
+// +0 region, +4 offset of a "PDL001.002.003a" block, relocated by 0x5a5a50
+// and kept at [0x7e9bb0]+0x20c +0x32cc + region x 4) and PMLD (+0 region, +4
+// count, +8 offset of 0x14-byte records {u32 model id = package uid << 10 |
+// model index, u32 first PDL entry, u32 entry count, f32 radius, u32}).
+// PDL block: +0 entries, +8 entry table (0x10 bytes: shape count, shapes'
+// offset from the entry, radius), shapes 0x60 bytes: +0 size (box half
+// extents; cylinder radius / half height about y; sphere radius), +0x10 the
+// shape's 4 x 4 matrix in its object, +0x50 type (low byte: 0 box, 1
+// cylinder, 2 sphere) | surface << 8, +0x54 / +0x58 / +0x5c (0.7, 0.6, 1).
+struct CityCollisionRegion
+{
+    int region = -1;
+    std::vector<uint8_t> pdl;  // the PDL block as stored (offsets unrelocated)
+    struct Model { uint32_t id, first, count; float radius; };
+    std::vector<Model> models; // PMLD records
 };
 
 class CityPlacement
@@ -173,6 +194,13 @@ public:
     std::vector<CityTreeCell> treeCells;
     // The GRTD chunks: the ground heights of the cells.
     CityGround ground;
+    // The GEPM / PMLD chunks of the GESR regions (collision).
+    std::vector<CityCollisionRegion> collision;
+    // The dynamic props: the model ids of the GEPD / HRDT groups ('AWHF'
+    // records like the vehicles' UPVH, model id at +0x14; 0x44f823 loads
+    // them). Their instances are physics bodies in the game, not static
+    // collision.
+    std::vector<uint32_t> dynamicModels;
     // GEIR cells per side (12 in Miami, 15 in Nice and Istanbul); a cell
     // is 480 units and the grid is centred on 0, so column c starts at
     // x = 480 * (c - gridSide / 2) and row r ends at z = -480 * (r - gridSide / 2)

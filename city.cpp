@@ -53,6 +53,8 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
     water = CityWater();
     treeCells.clear();
     ground.Clear();
+    collision.clear();
+    dynamicModels.clear();
     error_.clear();
     if (d.size() < 16 || memcmp(d.data(), "CHNK", 4) != 0) { error_ = "not a CHNK file"; return false; }
     // Top level: GESR regions, GEIR cells, IRCT, PINF, GEGL, PCSL. The GEBI
@@ -79,6 +81,48 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
             if (memcmp(&d[c], "GRTD", 4) == 0 && !ground.Add(d, g + U32(d, c + 4), U32(d, c + 12))) {
                 error_ = "GRTD";
                 return false;
+            }
+            if (memcmp(&d[c], "GEPM", 4) == 0 || memcmp(&d[c], "PMLD", 4) == 0) {
+                size_t off = g + U32(d, c + 4), size = U32(d, c + 12);
+                if (off + size > d.size() || size < 0x10) { error_ = "GEPM / PMLD"; return false; }
+                int region = int(U32(d, off));
+                CityCollisionRegion* cr = nullptr;
+                for (CityCollisionRegion& r : collision)
+                    if (r.region == region) cr = &r;
+                if (!cr) {
+                    collision.emplace_back();
+                    cr = &collision.back();
+                    cr->region = region;
+                }
+                if (d[c] == 'G') {
+                    size_t pdl = off + U32(d, off + 4);
+                    if (pdl + 0x20 > off + size || memcmp(&d[pdl + 0x10], "PDL001", 6) != 0) { error_ = "GEPM"; return false; }
+                    cr->pdl.assign(d.begin() + pdl, d.begin() + off + size);
+                } else {
+                    uint32_t n = U32(d, off + 4);
+                    size_t rec = off + U32(d, off + 8);
+                    if (rec + size_t(n) * 0x14 > off + size) { error_ = "PMLD"; return false; }
+                    for (uint32_t i = 0; i < n; ++i) {
+                        size_t r = rec + size_t(i) * 0x14;
+                        cr->models.push_back({ U32(d, r), U32(d, r + 4), U32(d, r + 8), F32(d, r + 12) });
+                    }
+                }
+            }
+            if (memcmp(&d[c], "GEPD", 4) == 0) {
+                size_t off = g + U32(d, c + 4), size = U32(d, c + 12);
+                if (off + 16 <= d.size() && off + size <= d.size() && memcmp(&d[off], "CHNK", 4) == 0) {
+                    for (uint32_t i = 0; i < U32(d, off + 8); ++i) {
+                        size_t cc = off + 16 + size_t(i) * 16;
+                        if (cc + 16 > off + size || memcmp(&d[cc], "HRDT", 4) != 0) continue;
+                        size_t h = off + U32(d, cc + 4);
+                        uint32_t n = U32(d, h);
+                        for (uint32_t gi = 0; gi < n && h + 8 + 4 * size_t(gi) <= d.size(); ++gi) {
+                            size_t rec = h + U32(d, h + 4 + 4 * size_t(gi));
+                            if (rec + 0x18 <= d.size() && memcmp(&d[rec], "AWHF", 4) == 0)
+                                dynamicModels.push_back(U32(d, rec + 0x14));
+                        }
+                    }
+                }
             }
             if (memcmp(&d[c], "SCND", 4) == 0 && !scnd) {
                 scnd = g + U32(d, c + 4);
@@ -213,13 +257,14 @@ bool CityGround::Query(const Chunk& c, float x, float y, float z, float& height,
     return found;
 }
 
-bool CityGround::Probe(float x, float y, float z, float& height, float normal[3]) const
+bool CityGround::Probe(float x, float y, float z, float& height, float normal[3], int* surface) const
 {
     for (const Chunk& c : chunks_) {
         uint32_t plane = 0;
         if (!Query(c, x, y, z, height, plane)) continue;
         size_t p = c.planes + size_t(plane) * 20;
         for (int k = 0; k < 3; ++k) normal[k] = F32(c.d, p + 4 * size_t(k));
+        if (surface) *surface = int(c.d[p + 16] | (c.d[p + 17] << 8));
         return true;
     }
     return false;

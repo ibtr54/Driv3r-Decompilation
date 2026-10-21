@@ -35,6 +35,8 @@
 #include "level.h"
 #include "render.h"
 #include "mec.h"
+#include "carsim.h"
+#include "collision.h"
 #include "story.h"
 
 #pragma comment(lib, "winmm.lib")  // waveOut (menu sounds, music)
@@ -3054,21 +3056,73 @@ static bool RideGround(const CityGround& city, const float pose[4], float& groun
 // compression 0x5138c0 plus the slots' offset (class 0x11b). Vehicle 6:
 // 0.104801 - 0.0757526 = 0.0290484, the traced creation frame's. 0 when
 // the files cannot be read.
-static float RideLift(int id)
+static bool RideHandling(int id, float t[kHandlingKeys])
 {
     static std::vector<uint8_t> exe, bo3;
     if (exe.empty()) exe = ReadFile(g.gameDir + "\\Driv3r.exe");
     if (bo3.empty()) bo3 = ReadFile(g.gameDir + "\\Configs\\Vehicles\\BigVO3\\miami.BO3");
+    if (!exe.empty() && VehicleHandling(exe, bo3, id, t)) return true;
+    Log("Vehicle %d: handling not read (Driv3r.exe %zu bytes, BO3 %zu bytes)", id, exe.size(), bo3.size());
+    return false;
+}
+
+static float RideLift(int id)
+{
     float t[kHandlingKeys];
-    if (exe.empty() || !VehicleHandling(exe, bo3, id, t)) {
-        Log("Vehicle %d: handling not read (Driv3r.exe %zu bytes, BO3 %zu bytes)", id, exe.size(), bo3.size());
-        return 0.0f;
-    }
+    if (!RideHandling(id, t)) return 0.0f;
     int cls = HandlingClass(id);
     float c = RestCompression(t), o = WheelOffset(t, cls);
     Log("Vehicle %d: class 0x%x, mass %g, spring %g, static compression %.6f, wheel offset %.7f, lift %.7f", id, cls,
         t[0], t[1], c, o, c + o);
     return c + o;
+}
+
+// The wheel rays (0x5a0820) against the city's static collision (the
+// placed instances' PDL shapes) and its GRTD ground (collision.h). The
+// dynamic props are not in the world yet (no bodies), so the car passes
+// through them.
+class WorldRays : public WheelRayCaster
+{
+public:
+    const CollisionWorld* world = nullptr;
+    const CityGround* ground = nullptr;
+    void Cast(WheelRay* rays, WheelHit* hits, int count) override
+    {
+        for (int i = 0; i < count; ++i) {
+            const WheelRay& r = rays[i];
+            hits[i] = WheelHit();
+            CollisionWorld::Hit h;
+            if (!world || !world->Cast(ground, r.start, r.dir, r.length, h)) continue;
+            hits[i].type = 2;
+            hits[i].distance = h.distance;
+            hits[i].f8 = -1;
+            hits[i].surface = h.surface;
+            hits[i].normal[0] = h.normal[0];
+            hits[i].normal[1] = h.normal[1];
+            hits[i].normal[2] = h.normal[2];
+            hits[i].normal[3] = 0;
+        }
+    }
+};
+
+// 4 x 4 row-vector product a b.
+static void MatMul4(const float* a, const float* b, float* out)
+{
+    for (int r = 0; r < 4; ++r)
+        for (int k = 0; k < 4; ++k)
+            out[r * 4 + k] = a[r * 4] * b[k] + a[r * 4 + 1] * b[4 + k] + a[r * 4 + 2] * b[8 + k] + a[r * 4 + 3] * b[12 + k];
+}
+
+// The virtual key of a control id's key in the profile's key map (0: none).
+static UINT ControlVk(int id)
+{
+    for (const KeyRecord& r : g.keymap) {
+        if (r.id != id || r.axis != 0) continue;
+        int k = r.bind[0].key;
+        if (k & 0xf000) return 0;
+        return MapVirtualKeyW(UINT((k & 0x7f) | ((k & 0x80) ? 0xe000 : 0)), MAPVK_VSC_TO_VK_EX);
+    }
+    return 0;
 }
 
 // The player's vehicle as the game creates it at the start pose (0x476480
@@ -3266,6 +3320,10 @@ public:
                         boat ? "a boat" : "not in the vehicle file");
             } else
                 Log("Level 0x%02x: Direct3D 9 view (black), city not drawn: %s", mission, city_.Error().c_str());
+            // The car's physics (carsim.h): created at the start pose as the
+            // game does (0x4b1470), stepped at 120 Hz from the first frame.
+            carOn_ = false;
+            if (haveCar) InitCar(rideVehicle, pose, car);
             drawn_ = 0;
         }
     }
@@ -3280,9 +3338,24 @@ public:
         lastFrame_ = now.QuadPart;
         levelTime_ += dt;
         city_.SetTime(float(levelTime_));
+        StepCar(dt);
         if (free_) MoveFreeCamera(dt < 0.1f ? dt : 0.1f);
         const float* eye = free_ ? freeEye_ : startEye_;
         float yaw = free_ ? freeYaw_ : startYaw_, pitch = free_ ? freePitch_ : startPitch_;
+        float followEye[3];
+        if (!free_ && carOn_) {
+            // Program stand-in for the chase camera (0x567430.., not
+            // ported): the start camera kept at its place behind the car,
+            // turned with the car's heading.
+            const float* m = &carBody_.matrix[0][0];
+            float d = std::atan2(m[8], m[10]) - carYaw0_, cd = std::cos(d), sd = std::sin(d);
+            float off[3] = { startEye_[0] - carPos0_[0], startEye_[1] - carPos0_[1], startEye_[2] - carPos0_[2] };
+            followEye[0] = m[12] + off[0] * cd + off[2] * sd;
+            followEye[1] = m[13] + off[1];
+            followEye[2] = m[14] - off[0] * sd + off[2] * cd;
+            eye = followEye;
+            yaw = startYaw_ + d;
+        }
         float at[3] = { eye[0] + std::sin(yaw) * std::cos(pitch), eye[1] + std::sin(pitch),
                         eye[2] + std::cos(yaw) * std::cos(pitch) };
         // Field of view as traced: x scale 1.74654 at all three start points
@@ -3374,6 +3447,123 @@ private:
         for (int k = 0; k < 3; ++k) freeEye_[k] += speed * (move * f[k] + side * r[k]);
         freeEye_[1] += speed * up;
     }
+
+    // The player's car (carsim.h, BOOT_TO_MENU.md section 62): the model's
+    // wheel data and handling table as the game's vehicle model has them,
+    // created at the start pose (the body's position as VehicleCreationPose
+    // puts it), automatic gearbox (vtbl+0xf8, as traced).
+    void InitCar(int id, const float pose[4], const VehicleDraw& draw)
+    {
+        const VehicleData* v = nullptr;
+        for (const VehicleData& d : loader_.Vehicles())
+            if (d.id == id) v = &d;
+        if (!v || !RideHandling(id, carTable_)) {
+            Log("Level 0x%02x: vehicle %d: no physics (no model data or handling)", mission, id);
+            return;
+        }
+        car_ = CarSim();
+        car_.table = carTable_;
+        car_.vehicleId = id;
+        const float offset = WheelOffset(carTable_, HandlingClass(id));  // 0x511780: every slot's +0x92c
+        for (int s = 0; s < 6; ++s) car_.wheelOffset[s][1] = offset;
+        for (const VehicleWheel& w : v->wheels) {
+            if (w.slot < 0 || w.slot > 5) continue;
+            car_.slots[w.slot] = 1;
+            for (int k = 0; k < 3; ++k) car_.hardpoint[w.slot][k] = w.hardpoint[k];
+            car_.hardpoint[w.slot][3] = 1.0f;
+            car_.radius[w.slot] = w.radius;
+            car_.width[w.slot] = w.width;
+        }
+        car_.altDrop = 0;  // model +0x98c (0.241211 for vehicle 6, source not decoded; only wheels with flag 8 use it)
+        const float pos[3] = { draw.body[12], draw.body[13], draw.body[14] };
+        car_.Create(&carBody_, pos, pose[3]);
+        car_.SetAutomatic(true);
+        collision_.Build(loader_.City());
+        carRays_.world = &collision_;
+        carRays_.ground = &loader_.City().ground;
+        Log("Level 0x%02x: collision: %zu objects, %zu shapes (%zu dynamic prop models left out)", mission,
+            collision_.Objects(), collision_.Shapes(), loader_.City().dynamicModels.size());
+        // The parts relative to the body (the body's World is rigid).
+        const float* b = draw.body;
+        float inv[16] = { b[0], b[4], b[8], 0, b[1], b[5], b[9], 0, b[2], b[6], b[10], 0, 0, 0, 0, 1 };
+        for (int k = 0; k < 3; ++k) inv[12 + k] = -(b[12] * inv[k] + b[13] * inv[4 + k] + b[14] * inv[8 + k]);
+        carLocal_.assign(draw.parts.size() * 16, 0.0f);
+        for (size_t i = 0; i < draw.parts.size(); ++i) MatMul4(draw.parts[i].world, inv, &carLocal_[i * 16]);
+        carWorld_.assign(carLocal_.size(), 0.0f);
+        carClock_ = 0;
+        driver_ = CarDriver();
+        driverClock_ = 0;
+        memset(controls_, 0, sizeof(controls_));
+        handbrake_ = false;
+        memcpy(carPos0_, pos, sizeof(carPos0_));
+        carYaw0_ = std::atan2(carBody_.matrix[2][0], carBody_.matrix[2][2]);
+        carOn_ = true;
+        Log("Level 0x%02x: vehicle %d: physics on (mass %g, inertia %g %g %g, rest compression %.6f); keys: "
+            "accelerate %u, reverse %u, left %u, right %u, handbrake %u", mission, id, carBody_.mass,
+            carBody_.inertia[0], carBody_.inertia[1], carBody_.inertia[2], car_.F(0x60), ControlVk(0x22),
+            ControlVk(0x25), ControlVk(0x3c), ControlVk(0x3d), ControlVk(0x24));
+    }
+    // The driver's controls (CarDriver: the input scheme 0x514480 and the
+    // controller 0x50ce80, every 0.04 s; SetControls then runs every 1/120 s
+    // with the latest controls, as the vehicle slot 0x4fbaa0 does): the
+    // profile's keys for accelerate (control 0x22), reverse (0x25), steer
+    // left / right (0x3c / 0x3d), brake (0x23), handbrake (0x24) and 0x27.
+    void DriverControls()
+    {
+        auto down = [&](int id) {
+            UINT vk = ControlVk(id);
+            return vk && vk < 256 && held_[vk];
+        };
+        CarDriverKeys keys;
+        keys.accelerate = down(0x22);
+        keys.reverse = down(0x25);
+        keys.left = down(0x3c);
+        keys.right = down(0x3d);
+        keys.brake = down(0x23);
+        keys.handbrake = down(0x24);
+        keys.control27 = down(0x27);
+        driver_.Update(keys, car_.vehicleId, car_.F(0x54c), controls_, handbrake_);
+    }
+    // The world tick's order (0x4a7410): the vehicles' controls and car tick
+    // (0x50e5f0), then the physics step (one 1/120 s sub-step: 0x5af710 and
+    // the matrix 0x5a9bf0; a sleeping body is not integrated).
+    void StepCar(float dt)
+    {
+        if (!carOn_) return;
+        carClock_ += dt > 0.25f ? 0.25f : dt;
+        const double h = 1.0 / 120.0;
+        while (carClock_ >= h) {
+            carClock_ -= h;
+            driverClock_ = driverClock_ + 0.00833333377f;
+            if (driverClock_ > 0.0399999991f) {
+                driverClock_ = driverClock_ - 0.0399999991f;
+                DriverControls();
+            }
+            car_.SetControls(controls_, handbrake_);
+            car_.Tick(carRays_);
+            if (carBody_.state != 0x78) {
+                carBody_.Integrate(1.0f / 120.0f);
+                carBody_.UpdateMatrix();
+            }
+        }
+        for (size_t i = 0; i * 16 < carLocal_.size(); ++i)
+            MatMul4(&carLocal_[i * 16], &carBody_.matrix[0][0], &carWorld_[i * 16]);
+        city_.SetVehiclePose(carWorld_);
+    }
+
+    CarSim car_;
+    RigidBody carBody_;
+    float carTable_[kHandlingKeys] = {};
+    CollisionWorld collision_;
+    WorldRays carRays_;
+    bool carOn_ = false;
+    double carClock_ = 0;
+    CarDriver driver_;
+    float driverClock_ = 0;
+    float controls_[5] = {};
+    bool handbrake_ = false;
+    std::vector<float> carLocal_, carWorld_;  // the parts relative to the body, and in the world
+    float carPos0_[3] = {}, carYaw0_ = 0;
 
     bool held_[256] = {};
     bool free_ = false;
