@@ -35,6 +35,7 @@
 #include "level.h"
 #include "render.h"
 #include "mec.h"
+#include "camera.h"
 #include "carsim.h"
 #include "collision.h"
 #include "contact.h"
@@ -3162,6 +3163,15 @@ static bool RideVehicleDraw(const LevelLoader& loader, int id, const float pose[
             memcpy(part.world, &wheels[w * 16], sizeof(part.world));
             out.parts.push_back(part);
         }
+        // One rim per wheel, after the wheels (drawn only for a burst tyre).
+        if (v.rim >= 0)
+            for (size_t w = 0; w < v.wheels.size(); ++w) {
+                VehicleDraw::Part part;
+                part.model = v.rim;
+                part.rim = true;
+                memcpy(part.world, &wheels[w * 16], sizeof(part.world));
+                out.parts.push_back(part);
+            }
         return true;
     }
     return false;
@@ -3331,6 +3341,15 @@ public:
             // game does (0x4b1470), stepped at 120 Hz from the first frame.
             carOn_ = false;
             if (haveCar) InitCar(rideVehicle, pose, car);
+            if (haveCar && !carOn_) {  // no physics: the creation pose, the rims hidden
+                std::vector<float> worlds;
+                std::vector<uint8_t> hidden;
+                for (const VehicleDraw::Part& p : car.parts) {
+                    worlds.insert(worlds.end(), p.world, p.world + 16);
+                    hidden.push_back(p.rim ? 1 : 0);
+                }
+                city_.SetVehiclePose(worlds, &hidden);
+            }
             drawn_ = 0;
         }
     }
@@ -3351,17 +3370,12 @@ public:
         float yaw = free_ ? freeYaw_ : startYaw_, pitch = free_ ? freePitch_ : startPitch_;
         float followEye[3];
         if (!free_ && carOn_) {
-            // Program stand-in for the chase camera (0x567430.., not
-            // ported): the start camera kept at its place behind the car,
-            // turned with the car's heading.
-            const float* m = &carBody_.matrix[0][0];
-            float d = std::atan2(m[8], m[10]) - carYaw0_, cd = std::cos(d), sd = std::sin(d);
-            float off[3] = { startEye_[0] - carPos0_[0], startEye_[1] - carPos0_[1], startEye_[2] - carPos0_[2] };
-            followEye[0] = m[12] + off[0] * cd + off[2] * sd;
-            followEye[1] = m[13] + off[1];
-            followEye[2] = m[14] - off[0] * sd + off[2] * cd;
+            // The chase camera (camera.h): its matrix's position and -row 2.
+            const float* m = carCamera_;
+            for (int k = 0; k < 3; ++k) followEye[k] = m[12 + k];
             eye = followEye;
-            yaw = startYaw_ + d;
+            yaw = std::atan2(-m[8], -m[10]);
+            pitch = std::asin(std::max(-1.0f, std::min(1.0f, -m[9])));
         }
         float at[3] = { eye[0] + std::sin(yaw) * std::cos(pitch), eye[1] + std::sin(pitch),
                         eye[2] + std::cos(yaw) * std::cos(pitch) };
@@ -3499,13 +3513,27 @@ private:
         carLocal_.assign(draw.parts.size() * 16, 0.0f);
         for (size_t i = 0; i < draw.parts.size(); ++i) MatMul4(draw.parts[i].world, inv, &carLocal_[i * 16]);
         carWorld_.assign(carLocal_.size(), 0.0f);
+        // The wheels (the draw's parts after the body's, in VehicleData::wheels
+        // order) are turned and lifted by the slot's wheel block every frame.
+        carWheels_ = v->wheels;
+        carWheelPart0_ = v->body.size();
+        carRimPart0_ = v->rim >= 0 ? carWheelPart0_ + v->wheels.size() : 0;
+        carPackage_ = draw.package;
+        carClass_ = HandlingClass(id);
+        wheelVis_ = WheelVisuals();
+        wheelVis_.Update(car_);  // the slot's set-up (0x4fadc0 / 0x4fba70 run 0x503e00 too)
+        wheelPrev_ = wheelVis_;
+        tyres_ = WheelTyres();
+        chase_.Init(&carBody_.matrix[0][0], carBody_.vel, &collision_, &loader_.City().ground);
+        chase_.Matrix(1.0f, carCamera_);
+        Log("Level 0x%02x: chase camera at (%.3f, %.3f, %.3f), looking along (%.4f, %.4f, %.4f)", mission,
+            carCamera_[12], carCamera_[13], carCamera_[14], -carCamera_[8], -carCamera_[9], -carCamera_[10]);
+        carHidden_.assign(draw.parts.size(), 0);
         carClock_ = 0;
         driver_ = CarDriver();
         driverClock_ = 0;
         memset(controls_, 0, sizeof(controls_));
         handbrake_ = false;
-        memcpy(carPos0_, pos, sizeof(carPos0_));
-        carYaw0_ = std::atan2(carBody_.matrix[2][0], carBody_.matrix[2][2]);
         carOn_ = true;
         Log("Level 0x%02x: vehicle %d: physics on (mass %g, inertia %g %g %g, rest compression %.6f); keys: "
             "accelerate %u, reverse %u, left %u, right %u, handbrake %u", mission, id, carBody_.mass,
@@ -3549,6 +3577,8 @@ private:
                 DriverControls();
             }
             car_.SetControls(controls_, handbrake_);
+            wheelPrev_ = wheelVis_;  // 0x503e00, in the slot's pre-tick before the car's tick
+            wheelVis_.Update(car_);
             car_.Tick(carRays_);
             // The physics step's contacts (0x5a31f0, 0x5a0020), then the
             // integration (0x5a9880).
@@ -3566,10 +3596,39 @@ private:
                 carBody_.Integrate(1.0f / 120.0f);
                 carBody_.UpdateMatrix();
             }
+            chase_.Tick(&carBody_.matrix[0][0], carBody_.vel);  // the chase camera (0x5e19e0)
+        }
+        // The draw sees the state blended between the last two ticks by the
+        // fraction of a tick left over (the fixed loop 0x54dc70's remainder):
+        // the body by 0x52aee0, the wheel block by 0x4f8130.
+        const float f = float(carClock_ * 120.0);
+        BlendBodyMatrix(&car_.OF(0xac0), &carBody_.matrix[0][0], f, carDrawBody_);
+        chase_.Matrix(f, carCamera_);
+        const WheelVisuals vis = WheelVisuals::Blend(wheelPrev_, wheelVis_, f);
+        // The wheels' place on the body (0x4ff530): slots 0 and 2 spin by
+        // spinFront and steer, the others spin by spinRear; every wheel is
+        // lifted by its compression (0x513db0). A burst tyre draws the rim
+        // instead, a gone wheel nothing (0x4fd7f0).
+        if (carPackage_) {
+            for (size_t w = 0; w < carWheels_.size(); ++w) {
+                const VehicleWheel& wh = carWheels_[w];
+                const size_t part = carWheelPart0_ + w, rim = carRimPart0_ ? carRimPart0_ + w : 0;
+                if (wh.slot < 0 || wh.slot > 5 || (part + 1) * 16 > carLocal_.size()) continue;
+                const bool front = wh.slot == 0 || wh.slot == 2;
+                const float spin = front ? vis.spinFront : vis.spinRear, steer = front ? vis.steer : 0.0f;
+                const float lift = WheelLift(carTable_, carClass_, vis.compression[wh.slot]);
+                const bool burst = tyres_.burst[wh.slot] && rim, gone = tyres_.gone[wh.slot] != 0;
+                VehicleWheelLocal(wh, *carPackage_, spin, steer, lift, &carLocal_[part * 16]);
+                carHidden_[part] = burst || gone;
+                if (rim && (rim + 1) * 16 <= carLocal_.size()) {
+                    VehicleRimLocal(wh, spin, steer, lift, &carLocal_[rim * 16]);
+                    carHidden_[rim] = !burst || gone;
+                }
+            }
         }
         for (size_t i = 0; i * 16 < carLocal_.size(); ++i)
-            MatMul4(&carLocal_[i * 16], &carBody_.matrix[0][0], &carWorld_[i * 16]);
-        city_.SetVehiclePose(carWorld_);
+            MatMul4(&carLocal_[i * 16], carDrawBody_, &carWorld_[i * 16]);
+        city_.SetVehiclePose(carWorld_, &carHidden_);
     }
 
     CarSim car_;
@@ -3588,7 +3647,17 @@ private:
     float controls_[5] = {};
     bool handbrake_ = false;
     std::vector<float> carLocal_, carWorld_;  // the parts relative to the body, and in the world
-    float carPos0_[3] = {}, carYaw0_ = 0;
+    WheelVisuals wheelVis_, wheelPrev_;       // the slot's wheel block (slot+0x554) and the previous (+0x578)
+    WheelTyres tyres_;                        // slot+0x1800: burst / gone (kept clear: no damage)
+    std::vector<uint8_t> carHidden_;          // per part, for SetVehiclePose
+    float carDrawBody_[16] = {};              // the body's World for the draw (BlendBodyMatrix)
+    ChaseCamera chase_;                       // the player's chase camera (camera.h)
+    float carCamera_[16] = {};                // its matrix for the draw
+    std::vector<VehicleWheel> carWheels_;
+    size_t carWheelPart0_ = 0;                // the first wheel's index in the parts
+    size_t carRimPart0_ = 0;                  // the first rim's index (0: no rims)
+    const MdpcPackage* carPackage_ = nullptr;
+    int carClass_ = 0;
 
     bool held_[256] = {};
     bool free_ = false;

@@ -128,6 +128,21 @@ public:
     // always on land.
     void Dynamics(WheelRayCaster& world);
 
+    // What the vehicle's draw reads (BOOT_TO_MENU.md section 66): the state
+    // blended between the snapshot (obj+0x690, the previous 0.04 s step) and
+    // the current one by t = obj+0xb7c x 25.
+    // vtbl+0x60 (0x4b3d30): the steering S+0x564 in radians (x 2 pi / 4096).
+    float SteerAngle();
+    // vtbl+0x54 (0x4b3d60): S+0x548, 0 unless obj+0xbd6 is set and the wheel
+    // obj+0xb9c (3, or 5 without wheel 3) is free (flag bit 0 clear).
+    float RearWheelSpeed();
+    // vtbl+0x58 (0x4b3dc0): the wheel speed S+0x54c, 0 when wheel 2 is not
+    // present or locked.
+    float FrontWheelSpeed();
+    // vtbl+0x5c (0x4b3e00) on vtbl+0x68 (0x4b3eb0): each wheel's compression
+    // (S+0x60 of its record, 0 for a wheel the model does not have).
+    void Compressions(float out[6]);
+
     // Object-relative accessors (the game's obj offsets, S + 0x10).
     float& OF(int o) { return *reinterpret_cast<float*>(obj + o); }
     uint32_t& OU(int o) { return *reinterpret_cast<uint32_t*>(obj + o); }
@@ -141,3 +156,40 @@ private:
     void WakeBody();                    // 0x5a9230 (0x5af330)
     void SleepBody();                   // 0x5a96c0
 };
+
+// The vehicle slot's wheel block (slot+0x554, nine floats), updated by
+// 0x503e00 every 1/120 s in the slot's pre-tick (0x4fbcc0), before the car's
+// own tick, from the car's getters (the previous block is kept at +0x578).
+// The draw (0x4fd7f0) blends the two by the frame's fraction of a tick
+// (0x4f8130: Blend) and turns the wheels by the result (0x4ff530): slots 0
+// and 2 by spinFront then steer, the others by spinRear, lifted by
+// WheelLift(compression[slot]).
+struct WheelVisuals
+{
+    float steer = 0;            // +0x554: -SteerAngle()
+    float spinFront = 0;        // +0x558: += FrontWheelSpeed() x 0.018
+    float spinRear = 0;         // +0x55c: += RearWheelSpeed() x 0.018
+    float compression[6] = {};  // +0x560: Compressions()
+    void Update(CarSim& car);
+    // 0x4f8130: (1 - f) prev + f cur over the nine floats.
+    static WheelVisuals Blend(const WheelVisuals& prev, const WheelVisuals& cur, float f);
+};
+
+// The slot's tyre state per wheel slot (slot+0x1800 + 0xc x slot): byte 0
+// burst (the rim drawn in the wheel's place, VehicleRimLocal), byte 1 gone
+// (nothing drawn). Set by 0x4fb3e0 from two 6-bit masks and by 0x506cd0
+// (byte 1), cleared by 0x502aa0; the damage that sets them in play is not
+// ported, so the program keeps them clear.
+struct WheelTyres
+{
+    uint8_t burst[6] = {};
+    uint8_t gone[6] = {};
+};
+
+// The body's World for the draw (car vtbl+0xb0 = 0x4b1b60 -> 0x52aee0(out,
+// obj+0xac0, body +0x10, f, 1, 2)): rows 1 and 2 and the position blended
+// (1 - f) prev + f cur (0x4519c0), then 0x52ae30: row 1 normalised, row 0 =
+// normalise(row 1 x row 2), row 2 = row 0 x row 1. prev: the matrix the
+// car's tick copied before the step (obj+0xac0); f: the frame's fraction of
+// a 1/120 s tick ([[0x8ac434]]: the fixed loop 0x54dc70's remainder).
+void BlendBodyMatrix(const float prev[16], const float cur[16], float f, float out[16]);

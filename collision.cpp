@@ -250,12 +250,14 @@ void CollisionWorld::Build(const CityPlacement& city)
     query_ = 0;
 }
 
-bool CollisionWorld::Ray(const float start[3], const float dir[3], float length, Hit& hit) const
+bool CollisionWorld::Ray(const float start[3], const float dir[3], float length, Hit& hit, float inflate) const
 {
     if (cells_.empty()) return false;
     const float end[3] = { start[0] + dir[0] * length, start[1] + dir[1] * length, start[2] + dir[2] * length };
-    const float lo[3] = { std::min(start[0], end[0]), std::min(start[1], end[1]), std::min(start[2], end[2]) };
-    const float hi[3] = { std::max(start[0], end[0]), std::max(start[1], end[1]), std::max(start[2], end[2]) };
+    const float lo[3] = { std::min(start[0], end[0]) - inflate, std::min(start[1], end[1]) - inflate,
+                          std::min(start[2], end[2]) - inflate };
+    const float hi[3] = { std::max(start[0], end[0]) + inflate, std::max(start[1], end[1]) + inflate,
+                          std::max(start[2], end[2]) + inflate };
     int ax = int(std::floor(lo[0] / kCell)) - x0_, bx = int(std::floor(hi[0] / kCell)) - x0_;
     int az = int(std::floor(lo[2] / kCell)) - z0_, bz = int(std::floor(hi[2] / kCell)) - z0_;
     ax = std::max(ax, 0); az = std::max(az, 0);
@@ -282,9 +284,10 @@ bool CollisionWorld::Ray(const float start[3], const float dir[3], float length,
                     const Shape& sh = shapes_[s];
                     float lp[3], ld[3], t = 0, n[3];
                     ToLocal(sh.world, start, dir, lp, ld);
-                    bool ok = sh.type == 0 ? RayBox(sh.size, lp, ld, t, n)
-                            : sh.type == 1 ? RayCylinder(sh.size[0], sh.size[1], lp, ld, t, n)
-                            : sh.type == 2 ? RaySphere(sh.size[0], lp, ld, t, n)
+                    const float size[3] = { sh.size[0] + inflate, sh.size[1] + inflate, sh.size[2] + inflate };
+                    bool ok = sh.type == 0 ? RayBox(size, lp, ld, t, n)
+                            : sh.type == 1 ? RayCylinder(size[0], size[1], lp, ld, t, n)
+                            : sh.type == 2 ? RaySphere(size[0], lp, ld, t, n)
                                            : false;
                     if (ok && t > length) ok = false;
                     if (s == o.first && o.bounded) {
@@ -303,6 +306,7 @@ bool CollisionWorld::Ray(const float start[3], const float dir[3], float length,
                     hit.distance = t;
                     hit.surface = sh.surface;
                     hit.instance = o.instance;
+                    hit.shape = int(s);
                     for (int k = 0; k < 3; ++k)
                         hit.normal[k] = n[0] * sh.world[k] + n[1] * sh.world[4 + k] + n[2] * sh.world[8 + k];
                 }
@@ -311,10 +315,10 @@ bool CollisionWorld::Ray(const float start[3], const float dir[3], float length,
 }
 
 bool CollisionWorld::Cast(const CityGround* ground, const float start[3], const float dir[3], float length,
-                          Hit& hit) const
+                          Hit& hit, float inflate) const
 {
     Hit shapeHit;
-    const bool found = Ray(start, dir, length, shapeHit);
+    const bool found = Ray(start, dir, length, shapeHit, inflate);
     const float best = found ? shapeHit.distance : length;
     hit = shapeHit;
     if (!ground) return found;
@@ -331,6 +335,7 @@ bool CollisionWorld::Cast(const CityGround* ground, const float start[3], const 
         hit.distance = t;
         hit.surface = surf;
         hit.instance = -1;
+        hit.shape = -1;
         for (int k = 0; k < 3; ++k) hit.normal[k] = n[k];
         return true;
     };

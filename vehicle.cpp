@@ -56,11 +56,16 @@ bool ReadUpvh(const std::vector<uint8_t>& d, size_t up, size_t size, VehicleData
     if (pdl + 0x20 > up + size || memcmp(&d[pdl + 0x10], "PDL001", 6) != 0) return false;
     size_t entries = pdl + U32(d, pdl + 8), nentries = U32(d, pdl);
     size_t points = hard + nhard * 0x20 + size_t(U16(d, up + 0x24)) * 0x50, npoints = U16(d, up + 0x20);
+    bool rimFound = false;
     for (size_t i = 0; i < nparts; ++i) {
         size_t r = parts + i * 0x20;
         uint16_t type = U16(d, r), ref = U16(d, r + 0x12);
         if (type == 3 && U16(d, r + 2) == 6 && U16(d, r + 0x16) < npoints)
             for (int k = 0; k < 3; ++k) v.exhausts.push_back(F32(d, points + U16(d, r + 0x16) * 0x10 + k * 4));
+        if (type == 8 && U16(d, r + 2) == 0x48 && !rimFound) {  // 0x5139f0: the first match
+            rimFound = true;
+            v.rim = (ref >> 8) == 0xfc ? ref & 0xff : -1;
+        }
         if ((ref >> 8) != 0xfc) continue;  // no model
         int model = ref & 0xff;
         if (type == 1) v.body.push_back(model);
@@ -161,23 +166,8 @@ void VehicleCreationPose(const VehicleData& v, const MdpcPackage& p, const float
     memcpy(body, b, sizeof(b));
     wheels.clear();
     for (const VehicleWheel& w : v.wheels) {
-        // The wheel model's pivot: its slot 0 submesh matrix keeps the
-        // hardpoint it sits at in the 4th row as (x, -z, y).
-        float pivot[3] = { w.hardpoint[0], w.hardpoint[1], w.hardpoint[2] };
-        if (w.model >= 0 && size_t(w.model) < p.models.size() && !p.models[size_t(w.model)].lods[0].empty() &&
-            p.models[size_t(w.model)].lods[0][0].hasMatrix) {
-            const float* m = p.models[size_t(w.model)].lods[0][0].matrix;
-            pivot[0] = m[12];
-            pivot[1] = m[14];
-            pivot[2] = -m[13];
-        }
-        // (vertex - pivot) x turn + hardpoint + (0, compression, 0), then the
-        // body; turn = 180 degrees about y when the hardpoint is on the other
-        // side of the pivot.
-        float t = (w.hardpoint[0] < 0) != (pivot[0] < 0) ? -1.0f : 1.0f;
-        const float local[16] = { t, 0, 0, 0, 0, 1, 0, 0, 0, 0, t, 0,
-                                  -t * pivot[0] + w.hardpoint[0], -pivot[1] + w.hardpoint[1] + compression,
-                                  -t * pivot[2] + w.hardpoint[2], 1 };
+        float local[16];
+        VehicleWheelLocal(w, p, 0.0f, 0.0f, compression, local);
         float out[16];
         for (int r = 0; r < 4; ++r)
             for (int k = 0; k < 4; ++k)
@@ -185,6 +175,69 @@ void VehicleCreationPose(const VehicleData& v, const MdpcPackage& p, const float
                                  local[r * 4 + 3] * b[12 + k];
         wheels.insert(wheels.end(), out, out + 16);
     }
+}
+
+// 0x4ff530's rotation, RotX(spin) x RotY(steer) (slots 0 and 2 build both,
+// the others only RotX: steer 0), 3 x 3 rows.
+static void WheelRotation(float spin, float steer, float r[9])
+{
+    const float id[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    memcpy(r, id, sizeof(id));
+    if (spin == 0.0f && steer == 0.0f) return;
+    const float cx = std::cos(spin), sx = std::sin(spin), cy = std::cos(steer), sy = std::sin(steer);
+    const float rx[9] = { 1, 0, 0, 0, cx, sx, 0, -sx, cx };
+    const float ry[9] = { cy, 0, -sy, 0, 1, 0, sy, 0, cy };
+    for (int i = 0; i < 3; ++i)
+        for (int k = 0; k < 3; ++k) r[i * 3 + k] = rx[i * 3] * ry[k] + rx[i * 3 + 1] * ry[3 + k] + rx[i * 3 + 2] * ry[6 + k];
+}
+
+void VehicleRimLocal(const VehicleWheel& w, float spin, float steer, float lift, float out[16])
+{
+    float r[9];
+    WheelRotation(spin, steer, r);
+    const float m = (w.slot == 0 || w.slot == 1 || w.slot == 4) ? -1.0f : 1.0f;  // rows 0 and 2
+    for (int i = 0; i < 3; ++i) {
+        for (int k = 0; k < 3; ++k) out[i * 4 + k] = (i == 1 ? 1.0f : m) * r[i * 3 + k];
+        out[i * 4 + 3] = 0;
+    }
+    out[12] = w.hardpoint[0];
+    out[13] = w.hardpoint[1] + lift;
+    out[14] = w.hardpoint[2];
+    out[15] = 1;
+}
+
+void VehicleWheelLocal(const VehicleWheel& w, const MdpcPackage& p, float spin, float steer, float lift, float out[16])
+{
+    // The wheel model's pivot: its slot 0 submesh matrix keeps the hardpoint
+    // it sits at in the 4th row as (x, -z, y).
+    float pivot[3] = { w.hardpoint[0], w.hardpoint[1], w.hardpoint[2] };
+    if (w.model >= 0 && size_t(w.model) < p.models.size() && !p.models[size_t(w.model)].lods[0].empty() &&
+        p.models[size_t(w.model)].lods[0][0].hasMatrix) {
+        const float* m = p.models[size_t(w.model)].lods[0][0].matrix;
+        pivot[0] = m[12];
+        pivot[1] = m[14];
+        pivot[2] = -m[13];
+    }
+    // turn = 180 degrees about y when the hardpoint is on the other side of
+    // the pivot.
+    const float t = (w.hardpoint[0] < 0) != (pivot[0] < 0) ? -1.0f : 1.0f;
+    float r[9];
+    WheelRotation(spin, steer, r);
+    const float turn[3] = { t, 1.0f, t };
+    const float q[3] = { -t * pivot[0], -pivot[1], -t * pivot[2] };  // -pivot x turn
+    for (int i = 0; i < 3; ++i) {
+        for (int k = 0; k < 3; ++k) out[i * 4 + k] = turn[i] * r[i * 3 + k];
+        out[i * 4 + 3] = 0;
+    }
+    if (spin == 0.0f && steer == 0.0f) {
+        out[12] = q[0] + w.hardpoint[0];
+        out[13] = q[1] + w.hardpoint[1] + lift;
+        out[14] = q[2] + w.hardpoint[2];
+    } else {
+        for (int k = 0; k < 3; ++k) out[12 + k] = q[0] * r[k] + q[1] * r[3 + k] + q[2] * r[6 + k] + w.hardpoint[k];
+        out[13] += lift;
+    }
+    out[15] = 1;
 }
 
 namespace {
@@ -327,4 +380,11 @@ float RestCompression(const float t[kHandlingKeys])
 float WheelOffset(const float t[kHandlingKeys], int cls)
 {
     return cls == 0x11b ? -(t[3] * t[0x19]) : 0.0f;
+}
+
+float WheelLift(const float t[kHandlingKeys], int cls, float compression)
+{
+    if (cls != 0x11b) return 0.0f;
+    const float c = compression < t[0xbc] ? compression : t[0xbc];
+    return c - t[0x19] * t[3];
 }

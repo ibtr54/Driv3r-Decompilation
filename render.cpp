@@ -1852,7 +1852,9 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
     // The player's vehicle: every part with mask 0x22 (slot 0, whose mask
     // 0x1e has bit 2, and the shadow volume; the vehicle's own detail choice
     // was not traced: the traced start frames draw slot 0).
-    for (int idx : vehicleParts_) {
+    for (size_t i = 0; i < vehicleParts_.size(); ++i) {
+        if (i < vehicleHidden_.size() && vehicleHidden_[i]) continue;
+        const int idx = vehicleParts_[i];
         Lod lod;
         lod.mask = 0x22;
         submitted.push_back({ idx, lod });
@@ -2137,10 +2139,12 @@ void CityRenderer::Release()
     textures = texturesSkipped = groupsUntextured = 0;
 }
 
-void CityRenderer::SetVehiclePose(const std::vector<float>& worlds)
+void CityRenderer::SetVehiclePose(const std::vector<float>& worlds, const std::vector<uint8_t>* hidden)
 {
+    vehicleHidden_.assign(vehicleParts_.size(), 0);
     for (size_t i = 0; i < vehicleWorlds_.size() && i < vehicleParts_.size(); ++i) {
         size_t part = vehicleWorldPart_[i];
+        if (hidden && part < hidden->size()) vehicleHidden_[i] = (*hidden)[part];
         if ((part + 1) * 16 > worlds.size()) continue;
         memcpy(vehicleWorlds_[i].data(), &worlds[part * 16], 16 * sizeof(float));
         memcpy(instances_[size_t(vehicleParts_[i])].centre, &worlds[part * 16 + 12], 3 * sizeof(float));

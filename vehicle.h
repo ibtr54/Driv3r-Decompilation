@@ -47,6 +47,11 @@ struct VehicleData
     // (section 60; the code that copies them to the vehicle's +0x1d4
     // entries was not found).
     std::vector<float> exhausts;
+    // The burst tyre's rim (BOOT_TO_MENU.md section 67): the model of the
+    // first part of type 8 and id 0x48 (0x5139f0, kept by the slot at
+    // +0x17f4 by 0x503da7); -1: none. Vehicle 6: part 1, model 23, centred
+    // at the origin (the wheel models sit at a hardpoint).
+    int rim = -1;
     // The body's collision shapes (BOOT_TO_MENU.md section 65): the PDL
     // entry of the part of type 4 (entry 0 in every vehicle checked; vehicle
     // 6: a bounding box and four boxes of surface 11), as 0x5a0b60 gives
@@ -102,3 +107,24 @@ float RestCompression(const float t[kHandlingKeys]);
 // 0x511780: every wheel slot's offset (y of +0x92c + 0x10 x slot):
 // -[3] x [0x19] for class 0x11b, else 0 (vehicle 6: -0.0757526).
 float WheelOffset(const float t[kHandlingKeys], int cls);
+// 0x513db0 (the draw's wheel lift, BOOT_TO_MENU.md section 66): for class
+// 0x11b min(compression, [0xbc]) - [0x19] x [3] (the default [0xbc] is 0.3),
+// else 0. At rest it is RestCompression + WheelOffset.
+float WheelLift(const float t[kHandlingKeys], int cls, float compression);
+
+// A wheel's World relative to the body (0x4ff530 and the draw's placement
+// matrix, BOOT_TO_MENU.md section 66): (vertex - pivot) x turn x RotX(spin) x
+// RotY(steer) + hardpoint + (0, lift, 0); the pivot and the turn as in
+// VehicleCreationPose. The game: placement (slot+0x464, the part's +0x1c) x
+// T(-h) x rotation x T(0, lift, 0) x T(h) x body, h the part's hardpoint;
+// the traced creation frame fixes the placement to T(-pivot) x turn x T(h).
+// D3DX rotations (row vectors): RotX rows (1 0 0) (0 c s) (0 -s c), RotY
+// rows (c 0 -s) (0 1 0) (s 0 c).
+void VehicleWheelLocal(const VehicleWheel& w, const MdpcPackage& p, float spin, float steer, float lift, float out[16]);
+// A burst tyre (the slot's byte +0x1800 + 0xc x slot; 0x4ff530's other
+// branch and the draw 0x4fd7f0): the rim model (VehicleData::rim) with no
+// placement, turned by mirror x RotX(spin) x RotY(steer) (mirror = rows 0
+// and 2 negated by 0x4195f0(-1) for slots 0, 1 and 4; steer 0 for slots
+// other than 0 and 2), at hardpoint + (0, lift, 0): the draw replaces the
+// matrix's translation with the hardpoint through the wheel matrix.
+void VehicleRimLocal(const VehicleWheel& w, float spin, float steer, float lift, float out[16]);

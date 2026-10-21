@@ -423,8 +423,10 @@ void CarSim::LiftOff()
 
 // ---------------------------------------------------------------------------
 // 0x4b0080: the previous 25 Hz state at obj+0x690 (steer, drive target,
-// wheel speed, then per wheel 0xa8 bytes: compression, contact, contact,
-// normal, tyre direction, the axes, contact velocity, skid, slip speed).
+// wheel speed, then per wheel 0xb0 bytes from +0x10 (0x4affc0 copies 0xa8 of
+// them): compression, contact, contact, normal, tyre direction, the axes,
+// contact velocity, skid, slip speed). The draw's getters (vtbl+0x54..+0x60)
+// blend the current state with it.
 void CarSim::Snapshot()
 {
     uint8_t* d = obj + 0x690;
@@ -433,7 +435,7 @@ void CarSim::Snapshot()
     memcpy(d + 8, &F(0x54c), 4);
     for (int w = 0; w < 6; ++w) {
         const uint8_t* R = obj + 0x10 + 0x60 + w * 0xd0;
-        uint8_t* o = d + 0x10 + w * 0xa8;
+        uint8_t* o = d + 0x10 + w * 0xb0;
         const uint32_t zero = 0;
         memcpy(o, R, 4);
         memcpy(o + 0x04, R + 0x14, 12); memcpy(o + 0x10, &zero, 4);
@@ -444,6 +446,87 @@ void CarSim::Snapshot()
         memcpy(o + 0x90, R + 0xa0, 16);
         memcpy(o + 0xa0, R + 0xc0, 8);
     }
+}
+
+// ---------------------------------------------------------------------------
+// The draw's getters: (1 - t) x snapshot + t x current, t = obj+0xb7c x 25
+// (0x78e90c), in the game's operation order.
+float CarSim::SteerAngle()
+{
+    const float t = OF(0xb7c) * 25.0f;
+    const float u = 1.0f - t;
+    return (u * OF(0x690) + t * OF(0x574)) * 0.00153398083f;  // 0x78e960
+}
+
+float CarSim::RearWheelSpeed()
+{
+    if (!obj[0xbd6] || (OU(0x74 + OU(0xb9c) * 0xd0) & 1)) return 0.0f;
+    const float t = OF(0xb7c) * 25.0f;
+    const float u = 1.0f - t;
+    return u * OF(0x694) + t * OF(0x558);
+}
+
+float CarSim::FrontWheelSpeed()
+{
+    const uint32_t f = OU(0x214);  // wheel 2's flags
+    if (!(f & 0x40) || (f & 1)) return 0.0f;
+    const float t = OF(0xb7c) * 25.0f;
+    const float u = 1.0f - t;
+    return u * OF(0x698) + t * OF(0x55c);
+}
+
+void CarSim::Compressions(float out[6])
+{
+    const float t = OF(0xb7c) * 25.0f;
+    for (int w = 0; w < 6; ++w) out[w] = (OU(0x74 + w * 0xd0) & 0x40) ? OF(0x70 + w * 0xd0) : 0.0f;  // 0x4b3eb0
+    const float u = 1.0f - t;
+    for (int w = 0; w < 6; ++w) out[w] = u * OF(0x6a0 + w * 0xb0) + t * out[w];
+}
+
+// 0x503e00 (the slot at ebx): the steering negated, the two spins advanced by
+// the wheel speeds x 0.018 (0x78ebb4), the compressions.
+void WheelVisuals::Update(CarSim& car)
+{
+    steer = -car.SteerAngle();
+    spinFront = car.FrontWheelSpeed() * 0.0179999992f + spinFront;
+    spinRear = car.RearWheelSpeed() * 0.0179999992f + spinRear;
+    car.Compressions(compression);
+}
+
+WheelVisuals WheelVisuals::Blend(const WheelVisuals& prev, const WheelVisuals& cur, float f)
+{
+    const float u = 1.0f - f;
+    WheelVisuals b;
+    b.steer = u * prev.steer + f * cur.steer;
+    b.spinFront = f * cur.spinFront + u * prev.spinFront;
+    b.spinRear = f * cur.spinRear + u * prev.spinRear;
+    for (int w = 0; w < 6; ++w) b.compression[w] = f * cur.compression[w] + u * prev.compression[w];
+    return b;
+}
+
+void BlendBodyMatrix(const float prev[16], const float cur[16], float f, float out[16])
+{
+    // 0x4519c0 (edx = prev, ecx = cur): (1 - f) prev + f cur, four components.
+    const float u = 1.0f - f;
+    float m[16] = {};
+    for (int row = 1; row < 4; ++row)
+        for (int k = 0; k < 4; ++k) m[row * 4 + k] = u * prev[row * 4 + k] + f * cur[row * 4 + k];
+    // 0x417ea0: v / |v| over four components; 0x41ea80 (ecx = p, arg q): q x p
+    // through 0x407640, w 0.
+    auto normalise = [](const float* v, float* o) {
+        const float s = 1.0f / std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3]);
+        for (int k = 0; k < 4; ++k) o[k] = s * v[k];
+    };
+    auto cross = [](const float* p, const float* q, float* o) {  // q x p
+        const V4 c = Cross(Load4(p), Load4(q));
+        o[0] = c.x; o[1] = c.y; o[2] = c.z; o[3] = 0;
+    };
+    normalise(&m[4], &m[4]);
+    float c[4];
+    cross(&m[8], &m[4], c);      // row 1 x row 2
+    normalise(c, &m[0]);
+    cross(&m[4], &m[0], &m[8]);  // row 0 x row 1
+    memcpy(out, m, sizeof(m));
 }
 
 void CarSim::Create(RigidBody* carBody, const float pos[3], float heading)

@@ -101,6 +101,7 @@ struct VehicleDraw
     {
         int model = 0;
         float world[16] = {};
+        bool rim = false;  // a burst tyre's rim (hidden unless the tyre bursts)
     };
     std::vector<Part> parts;
     float colour[3] = {};
@@ -124,9 +125,10 @@ public:
     bool Upload(const std::vector<MdpcPackage>& packages, size_t first, size_t end, const CityPlacement& city,
                 const MdpcPackage* sky = nullptr, const MdpcPackage* sfx = nullptr, const VehicleDraw* vehicle = nullptr);
     // The player's vehicle moved: the parts' World (VehicleDraw::parts order,
-    // 16 floats each), from the next Draw. (The exhaust smoke keeps the
-    // tips it was set up with.)
-    void SetVehiclePose(const std::vector<float>& worlds);
+    // 16 floats each), from the next Draw; hidden (optional, one per part):
+    // nonzero leaves the part out (a burst tyre's wheel, an unused rim, a
+    // missing wheel). (The exhaust smoke keeps the tips it was set up with.)
+    void SetVehiclePose(const std::vector<float>& worlds, const std::vector<uint8_t>* hidden = nullptr);
     // The physics world for the tree shadows' ray (0x5a03f0); null: trees
     // without GRTD ground get no shadow.
     void SetCollision(const CollisionWorld* world)
@@ -401,6 +403,7 @@ private:
     std::vector<int> vehicleParts_;
     std::vector<std::vector<float>> vehicleWorlds_;
     std::vector<size_t> vehicleWorldPart_;  // the VehicleDraw part of each vehicleWorlds_ entry
+    std::vector<uint8_t> vehicleHidden_;    // per vehicleParts_ entry (SetVehiclePose)
     float vehicleColour_[3] = {}, vehicleDamage_ = 0;
     IDirect3DTexture9* white_ = nullptr;
     std::vector<Package> packages_;

@@ -29,6 +29,7 @@ public:
         int surface = -1;
         float normal[3] = { 0, 1, 0 };
         int instance = -1;     // the city instance hit (-1: the ground)
+        int shape = -1;        // its shape (ShapeAt; -1: the ground)
     };
     // The objects of every instance with a PMLD record in its region, but
     // the dynamic props (CityPlacement::dynamicModels: bodies in the game).
@@ -37,7 +38,10 @@ public:
     // shape hits at 0 (as 0x5a3e40 returns 0 for an entry distance below 0)
     // with the normal of the shape's nearest face (0x5a5000).
     // Shapes of surface 0x13 do not stop rays (0x5bc760 only notes them).
-    bool Ray(const float start[3], const float dir[3], float length, Hit& hit) const;
+    // inflate: the ray's radius (0x5a03f0's fifth argument, 0x5a3e40's
+    // last): box half extents + inflate (0x5b6790); cylinder radius and half
+    // height, sphere radius + inflate (inferred).
+    bool Ray(const float start[3], const float dir[3], float length, Hit& hit, float inflate = 0.0f) const;
     // A physics ray as 0x5a0820 answers it: the shapes, then the ground
     // (0x5a0090 with the probe 0x4e9d60 / 0x4e9da0, one step): the GRTD
     // height under the start; a start below it hits at 0; a near-vertical
@@ -45,7 +49,8 @@ public:
     // others where the straight line from the start crosses below the
     // height under the end (probed again there for the normal and surface).
     // The ground wins only when nearer than the shapes.
-    bool Cast(const CityGround* ground, const float start[3], const float dir[3], float length, Hit& hit) const;
+    bool Cast(const CityGround* ground, const float start[3], const float dir[3], float length, Hit& hit,
+              float inflate = 0.0f) const;
     size_t Objects() const { return objects_.size(); }
     // Diagnostics: the shapes of an instance (type, surface, size, world
     // matrix), one line each.
