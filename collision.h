@@ -52,7 +52,6 @@ public:
     std::vector<std::vector<float>> InstanceShapes(int instance) const;
     size_t Shapes() const { return shapes_.size(); }
 
-private:
     struct Shape
     {
         int type = 0;          // 0 box, 1 cylinder (y), 2 sphere
@@ -67,6 +66,13 @@ private:
         bool bounded = false;          // shape 0 bounds the others
         float lo[3] = {}, hi[3] = {};  // world AABB
     };
+    // The objects whose bounding box overlaps [lo, hi] (each once; the
+    // game's broad phase gives the body these pairs, contact.h).
+    void Overlapping(const float lo[3], const float hi[3], std::vector<uint32_t>& out) const;
+    const Object& ObjectAt(uint32_t i) const { return objects_[i]; }
+    const Shape& ShapeAt(size_t i) const { return shapes_[i]; }
+
+private:
     std::vector<Shape> shapes_;
     std::vector<Object> objects_;
     // Grid of kCell-unit squares on x / z.

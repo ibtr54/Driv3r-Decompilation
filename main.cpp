@@ -37,6 +37,7 @@
 #include "mec.h"
 #include "carsim.h"
 #include "collision.h"
+#include "contact.h"
 #include "story.h"
 
 #pragma comment(lib, "winmm.lib")  // waveOut (menu sounds, music)
@@ -3486,6 +3487,11 @@ private:
         car_.SetAutomatic(true);
         carRays_.world = &collision_;
         carRays_.ground = &loader_.City().ground;
+        carShapes_ = v->collision;
+        contactCount_ = 0;
+        contactLog_ = 0;
+        Log("Level 0x%02x: vehicle %d: %zu collision shapes (PDL entry of the part of type 4)", mission, id,
+            carShapes_.size());
         // The parts relative to the body (the body's World is rigid).
         const float* b = draw.body;
         float inv[16] = { b[0], b[4], b[8], 0, b[1], b[5], b[9], 0, b[2], b[6], b[10], 0, 0, 0, 0, 1 };
@@ -3544,6 +3550,18 @@ private:
             }
             car_.SetControls(controls_, handbrake_);
             car_.Tick(carRays_);
+            // The physics step's contacts (0x5a31f0, 0x5a0020), then the
+            // integration (0x5a9880).
+            const int touched = carContacts_.Step(carBody_, carShapes_, collision_, &loader_.City().ground);
+            contactCount_ += touched;
+            if (touched && contactLog_ < 40) {
+                ++contactLog_;
+                Log("Car contact: %d with objects, %d with the ground (%d pairs), deepest %.4f, at (%.2f %.2f %.2f), "
+                    "speed %.2f", carContacts_.contacts, carContacts_.ground, carContacts_.pairs, carContacts_.deepest,
+                    carBody_.pos[0], carBody_.pos[1], carBody_.pos[2],
+                    std::sqrt(carBody_.vel[0] * carBody_.vel[0] + carBody_.vel[1] * carBody_.vel[1] +
+                              carBody_.vel[2] * carBody_.vel[2]));
+            }
             if (carBody_.state != 0x78) {
                 carBody_.Integrate(1.0f / 120.0f);
                 carBody_.UpdateMatrix();
@@ -3559,6 +3577,10 @@ private:
     float carTable_[kHandlingKeys] = {};
     CollisionWorld collision_;
     WorldRays carRays_;
+    BodyContacts carContacts_;
+    std::vector<VehicleData::Shape> carShapes_;
+    long contactCount_ = 0;
+    int contactLog_ = 0;
     bool carOn_ = false;
     double carClock_ = 0;
     CarDriver driver_;

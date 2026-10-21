@@ -47,6 +47,18 @@ struct VehicleData
     // (section 60; the code that copies them to the vehicle's +0x1d4
     // entries was not found).
     std::vector<float> exhausts;
+    // The body's collision shapes (BOOT_TO_MENU.md section 65): the PDL
+    // entry of the part of type 4 (entry 0 in every vehicle checked; vehicle
+    // 6: a bounding box and four boxes of surface 11), as 0x5a0b60 gives
+    // them to the body. local: the shape's matrix in the vehicle's space
+    // (turned from the PDL's z-up space, vehicle.cpp).
+    struct Shape
+    {
+        int type = 0, surface = 0;  // +0x50: 0 box, 1 cylinder, 2 sphere; +0x51
+        float size[3] = {};
+        float local[16] = {};
+    };
+    std::vector<Shape> collision;
 };
 
 // Every vehicle entry of a .vvs file (false: not one).

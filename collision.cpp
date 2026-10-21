@@ -355,6 +355,31 @@ bool CollisionWorld::Cast(const CityGround* ground, const float start[3], const 
     return take(t, n2, s2);
 }
 
+void CollisionWorld::Overlapping(const float lo[3], const float hi[3], std::vector<uint32_t>& out) const
+{
+    out.clear();
+    if (cells_.empty()) return;
+    int ax = int(std::floor(lo[0] / kCell)) - x0_, bx = int(std::floor(hi[0] / kCell)) - x0_;
+    int az = int(std::floor(lo[2] / kCell)) - z0_, bz = int(std::floor(hi[2] / kCell)) - z0_;
+    ax = std::max(ax, 0); az = std::max(az, 0);
+    bx = std::min(bx, nx_ - 1); bz = std::min(bz, nz_ - 1);
+    if (++query_ == 0) {
+        std::fill(stamp_.begin(), stamp_.end(), 0u);
+        query_ = 1;
+    }
+    for (int z = az; z <= bz; ++z)
+        for (int x = ax; x <= bx; ++x)
+            for (uint32_t i : cells_[size_t(z) * nx_ + x]) {
+                if (stamp_[i] == query_) continue;
+                stamp_[i] = query_;
+                const Object& o = objects_[i];
+                if (o.hi[0] < lo[0] || o.lo[0] > hi[0] || o.hi[1] < lo[1] || o.lo[1] > hi[1] || o.hi[2] < lo[2] ||
+                    o.lo[2] > hi[2])
+                    continue;
+                out.push_back(i);
+            }
+}
+
 std::vector<std::vector<float>> CollisionWorld::InstanceShapes(int instance) const
 {
     std::vector<std::vector<float>> out;
