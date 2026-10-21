@@ -68,6 +68,7 @@
 #include <vector>
 
 #include "city.h"
+#include "collision.h"
 #include "mdpc.h"
 #include "mood.h"
 #include "smoke.h"
@@ -126,6 +127,13 @@ public:
     // 16 floats each), from the next Draw. (The exhaust smoke keeps the
     // tips it was set up with.)
     void SetVehiclePose(const std::vector<float>& worlds);
+    // The physics world for the tree shadows' ray (0x5a03f0); null: trees
+    // without GRTD ground get no shadow.
+    void SetCollision(const CollisionWorld* world)
+    {
+        collision_ = world;
+        trees_.Reset();
+    }
     // The level's light, fog and sky matrix (used from the next Draw).
     void SetMood(const Mood& mood) { mood_ = mood; }
     // The profile's Shadows setting (+0xc8c).
@@ -304,8 +312,9 @@ private:
     // The far quad (0x451030 part 1): a wall 4000 units ahead of the camera.
     void DrawFar(const float eye[3], const float back[3], int& applied);
     // The tree shadows (treeshadow.h): rebuilt around the camera's x / z
-    // when it has moved far enough, drawn in the mode 7 pass before the
-    // redraw. Ground: the city's GRTD heights (CityGround, 0x4e9da0).
+    // when it has moved far enough, drawn
+    // in the mode 7 pass before the redraw. Ground: the city's GRTD heights
+    // (CityGround, 0x4e9da0), else the physics ray (CollisionWorld::Cast).
     void UpdateTreeShadows(const float eye[3]);
     void DrawTreeShadows(int& applied);
     // The two screen quads before the tree shadows (type 2: alpha 0
@@ -417,6 +426,7 @@ private:
     // (buffer 2) with render id 1, a managed vertex buffer per buffer
     // object holding its triangle list.
     TreeShadows trees_;
+    const CollisionWorld* collision_ = nullptr;
     Package::Group treeGroup_[3];
     IDirect3DVertexBuffer9* treeVb_[3] = {};
     // Exhaust smoke: sfx.pmu material 0x1f0000 with render id 0x2c (the

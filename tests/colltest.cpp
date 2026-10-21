@@ -32,7 +32,7 @@ int main(int argc, char** argv)
     FILE* f = fopen(argv[2], "r");
     if (!f) { perror(argv[2]); return 2; }
     static char line[1 << 17];
-    int rays = 0, hitsMatch = 0, close = 0, surfaceMatch = 0, missBoth = 0, shown = 0;
+    int rays = 0, hitsMatch = 0, close = 0, surfaceMatch = 0, normalMatch = 0, missBoth = 0, shown = 0;
     double worst = 0;
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "Xr ", 3) != 0) continue;
@@ -60,6 +60,9 @@ int main(int argc, char** argv)
                 worst = std::max(worst, dd);
                 if (dd < 1e-3) ++close;
                 if (hit.surface == int(h[3])) ++surfaceMatch;
+                if (std::fabs(hit.normal[0] - Fl(h[4])) < 1e-3 && std::fabs(hit.normal[1] - Fl(h[5])) < 1e-3 &&
+                    std::fabs(hit.normal[2] - Fl(h[6])) < 1e-3)
+                    ++normalMatch;
             }
             if ((mine != game || std::fabs(hit.distance - Fl(h[1])) > 1e-3 || hit.surface != int(h[3])) && shown++ < 12)
                 printf("call %u ray %d at (%.2f %.2f %.2f): mine %s d %.5f s %d n (%.3f %.3f %.3f) / game %s d %.5f s %d "
@@ -82,7 +85,7 @@ int main(int argc, char** argv)
         }
     }
     fclose(f);
-    printf("%d rays: both miss %d, both hit %d (distance within 1e-3: %d, worst %.6f; surface equal %d)\n", rays, missBoth,
-           hitsMatch, close, worst, surfaceMatch);
+    printf("%d rays: both miss %d, both hit %d (distance within 1e-3: %d, worst %.6f; surface equal %d, normal within 1e-3 %d)\n", rays, missBoth,
+           hitsMatch, close, worst, surfaceMatch, normalMatch);
     return 0;
 }

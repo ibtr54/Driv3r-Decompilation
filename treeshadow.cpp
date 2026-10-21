@@ -26,28 +26,34 @@ const float kLift = 0.1f;            // 0x78e9ac
 struct TreeGround
 {
     V4 point[10], normal[10];
+    bool fromRay = false;  // placed by the physics ray
 };
 
 // 0x562070 (the cache of 256 entries by position is left out: the result
 // is the same). False when there is no ground (the tree is skipped).
-bool Ground(const CityTree& t, V4 d, const TreeShadows::Probe& probe, TreeGround& g)
+bool Ground(const CityTree& t, V4 d, const TreeShadows::Probe& probe, const TreeShadows::Ray& ray, TreeGround& g)
 {
     const V4 p0 = { t.position[0], t.position[1], t.position[2] };
     float start = p0.y + 5.0f;  // 0x78e954
     float height = 0, n[3] = {};
     bool flat = false;
     if (!probe(p0.x, start, p0.z, height, n)) {
-        // The physics ray of 0x5a03f0 ([0x7e9bb0]): 17 units (0x41880000)
-        // down from p + d (type 0x1d: from p + 4 d at the tree's height),
-        // stand-in: the same probe, within 17 units.
+        // The physics ray 0x5a03f0 ([0x7e9bb0], object mask 0x20): 17 units
+        // (0x41880000) straight down from p + d, 5 above the tree (type
+        // 0x1d: from p + 4 d at the tree's height); no hit: no shadow. The
+        // ground is the hit's height (start - distance) with its normal.
         float x = p0.x + d.x, y = start, z = p0.z + d.z;
         if (t.type == 0x1d) {
             y -= 5.0f;
             x += d.x * 3.0f;
             z += d.z * 3.0f;
         }
-        if (!probe(x, y, z, height, n) || y - height > 17.0f) return false;
+        const float from[3] = { x, y, z }, down[3] = { 0, -1, 0 };
+        float dist = 0;
+        if (!ray || !ray(from, down, 17.0f, dist, n)) return false;
+        height = y - dist;
         flat = true;
+        g.fromRay = true;
     }
     float h = std::fabs(start - height);
     h += h;
@@ -181,7 +187,8 @@ void Query(const CityTreeCell& cell, float qx, float qz, int lo, int hi, std::ve
 
 }  // namespace
 
-bool TreeShadows::Update(const CityPlacement& city, const float point[2], const float light[3], const Probe& probe)
+bool TreeShadows::Update(const CityPlacement& city, const float point[2], const float light[3], const Probe& probe,
+                         const Ray& ray)
 {
     if (built_) {
         float dx = point[0] - last_[0], dz = point[1] - last_[1];
@@ -203,6 +210,7 @@ bool TreeShadows::Update(const CityPlacement& city, const float point[2], const 
     }
     found = int(query.size());
     noGround = 0;
+    rayGround = 0;
     std::vector<TreeShadowVertex> written[3];
     for (int b = 0; b < 3; ++b) trees[b] = 0;
     // Buffers 0 and 1: types 0x11..0x14, 0x80 trees each (buffer 1 once 0
@@ -213,14 +221,16 @@ bool TreeShadows::Update(const CityPlacement& city, const float point[2], const 
         if (cur == 0 && trees[0] >= 0x80) cur = 1;
         if (trees[cur] >= 0x80) continue;
         TreeGround g;
-        if (!Ground(*t, d, probe, g)) { ++noGround; continue; }
+        if (!Ground(*t, d, probe, ray, g)) { ++noGround; continue; }
+        rayGround += g.fromRay;
         WriteTree(written[cur], g, t->type);
         ++trees[cur];
     }
     for (const CityTree* t : query) {
         if (t->type != 0x1d || trees[2] >= 0x40) continue;
         TreeGround g;
-        if (!Ground(*t, d, probe, g)) { ++noGround; continue; }
+        if (!Ground(*t, d, probe, ray, g)) { ++noGround; continue; }
+        rayGround += g.fromRay;
         WriteTree(written[2], g, t->type);
         ++trees[2];
     }

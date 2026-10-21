@@ -30,11 +30,17 @@ public:
     // The ground under (x, z) below y (0x4e9da0): height and up normal;
     // false when there is none (the game: height below -499).
     using Probe = std::function<bool(float x, float y, float z, float& height, float normal[3])>;
+    // The physics ray 0x5a03f0 ([0x7e9bb0], the collision world and the
+    // ground): the hit distance along dir within length and its normal;
+    // false: no hit.
+    using Ray = std::function<bool(const float start[3], const float dir[3], float length, float& distance,
+                                   float normal[3])>;
 
     // 0x5616f0: rebuilds when the point (x, z) is 66.7 units from the last
     // build's (or on the first call). light: the mood's +0x170 (Mood::sun).
     // True when it rebuilt.
-    bool Update(const CityPlacement& city, const float point[2], const float light[3], const Probe& probe);
+    bool Update(const CityPlacement& city, const float point[2], const float light[3], const Probe& probe,
+                const Ray& ray);
     void Reset() { built_ = false; }
 
     // Per buffer: the triangle list the game puts in the device buffer
@@ -46,6 +52,7 @@ public:
     int trees[3] = {};
     int found = 0;      // trees returned by the query
     int noGround = 0;   // trees left out by 0x562070 (no ground)
+    int rayGround = 0;  // trees placed by the physics ray (no GRTD ground)
 
 private:
     bool built_ = false;

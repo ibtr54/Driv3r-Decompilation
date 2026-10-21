@@ -190,18 +190,11 @@ bool D3DView::Open(HWND hwnd)
     // create / reset): the shadow pass keeps its strength in the destination
     // alpha. Windowed that needs the conversion to the desktop's format;
     // without it the desktop's format. Size from the client area.
-    // kShadowPatch: the back buffer of the user's patched Driv3r.exe
-    // (0x15 -> 0x16 at 0x5c942f, BOOT_TO_MENU.md section 59): X8R8G8B8, no
-    // destination alpha, so the shadow redraw darkens every pixel the stencil
-    // volumes mark (the car's and the buildings' shadows, fully dark; the
-    // tree shadows too). false: the unpatched game's A8R8G8B8, where the
-    // shadow quad writes alpha 0 and the volume shadows do not show.
-    static const bool kShadowPatch = true;
-    const D3DFORMAT want = kShadowPatch ? D3DFMT_X8R8G8B8 : D3DFMT_A8R8G8B8;
+    const D3DFORMAT want = D3DFMT_A8R8G8B8;
     D3DDISPLAYMODE mode = {};
     bool ok = SUCCEEDED(d3d_->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &mode)) &&
               SUCCEEDED(d3d_->CheckDeviceType(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, mode.Format, want, TRUE));
-    alpha_ = ok && !kShadowPatch;
+    alpha_ = ok;
     pp_.BackBufferFormat = ok ? want : D3DFMT_UNKNOWN;
     pp_.hDeviceWindow = hwnd;
     pp_.PresentationInterval = D3DPRESENT_INTERVAL_ONE;

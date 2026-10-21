@@ -3320,6 +3320,12 @@ public:
                         boat ? "a boat" : "not in the vehicle file");
             } else
                 Log("Level 0x%02x: Direct3D 9 view (black), city not drawn: %s", mission, city_.Error().c_str());
+            // The static collision world (collision.h): the car's wheel rays
+            // and the tree shadows' ray.
+            collision_.Build(loader_.City());
+            city_.SetCollision(&collision_);
+            Log("Level 0x%02x: collision: %zu objects, %zu shapes (%zu dynamic prop models left out)", mission,
+                collision_.Objects(), collision_.Shapes(), loader_.City().dynamicModels.size());
             // The car's physics (carsim.h): created at the start pose as the
             // game does (0x4b1470), stepped at 120 Hz from the first frame.
             carOn_ = false;
@@ -3478,11 +3484,8 @@ private:
         const float pos[3] = { draw.body[12], draw.body[13], draw.body[14] };
         car_.Create(&carBody_, pos, pose[3]);
         car_.SetAutomatic(true);
-        collision_.Build(loader_.City());
         carRays_.world = &collision_;
         carRays_.ground = &loader_.City().ground;
-        Log("Level 0x%02x: collision: %zu objects, %zu shapes (%zu dynamic prop models left out)", mission,
-            collision_.Objects(), collision_.Shapes(), loader_.City().dynamicModels.size());
         // The parts relative to the body (the body's World is rigid).
         const float* b = draw.body;
         float inv[16] = { b[0], b[4], b[8], 0, b[1], b[5], b[9], 0, b[2], b[6], b[10], 0, 0, 0, 0, 1 };

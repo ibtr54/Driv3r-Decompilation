@@ -34,7 +34,8 @@ public:
     // the dynamic props (CityPlacement::dynamicModels: bodies in the game).
     void Build(const CityPlacement& city);
     // The nearest shape hit along dir (unit) within length; a start inside a
-    // shape hits at 0 (as 0x5a3e40 returns 0 for an entry distance below 0).
+    // shape hits at 0 (as 0x5a3e40 returns 0 for an entry distance below 0)
+    // with the normal of the shape's nearest face (0x5a5000).
     // Shapes of surface 0x13 do not stop rays (0x5bc760 only notes them).
     bool Ray(const float start[3], const float dir[3], float length, Hit& hit) const;
     // A physics ray as 0x5a0820 answers it: the shapes, then the ground

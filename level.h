@@ -103,6 +103,17 @@ private:
 
 // A windowed Direct3D 9 device on the game window, used while a level runs;
 // the menus keep their own drawing. d3d9.dll is loaded at run time.
+// The shadow fix (BOOT_TO_MENU.md sections 59 and 64). The game asks for
+// an A8R8G8B8 back buffer: the shadow pass keeps its strength in the
+// destination alpha (the tree shadows add their texture's alpha, so the
+// leaves show), and the shadowed redraw darkens by it. The type 3 screen
+// quad should set alpha 1 where the stencil volumes marked a shadow, but it
+// samples g_TextureDiffuse with no texture bound: alpha 0 on this machine,
+// so the car's and the buildings' shadows never show. true: the quad samples
+// a white texture (the volume shadows show, the tree shadows keep their
+// leaves); false: the game as it runs here (no volume shadows).
+constexpr bool kShadowPatch = true;
+
 class D3DView
 {
 public:
@@ -117,7 +128,7 @@ public:
     float Aspect() const;
     // The back buffer keeps alpha (A8R8G8B8, as the unpatched game asks: the
     // shadow redraw blends by the destination alpha); false: X8R8G8B8 (the
-    // shadow patch, level.cpp kShadowPatch) or the desktop's format.
+    // desktop's format when the device cannot keep alpha).
     bool HasAlpha() const { return alpha_; }
     // Called around a device reset (effects must release and recreate
     // their default-pool resources).

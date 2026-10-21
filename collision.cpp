@@ -126,6 +126,45 @@ bool RaySphere(float r, const float p[3], const float d[3], float& t, float n[3]
     return true;
 }
 
+// 0x5a5000: the normal for a start inside a shape (local point p): the
+// nearest face's axis, signed by p (p <= 0: -1). Box: the gaps size - |p|
+// (a negative gap counts as size), y when not above x and below z, x when
+// below y and z, else z. Cylinder: the side (p.x, 0, p.z) normalized when
+// its gap r - |p.xz| is below the caps' hy - |p.y|, else y. Sphere: p
+// normalized.
+void InsideNormal(int type, const float size[3], const float p[3], float n[3])
+{
+    n[0] = n[1] = n[2] = 0;
+    auto sign = [](float v) { return v <= 0 ? -1.0f : 1.0f; };
+    auto normalize = [&](float x, float y, float z) {
+        const float l = std::sqrt(x * x + y * y + z * z);
+        if (l > 0) n[0] = x / l, n[1] = y / l, n[2] = z / l;
+    };
+    if (type == 0) {
+        float g[3];
+        for (int k = 0; k < 3; ++k) {
+            g[k] = size[k] - std::fabs(p[k]);
+            if (g[k] < 0) g[k] = size[k];
+        }
+        if (g[1] <= g[0]) {
+            if (g[1] < g[2]) n[1] = sign(p[1]);
+            else n[2] = sign(p[2]);
+        } else if (g[0] < g[2]) {
+            n[0] = sign(p[0]);
+        } else {
+            n[2] = sign(p[2]);
+        }
+    } else if (type == 1) {
+        float side = size[0] - std::sqrt(p[0] * p[0] + p[2] * p[2]), cap = size[1] - std::fabs(p[1]);
+        if (side < 0) side = size[0];
+        if (cap < 0) cap = size[1];
+        if (side < cap) normalize(p[0], 0, p[2]);
+        else n[1] = sign(p[1]);
+    } else if (type == 2) {
+        normalize(p[0], p[1], p[2]);
+    }
+}
+
 }  // namespace
 
 void CollisionWorld::Build(const CityPlacement& city)
@@ -254,7 +293,10 @@ bool CollisionWorld::Ray(const float start[3], const float dir[3], float length,
                     }
                     if (!ok) continue;
                     if (sh.surface == 0x13) continue;
-                    if (t < 0) t = 0;
+                    if (t < 0) {
+                        t = 0;
+                        InsideNormal(sh.type, sh.size, lp, n);
+                    }
                     if (t > best || (found && t == best)) continue;
                     best = t;
                     found = true;

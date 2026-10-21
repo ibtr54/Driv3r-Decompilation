@@ -7,6 +7,7 @@
 #include <cstring>
 #include <map>
 
+#include "level.h"
 #include "mec.h"
 
 namespace {
@@ -1390,15 +1391,24 @@ void CityRenderer::DrawFar(const float eye[3], const float back[3], int& applied
     frameFar = true;
 }
 
-// 0x5616f0 with the camera's x / z as the point (the game passes the
-// player's); the ground probe is 0x4e9da0 over the city's GRTD chunks.
+// 0x5616f0 with the camera's x / z as the point (at start point 0 the
+// original's counts, 682 / 144 triangles, are the camera's; the car's
+// point gives 682 / 149); the ground probe is 0x4e9da0 over the city's GRTD chunks, the
+// ray 0x5a03f0 the collision world with that ground.
 void CityRenderer::UpdateTreeShadows(const float eye[3])
 {
     if (!treeVb_[0] || !city_) return;
     const float point[2] = { eye[0], eye[2] };
     const CityGround& ground = city_->ground;
     auto probe = [&](float x, float y, float z, float& h, float n[3]) { return ground.Probe(x, y, z, h, n); };
-    if (!trees_.Update(*city_, point, mood_.sun, probe)) return;
+    auto ray = [&](const float start[3], const float dir[3], float length, float& dist, float n[3]) {
+        CollisionWorld::Hit hit;
+        if (!collision_ || !collision_->Cast(&ground, start, dir, length, hit)) return false;
+        dist = hit.distance;
+        for (int k = 0; k < 3; ++k) n[k] = hit.normal[k];
+        return true;
+    };
+    if (!trees_.Update(*city_, point, mood_.sun, probe, ray)) return;
     for (int b = 0; b < 3; ++b) {
         if (!treeVb_[b] || trees_.list[b].empty()) continue;
         void* ptr = nullptr;
@@ -1408,11 +1418,11 @@ void CityRenderer::UpdateTreeShadows(const float eye[3])
             treeVb_[b]->Unlock();
         }
     }
-    char buf[192];
+    char buf[256];
     snprintf(buf, sizeof(buf),
-             "at (%.1f, %.1f): %d trees found, %d without ground; buffers %d / %d / %d trees, %d / %d / %d triangles "
-             "drawn",
-             point[0], point[1], trees_.found, trees_.noGround, trees_.trees[0], trees_.trees[1], trees_.trees[2],
+             "at (%.1f, %.1f): %d trees found, %d without ground, %d on the physics ray; buffers %d / %d / %d trees, "
+             "%d / %d / %d triangles drawn",
+             point[0], point[1], trees_.found, trees_.noGround, trees_.rayGround, trees_.trees[0], trees_.trees[1], trees_.trees[2],
              trees_.triangles[0], trees_.triangles[1], trees_.triangles[2]);
     treeBuild = buf;
 }
@@ -1434,8 +1444,9 @@ void CityRenderer::DrawShadowAlpha(int& applied)
     UINT passes = 0;
     if (FAILED(e.fx->Begin(&passes, D3DXFX_DONOTSAVESTATE)) || FAILED(e.fx->BeginPass(0))) return;
     // No texture at stage 0, as in the game: g_samDiffuse reads an unbound
-    // texture.
-    if (e.diffuse) e.fx->SetTexture(e.diffuse, nullptr);
+    // texture (alpha 0 here). The shadow fix (level.h kShadowPatch) binds a
+    // white one, so the type 3 quad marks the volumes' shadows with alpha 1.
+    if (e.diffuse) e.fx->SetTexture(e.diffuse, kShadowPatch ? white_ : nullptr);
     e.fx->CommitChanges();
     SetDecl(decl3_);
     for (int k = 0; k < 2; ++k) {
@@ -2058,6 +2069,8 @@ void CityRenderer::Release()
     packages_.clear();
     instances_.clear();
     waterTiles_.clear();
+    collision_ = nullptr;
+    trees_.Reset();
     if (shoreVb_) shoreVb_->Release();
     shoreVb_ = nullptr;
     if (farVb_) farVb_->Release();
