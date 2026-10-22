@@ -9,6 +9,8 @@
 // The vehicle model ("M4", argument 3) gives the wheel data and "M4c" the
 // vehicle id; the ray records are checked, then the traced ones are used
 // (older traces have no model: only the direction and length are checked).
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,6 +19,13 @@
 #include <vector>
 
 #include "../carsim.h"
+#include "../collision.h"
+#include "../camera.h"
+#include "../contact.h"
+#include "../vehicle.h"
+#include <array>
+#include <fstream>
+#include <iterator>
 
 static float Fl(unsigned u) { float f; memcpy(&f, &u, 4); return f; }
 
@@ -133,7 +142,7 @@ int main(int argc, char** argv)
         if (sscanf(line, "%7s %n", kind, &len) != 1) continue;
         const std::string k = kind;
         if (k != "E" && k != "X" && k != "Eb" && k != "Xb" && k != "Xr" && k != "Eg" && k != "Xg" && k != "H" &&
-            k != "M4" && k != "M4c") continue;
+            k != "M4" && k != "M4c" && k != "C") continue;
         char* p = line + len;
         Rec r;
         const unsigned n = strtoul(p, &p, 10);
@@ -175,7 +184,7 @@ int main(int argc, char** argv)
         car.Create(&body, traced.pos, -3.14159274f);
         const std::vector<unsigned>& E = g_recs["E"][0].w;
         int n = 0;
-        for (int off = 0x10; off < CarSim::kObjectSize; off += 4) {
+        for (int off = 0x10; off < CarSim::kTracedSize; off += 4) {
             unsigned a;
             memcpy(&a, car.obj + off, 4);
             if (a != E[off / 4]) {
@@ -187,6 +196,217 @@ int main(int argc, char** argv)
         for (int i = 0; i < 4; ++i)
             printf("q[%d] %08x/%08x  inertia %.9g/%.9g\n", i, *reinterpret_cast<unsigned*>(&body.q[i]),
                    *reinterpret_cast<unsigned*>(&traced.q[i]), body.inertia[i], traced.inertia[i]);
+        return 0;
+    }
+
+    // "settle": the program's loop from the creation (start point 0, vehicle
+    // 6, the pose of section 61) with no input: every 1/120 s SetControls,
+    // Tick and the integration (as main.cpp StepCar, no contacts); the
+    // dynamics' rays answered with the traced answers of the same call. At
+    // each call the body is compared with the traced one at that call's
+    // entry ("Eb"), and the object with "E".
+    if (argc > 2 && !strcmp(argv[2], "settle") && haveModel) {
+        const std::vector<unsigned>& m = g_recs["M4"][0].w;
+        auto mf = [&](int off) { return Fl(m[off / 4]); };
+        CarSim car;
+        car.table = T.data();
+        car.vehicleId = static_cast<int>(g_recs["M4c"][0].w[0x14 / 4]);
+        for (int i = 0; i < 6; ++i) {
+            car.slots[i] = static_cast<int>(m[(0x884 + 4 * i) / 4]);
+            for (int c = 0; c < 4; ++c) {
+                car.hardpoint[i][c] = mf(0x89c + 16 * i + 4 * c);
+                car.wheelOffset[i][c] = mf(0x92c + 16 * i + 4 * c);
+            }
+            car.radius[i] = mf(0x8fc + 4 * i);
+            car.width[i] = mf(0x914 + 4 * i);
+        }
+        car.altDrop = mf(0x98c);
+        RigidBody body;
+        const float pos[3] = { 1988.15f, 0.487739f, -1081.6f };
+        // settle <city.d3c>: the rays answered by the program's collision
+        // world (as main.cpp WorldRays) instead of the traced answers.
+        static CityPlacement city;
+        static CollisionWorld world;
+        static bool own = false;
+        own = argc > 3;
+        if (own) {
+            std::ifstream in(argv[3], std::ios::binary);
+            std::vector<uint8_t> d((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (!city.Load(d)) { fprintf(stderr, "city: %s\n", city.Error().c_str()); return 2; }
+            world.Build(city);
+        }
+        car.Create(&body, pos, -3.14159274f);
+        car.SetAutomatic(true);
+        struct Settle : WheelRayCaster
+        {
+            CarSim* car = nullptr;
+            RigidBody* body = nullptr;
+            unsigned n = 0;
+            int shown = 0;
+            bool departed = false;
+            TracedRays traced;
+            void Cast(WheelRay* rays, WheelHit* hits, int count) override
+            {
+                if (g_recs["Eb"].count(n)) {
+                    RigidBody t;
+                    LoadBody(g_recs["Eb"][n].w, t);
+                    float dp = 0, dv = 0, dq = 0;
+                    for (int k = 0; k < 3; ++k) {
+                        dp = std::max(dp, std::fabs(body->pos[k] - t.pos[k]));
+                        dv = std::max(dv, std::fabs(body->vel[k] - t.vel[k]));
+                    }
+                    for (int k = 0; k < 4; ++k) dq = std::max(dq, std::fabs(body->q[k] - t.q[k]));
+                    const bool first = !departed && dp > 1e-4f;
+                    if (first) departed = true;
+                    if (n < 3 || n % 10 == 0 || first) {
+                        ++shown;
+                        if (first) printf("first departure > 1e-4:\n");
+                        printf("call %3u: pos %.6f %.6f %.6f / %.6f %.6f %.6f  |dpos| %.2e |dvel| %.2e |dq| %.2e  "
+                               "b7c %.6f / %.6f\n",
+                               n, body->pos[0], body->pos[1], body->pos[2], t.pos[0], t.pos[1], t.pos[2], dp, dv, dq,
+                               car->OF(0xb7c), Fl(g_recs["E"][n].w[0xb7c / 4]));
+                    }
+                }
+                if (own) {
+                    for (int i = 0; i < count; ++i) {
+                        const WheelRay& r = rays[i];
+                        hits[i] = WheelHit();
+                        CollisionWorld::Hit h;
+                        if (world.Cast(&city.ground, r.start, r.dir, r.length, h)) {
+                            hits[i].type = 2;
+                            hits[i].distance = h.distance;
+                            hits[i].surface = h.surface;
+                            for (int k = 0; k < 3; ++k) hits[i].normal[k] = h.normal[k];
+                        }
+                        if (n < 1) {
+                            const unsigned* tr = g_recs["Xr"].count(n) ? &g_recs["Xr"][n].w[i * 0x2c / 4] : nullptr;
+                            const unsigned* th = g_recs["Xr"].count(n) ? &g_recs["Xr"][n].w[(0x210 + i * 0x30) / 4] : nullptr;
+                            printf("   ray %d start %.6f %.6f %.6f len %.4f: %s %.6f surf %d n %.4f %.4f %.4f", i,
+                                   r.start[0], r.start[1], r.start[2], r.length, hits[i].type == 2 ? "hit" : "miss",
+                                   hits[i].distance, hits[i].surface, hits[i].normal[0], hits[i].normal[1],
+                                   hits[i].normal[2]);
+                            if (tr)
+                                printf(" | traced start %.6f %.6f %.6f: %s %.6f surf %d", Fl(tr[1]), Fl(tr[2]), Fl(tr[3]),
+                                       th[0] == 2 ? "hit" : "miss", Fl(th[1]), int(th[3]));
+                            printf("\n");
+                        }
+                    }
+                } else if (g_recs["Xr"].count(n)) {
+                    traced.xr = &g_recs["Xr"][n].w;
+                    traced.Cast(rays, hits, count);
+                }
+                ++n;
+            }
+        } settle;
+        settle.car = &car;
+        settle.body = &body;
+        // The traced controls ("C n caller c0..c4 handbrake getter"), one per
+        // 1/120 s tick from the first; none: no input.
+        const auto& C = g_recs["C"];
+        // SetControls after the car's tick, as in the game (run 9 replays
+        // exactly so); SETTLE_BEFORE: before it, the old program order.
+        const bool controlsAfter = getenv("SETTLE_BEFORE") == nullptr;
+        const unsigned calls = static_cast<unsigned>(g_recs["E"].size());
+        // The chase camera alongside (needs the collision world): its matrix
+        // and the target per tick, for the camera dumps of argv[4].
+        // The car's collision shapes (Vehicles\Miami.vvs next to Cities\).
+        std::vector<VehicleData::Shape> carShapes;
+        BodyContacts contacts;
+        int contactLines = 0;
+        if (own && !getenv("SETTLE_NOCONTACTS")) {
+            std::string root = argv[3];
+            const size_t at = root.find("Cities");
+            if (at != std::string::npos) {
+                std::ifstream vin(root.substr(0, at) + "Vehicles\\Miami.vvs", std::ios::binary);
+                std::vector<uint8_t> vd((std::istreambuf_iterator<char>(vin)), std::istreambuf_iterator<char>());
+                std::vector<VehicleData> vehicles;
+                if (ReadVehicles(vd, vehicles))
+                    for (const VehicleData& v : vehicles)
+                        if (v.id == car.vehicleId) carShapes = v.collision;
+            }
+            printf("contacts: %zu car shapes\n", carShapes.size());
+        }
+        ChaseCamera cam;
+        std::vector<std::array<float, 16>> camAt;
+        std::vector<std::array<float, 3>> targetAt;
+        if (own) cam.Init(&body.matrix[0][0], body.vel, &world, &city.ground);
+        for (int tick = 0; tick < 20000 && settle.n < calls; ++tick) {
+            float c[5] = { 0, 0, 0, 0, 0 };
+            bool hb = false;
+            auto it = C.find(static_cast<unsigned>(tick));
+            if (it != C.end() && it->second.w.size() >= 6) {
+                for (int k = 0; k < 5; ++k) c[k] = Fl(it->second.w[k]);
+                hb = (it->second.w[5] & 0xff) != 0;
+            }
+            if (!controlsAfter) car.SetControls(c, hb);
+            car.Tick(settle);
+            if (controlsAfter) car.SetControls(c, hb);
+            // The physics step's contacts, as main.cpp StepCar (with the
+            // program's world only).
+            if (own && !carShapes.empty()) {
+                const int touched = contacts.Step(body, carShapes, world, &city.ground);
+                if (touched && contactLines < 12) {
+                    ++contactLines;
+                    printf("   tick %d (call %u): %d contacts (%d ground), deepest %.4f\n", tick, settle.n,
+                           contacts.contacts, contacts.ground, contacts.deepest);
+                }
+            }
+            if (body.state != 0x78) {
+                body.Integrate(1.0f / 120.0f);
+                body.UpdateMatrix();
+            }
+            if (own) {
+                cam.Tick(&body.matrix[0][0], body.vel);
+                std::array<float, 16> m;
+                cam.Matrix(1.0f, m.data());
+                camAt.push_back(m);
+                targetAt.push_back({ body.matrix[3][0], body.matrix[3][1], body.matrix[3][2] });
+            }
+        }
+        printf("settle: %u dynamics calls\n", settle.n);
+        if (own && argc > 4) {
+            // The original's camera dumps ("O n camera <0x300 bytes>"): the
+            // target it stored at its last step (C+0x144) finds the tick; the
+            // eye (C+0x220) and the collision part's matrix (C+0x1f0) are
+            // compared.
+            FILE* cf = fopen(argv[4], "r");
+            int compared = 0, unmatched = 0;
+            float worstEye = 0, sumEye = 0, worstZ = 0;
+            while (cf && fgets(line, sizeof(line), cf)) {
+                if (strncmp(line, "O ", 2) != 0) continue;
+                char* p = line + 2;
+                const unsigned on = strtoul(p, &p, 10);
+                strtoul(p, &p, 16);
+                std::vector<unsigned> w;
+                while (*p && *p != '\n') { w.push_back(static_cast<unsigned>(strtoul(p, &p, 16))); while (*p == ' ') ++p; }
+                if (w.size() < 0x230 / 4 || targetAt.empty()) continue;
+                const float tg[3] = { Fl(w[0x144 / 4]), Fl(w[0x148 / 4]), Fl(w[0x14c / 4]) };
+                size_t best = 0;
+                float bd = 1e30f;
+                for (size_t t = 0; t < targetAt.size(); ++t) {
+                    const float d = std::fabs(targetAt[t][0] - tg[0]) + std::fabs(targetAt[t][1] - tg[1]) +
+                                    std::fabs(targetAt[t][2] - tg[2]);
+                    if (d < bd) bd = d, best = t;
+                }
+                const float* m = camAt[best].data();
+                const float eye[3] = { Fl(w[0x220 / 4]), Fl(w[0x224 / 4]), Fl(w[0x228 / 4]) };
+                const float de = std::sqrt((m[12] - eye[0]) * (m[12] - eye[0]) + (m[13] - eye[1]) * (m[13] - eye[1]) +
+                                           (m[14] - eye[2]) * (m[14] - eye[2]));
+                const float dz = std::fabs(m[8] - Fl(w[0x1f0 / 4 + 8])) + std::fabs(m[9] - Fl(w[0x1f0 / 4 + 9])) +
+                                 std::fabs(m[10] - Fl(w[0x1f0 / 4 + 10]));
+                if (bd > 1e-3f) { ++unmatched; continue; }  // no tick with that target (the paths parted)
+                ++compared;
+                sumEye += de;
+                worstEye = std::max(worstEye, de);
+                worstZ = std::max(worstZ, dz);
+                if (compared <= 3 || compared % 15 == 0 || de > 0.05f)
+                    printf("camera dump %u ~ tick %zu (target off %.2e): eye %.3f %.3f %.3f / %.3f %.3f %.3f  |d| %.4f  "
+                           "|dz| %.4f\n", on, best, bd, m[12], m[13], m[14], eye[0], eye[1], eye[2], de, dz);
+            }
+            if (cf) fclose(cf);
+            printf("camera: %d dumps at a matching tick (%d without), eye distance mean %.6f, worst %.6f, "
+                   "axis worst %.6f\n", compared, unmatched, compared ? sumEye / compared : 0.0f, worstEye, worstZ);
+        }
         return 0;
     }
 
@@ -206,7 +426,7 @@ int main(int argc, char** argv)
         LoadBody(g_recs["Xb"][n].w, expect);
 
         CarSim car;
-        memcpy(car.obj, E.data(), CarSim::kObjectSize);
+        memcpy(car.obj, E.data(), CarSim::kTracedSize);
         car.body = &body;
         car.table = T.data();
         car.slots[0] = car.slots[1] = car.slots[2] = car.slots[3] = 1;
@@ -239,7 +459,7 @@ int main(int argc, char** argv)
         if (rays.otherBody) diff += " (a wheel on a body)";
         // The object: every dword but the stale 4th components of the
         // accumulators (S+0x4c, S+0x5c).
-        for (int off = 0x10; off < CarSim::kObjectSize; off += 4) {
+        for (int off = 0x10; off < CarSim::kTracedSize; off += 4) {
             const int s = off - 0x10;
             if (s == 0x4c || s == 0x5c) continue;
             unsigned a;

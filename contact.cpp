@@ -337,7 +337,7 @@ bool Invert3(const float m[3][3], float out[3][3])
 
 // 0x5a99d0 -> 0x5c5260 for the body against a static object (B does not
 // move): true when an impulse was applied.
-bool Respond(RigidBody& body, const BodyContact& c)
+bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr)
 {
     float tA[3], tB[3];
     SurfaceValues(c.surfaceA, tA);
@@ -396,6 +396,8 @@ bool Respond(RigidBody& body, const BodyContact& c)
     for (int k = 0; k < 3; ++k) J[k] = R[0][k] * P[0] + R[1][k] * P[1] + R[2][k] * P[2];
     Cross(r, J, ang);
     body.ApplyImpulse(J, ang);
+    if (Jout)
+        for (int k = 0; k < 3; ++k) Jout[k] = J[k];
     // 0x5c5c50: the depth along the normal, at most 0.01; a static B weighs
     // 1e16, so the body takes all of it.
     float corr[3] = { c.depth * c.normal[0], c.depth * c.normal[1], c.depth * c.normal[2] };
@@ -463,7 +465,11 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
         // 0x5a9af0: a real depth, neither surface 0x13.
         if (!found || !(best.depth > 9.99999975e-06f) || best.surfaceA == 0x13 || best.surfaceB == 0x13) continue;
         if (best.depth > deepest) deepest = best.depth;
-        if (Respond(body, best)) ++contacts;
+        float J[3];
+        if (Respond(body, best, J)) {
+            ++contacts;
+            if (onImpulse) onImpulse(best, J);
+        }
         bodyWorld = &body.matrix[0][0];
     }
     // 0x5a9b80 -> 0x5b36f0: the ground under the boxes' corners.

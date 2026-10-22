@@ -72,7 +72,11 @@ public:
 class CarSim
 {
 public:
-    static const int kObjectSize = 0xc10;
+    // The game allocates 0xd00 bytes (0x4b4e60); the traces dump the first
+    // 0xc10 (kTracedSize). Creation writes the wheel widths up to +0xc98
+    // (0x4b45a0), so the array must be the game's size.
+    static const int kObjectSize = 0xd00;
+    static const int kTracedSize = 0xc10;
     uint8_t obj[kObjectSize] = {};      // the game's object (class 0x7850d8)
     RigidBody* body = nullptr;          // obj+0x550 (S+0x540)
 

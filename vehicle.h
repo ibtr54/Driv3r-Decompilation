@@ -64,6 +64,38 @@ struct VehicleData
         float local[16] = {};
     };
     std::vector<Shape> collision;
+    // The damage parts (BOOT_TO_MENU.md section 72): every part (u16 +0x00
+    // type, +0x02 id, +0x14 physics entry, +0x18 hardpoint, +0x1a damage
+    // record; 0xffff: none), the hardpoints (point and axis in the vehicle's
+    // space) and the damage records' entries (+0x24 x 0x50: the part's
+    // matrix in the vehicle, its inertia diagonal and mass).
+    // For the impact test (0x503fb0 / 0x5099c0, damage.h) also +0x04 (bit 0:
+    // no children; the walk steps over +0x0c parts otherwise), +0x08 (flags
+    // the damage predicates read: 0x400000 / 0x800000 group, 0x3f0000 and
+    // bit 0 hinge, bit 1 tear), +0x0c (the part and its children) and the
+    // physics entry's first shape (PDL, as stored: size and matrix).
+    struct Part
+    {
+        int type = 0, id = 0, entry = -1, hardpoint = -1, record = -1;
+        uint32_t flags4 = 0, flags8 = 0;
+        int span = 1;
+        int shapes = 0;
+        float shapeSize[3] = {};
+        float shapeMatrix[16] = {};
+    };
+    std::vector<Part> parts;
+    struct Hardpoint
+    {
+        float pos[4] = {}, axis[4] = {};
+    };
+    std::vector<Hardpoint> hardpoints;
+    struct DamageEntry
+    {
+        float matrix[16] = {};
+        float inertia[3] = {};
+        float mass = 0;
+    };
+    std::vector<DamageEntry> damage;
 };
 
 // Every vehicle entry of a .vvs file (false: not one).

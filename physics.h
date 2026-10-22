@@ -33,6 +33,8 @@ struct RigidBody
 
     // 0x4b5170 + 0x5aeb20 + 0x5aee00 on the body: normalised q, R, invI, w, dq.
     void UpdateDerived();
+    // 0x5aee00 alone: w and dq from L.
+    void UpdateSpin();
     // 0x5af710: one sub-step of h (linear, then the rotation update chosen by
     // the spin: 0x5af9f0 first order, 0x5afb70 midpoint, 0x5afe70 four stages).
     void Integrate(float h);

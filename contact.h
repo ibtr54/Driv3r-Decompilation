@@ -14,11 +14,14 @@
 //     restitution and the friction cone (0x5c49c0), then the depth pushed
 //     out, at most 0.01 a step (0x5c5c50).
 // Not ported: box / cylinder (0x5b4380 and its helpers; a cylinder is taken
-// as its bounding box here), body / body contacts, and the constraint
-// groups (body +0x1d8) the game makes of slow, resting contacts and solves
-// in 0x5c2600 (here those get the same impulse as fast ones).
+// as its bounding box here), body / body contacts, and the articulated
+// groups (body +0x1d8, solved in 0x5c2600) the vehicle slot makes when a
+// crash frees a damage panel hinged to the car (BOOT_TO_MENU.md section 71;
+// while the car is in one, the game routes its impulses through the group).
+// Slow contacts only feed the sleep test (0x5af440) in the game.
 #pragma once
 
+#include <functional>
 #include <vector>
 
 #include "city.h"
@@ -46,6 +49,12 @@ public:
     // Diagnostics of the last step.
     int pairs = 0, contacts = 0, ground = 0;
     float deepest = 0;
+
+    // Called after each impulse against a static object with the contact
+    // and the impulse on the body: the game's contact callback reaches the
+    // vehicle slot's listener (0x503fb0, damage.h) so. (Run 15 shows no
+    // listener call from the ground probe's contacts.)
+    std::function<void(const BodyContact&, const float J[3])> onImpulse;
 
 private:
     std::vector<uint32_t> near_;

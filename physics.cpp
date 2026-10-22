@@ -123,7 +123,12 @@ void RigidBody::UpdateDerived()
 {
     QuatNormalize(q, q);
     UpdateInertia(q, inertia, R, invI);
-    UpdateSpin(q, L, invI, w, dq);
+    ::UpdateSpin(q, L, invI, w, dq);
+}
+
+void RigidBody::UpdateSpin()
+{
+    ::UpdateSpin(q, L, invI, w, dq);
 }
 
 void RigidBody::Integrate(float h)
@@ -241,7 +246,7 @@ void RigidBody::ApplyImpulse(const float* linear, const float* angular)
         L[1] = L[1] + angular[1];
         L[2] = L[2] + angular[2];
         L[3] = 0;
-        UpdateSpin(q, L, invI, w, dq);
+        ::UpdateSpin(q, L, invI, w, dq);
         if (state == 0x78) {
             state = 0x65;
             memset(sleep, 0, sizeof(sleep));

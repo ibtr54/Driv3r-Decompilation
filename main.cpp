@@ -39,6 +39,7 @@
 #include "carsim.h"
 #include "collision.h"
 #include "contact.h"
+#include "damage.h"
 #include "story.h"
 
 #pragma comment(lib, "winmm.lib")  // waveOut (menu sounds, music)
@@ -3504,6 +3505,17 @@ private:
         carShapes_ = v->collision;
         contactCount_ = 0;
         contactLog_ = 0;
+        // The slot's damage records (damage.h): the slot's sizes are twice
+        // the bounding shape's half sizes (PDL z-up: x, z, y).
+        carVehicle_ = v;
+        if (!carShapes_.empty()) {
+            const float* h = carShapes_[0].size;
+            const float size[3] = { h[0] + h[0], h[2] + h[2], h[1] + h[1] };
+            damage_ = VehicleDamage();
+            damage_.Init(*v, size, carTable_);
+        }
+        damageLog_ = 0;
+        carContacts_.onImpulse = [this](const BodyContact& c, const float J[3]) { CarImpact(c, J); };
         Log("Level 0x%02x: vehicle %d: %zu collision shapes (PDL entry of the part of type 4)", mission, id,
             carShapes_.size());
         // The parts relative to the body (the body's World is rigid).
@@ -3561,6 +3573,30 @@ private:
         keys.control27 = down(0x27);
         driver_.Update(keys, car_.vehicleId, car_.F(0x54c), controls_, handbrake_);
     }
+    // The vehicle slot's contact listener (0x503fb0, damage.h) for one of the
+    // car body's contacts with a static object. The parts the hit frees get
+    // their new state (hinged / torn off) but no body yet: creating, solving
+    // and drawing the panels (panels.h, articulated.h) is not wired in.
+    void CarImpact(const BodyContact& c, const float J[3])
+    {
+        if (!carVehicle_ || damage_.records.empty()) return;
+        std::vector<DamageRequest> req;
+        damage_.Impact(*carVehicle_, &carBody_.matrix[0][0], carBody_.mass, -1, carBody_.mass, J, c.pointA,
+                       c.surfaceB, req);
+        if (damage_.lastPassed && damageLog_ < 40) {
+            ++damageLog_;
+            Log("Car hit: strength %.3f at (%.3f %.3f %.3f) in the car, side %.4f; slot total %.4f, front %.4f / %.4f, "
+                "back %.4f / %.4f", damage_.lastS, damage_.lastPoint[0], damage_.lastPoint[1], damage_.lastPoint[2],
+                damage_.lastSide, damage_.total, damage_.front[0], damage_.front[1], damage_.back[0], damage_.back[1]);
+        }
+        for (const DamageRequest& q : req) {
+            DamageRecord& r = damage_.records[q.record];
+            const VehicleData::Part& p = carVehicle_->parts[damage_.recordPart[q.record]];
+            Log("Car damage: record %d (part type %d id 0x%x) %s (+4 %.4f +8 %.4f, dent %.4f, impact %.4f)", q.record,
+                p.type, p.id, q.state == 2 ? "hinged" : "torn off", r.half[0], r.half[1], r.dent, r.impact);
+            r.state = q.state;
+        }
+    }
     // The world tick's order (0x4a7410): the vehicles' controls and car tick
     // (0x50e5f0), then the physics step (one 1/120 s sub-step: 0x5af710 and
     // the matrix 0x5a9bf0; a sleeping body is not integrated).
@@ -3576,10 +3612,20 @@ private:
                 driverClock_ = driverClock_ - 0.0399999991f;
                 DriverControls();
             }
-            car_.SetControls(controls_, handbrake_);
+            if (carVehicle_) {
+                // the slot's pre-tick 0x4fbcc0: the records' cool-downs, the
+                // bonnet's timer (no panel moves yet: never due)
+                std::vector<DamageRequest> due;
+                damage_.Tick(*carVehicle_, &carBody_.matrix[0][0], due);
+                for (const DamageRequest& q : due) damage_.records[q.record].state = q.state;
+            }
             wheelPrev_ = wheelVis_;  // 0x503e00, in the slot's pre-tick before the car's tick
             wheelVis_.Update(car_);
             car_.Tick(carRays_);
+            // The controls reach the car after its tick (BOOT_TO_MENU.md
+            // section 70: run 9 replays exactly only so; before the tick a
+            // change shows one 0.04 s step early).
+            car_.SetControls(controls_, handbrake_);
             // The physics step's contacts (0x5a31f0, 0x5a0020), then the
             // integration (0x5a9880).
             const int touched = carContacts_.Step(carBody_, carShapes_, collision_, &loader_.City().ground);
@@ -3638,6 +3684,9 @@ private:
     WorldRays carRays_;
     BodyContacts carContacts_;
     std::vector<VehicleData::Shape> carShapes_;
+    const VehicleData* carVehicle_ = nullptr;
+    VehicleDamage damage_;  // the slot's damage records (damage.h)
+    int damageLog_ = 0;
     long contactCount_ = 0;
     int contactLog_ = 0;
     bool carOn_ = false;

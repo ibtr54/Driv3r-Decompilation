@@ -84,6 +84,46 @@ bool ReadUpvh(const std::vector<uint8_t>& d, size_t up, size_t size, VehicleData
         }
         v.wheels.push_back(w);
     }
+    // The damage parts' tables.
+    auto index = [](uint16_t u) { return u == 0xffff ? -1 : int(u); };
+    for (size_t i = 0; i < nparts; ++i) {
+        size_t r = parts + i * 0x20;
+        VehicleData::Part p;
+        p.type = U16(d, r);
+        p.id = U16(d, r + 2);
+        p.entry = index(U16(d, r + 0x14));
+        p.hardpoint = index(U16(d, r + 0x18));
+        p.record = index(U16(d, r + 0x1a));
+        p.flags4 = U32(d, r + 4);
+        p.flags8 = U32(d, r + 8);
+        p.span = U16(d, r + 0xc);
+        if (U16(d, r + 0x14) < nentries) {
+            size_t e = entries + size_t(U16(d, r + 0x14)) * 16;
+            size_t sh = e + U32(d, e + 4);
+            p.shapes = int(U32(d, e));
+            if (p.shapes > 0 && sh + 0x50 <= up + size) {
+                for (int k = 0; k < 3; ++k) p.shapeSize[k] = F32(d, sh + 4 * k);
+                for (int k = 0; k < 16; ++k) p.shapeMatrix[k] = F32(d, sh + 0x10 + 4 * k);
+            }
+        }
+        v.parts.push_back(p);
+    }
+    for (size_t i = 0; i < nhard; ++i) {
+        VehicleData::Hardpoint h;
+        for (int k = 0; k < 4; ++k) {
+            h.pos[k] = F32(d, hard + i * 0x20 + 4 * k);
+            h.axis[k] = F32(d, hard + i * 0x20 + 0x10 + 4 * k);
+        }
+        v.hardpoints.push_back(h);
+    }
+    for (size_t i = 0; i < U16(d, up + 0x24); ++i) {
+        size_t r = hard + nhard * 0x20 + i * 0x50;
+        VehicleData::DamageEntry e;
+        for (int k = 0; k < 16; ++k) e.matrix[k] = F32(d, r + 4 * k);
+        for (int k = 0; k < 3; ++k) e.inertia[k] = F32(d, r + 0x40 + 4 * k);
+        e.mass = F32(d, r + 0x4c);
+        v.damage.push_back(e);
+    }
     // The body's shapes: the physics entry of the part of type 4.
     uint32_t bodyEntry = 0;
     for (size_t i = 0; i < nparts; ++i)

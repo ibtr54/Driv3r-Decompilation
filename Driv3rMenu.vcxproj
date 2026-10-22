@@ -89,6 +89,9 @@
     <ClCompile Include="physics.cpp" />
     <ClCompile Include="carsim.cpp" />
     <ClCompile Include="camera.cpp" />
+    <ClCompile Include="articulated.cpp" />
+    <ClCompile Include="panels.cpp" />
+    <ClCompile Include="damage.cpp" />
     <ClCompile Include="contact.cpp" />
     <ClCompile Include="collision.cpp" />
     <ClCompile Include="mood.cpp" />
@@ -106,6 +109,9 @@
     <ClInclude Include="physics.h" />
     <ClInclude Include="carsim.h" />
     <ClInclude Include="camera.h" />
+    <ClInclude Include="articulated.h" />
+    <ClInclude Include="panels.h" />
+    <ClInclude Include="damage.h" />
     <ClInclude Include="contact.h" />
     <ClInclude Include="collision.h" />
     <ClInclude Include="mood.h" />

@@ -47,6 +47,15 @@
     <ClCompile Include="camera.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="articulated.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="panels.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="damage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="mood.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -90,6 +99,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="camera.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="articulated.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="panels.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="damage.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="mood.h">
