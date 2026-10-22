@@ -860,12 +860,161 @@ void Group::ApplyImpulse(int k, float s)
     for (int j = 0; j < n; ++j) Velocities(j);
 }
 
-// 0x5c7280 + 0x5c81b0.
-void Group::LimitImpulse(int k, float impulse)
+void Group::ImpulseInertias()
 {
     const int n = static_cast<int>(members.size());
     for (int j = 0; j < n; ++j) RigidInertia(*members[j].body, Mat(members[j].rec, 0x160));
     for (int j = n - 1; j >= 0; --j) ImpulseInertia(j);
+}
+
+void Group::BodyImpulse(int k, const SVec& p)
+{
+    Scale(p, -1.0f, V(members[k].rec, 0x220));
+    std::vector<int> chain{ k };
+    int at = 0;
+    if (members[k].parent >= 0) {
+        int cur = k;
+        do {
+            ImpulseUp(cur, 1);
+            cur = members[cur].parent;
+            chain.push_back(cur);
+            ++at;
+        } while (members[cur].parent >= 0);
+    }
+    const int n = static_cast<int>(members.size());
+    for (int j = 0; j < n; ++j) {
+        if (at >= 0 && j == chain[at]) --at;
+        else V(members[j].rec, 0x220) = SVec();  // 0x5bdf60
+        Response(j, 0);
+        if (!Int(members[j].rec, 0x330)) {
+            RigidBody* b = members[0].body;
+            float* rec = members[0].rec;
+            float v1[4], v2[4];
+            QuatRotate(b->q, rec + 0x290 / 4, v1);
+            QuatRotate(b->q, rec + 0x280 / 4, v2);
+            for (int i = 0; i < 3; ++i) b->vel[i] = v1[i] + b->vel[i];
+            for (int i = 0; i < 3; ++i) b->w[i] = v2[i] + b->w[i];
+            b->vel[3] = b->w[3] = 0;
+        } else {
+            qd[j] = F(members[j].rec, 0x378) + qd[j];
+        }
+    }
+    for (int j = 0; j < n; ++j) Velocities(j);
+}
+
+void Group::TestImpulse(int k, const SVec& p, SVec& out)
+{
+    Scale(p, -1.0f, V(members[k].rec, 0x220));
+    std::vector<int> chain{ k };
+    if (members[k].parent >= 0) {
+        int cur = k;
+        do {
+            ImpulseUp(cur, 0);
+            cur = members[cur].parent;
+            chain.push_back(cur);
+        } while (members[cur].parent >= 0);
+    }
+    for (int i = static_cast<int>(chain.size()) - 1; i >= 0; --i) Response(chain[i], 1);
+    out = V(members[k].rec, 0x280);
+}
+
+namespace
+{
+// The cross-product rows of v (0x5c67c0): x [v]x = v x x... as the game
+// lays them out: (0, z, -y), (-z, 0, x), (y, -x, 0).
+void Skew(const float v[3], float s[3][4])
+{
+    const float r[3][4] = { { 0, v[2], -v[1], 0 }, { -v[2], 0, v[0], 0 }, { v[1], -v[0], 0, 0 } };
+    memcpy(s, r, sizeof(r));
+}
+void Blocks(const float a[3][4], const float c[3][4], SMat& out)  // 0x5be170 with B zero, D = A
+{
+    out = SMat();
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+            out.A[i][j] = a[i][j];
+            out.C[i][j] = c[i][j];
+            out.D[i][j] = a[i][j];
+        }
+}
+}  // namespace
+
+void Group::ContactInertia(int k, const float C[3][4], const float point[3], float K[3][4], SMat& x1)
+{
+    ImpulseInertias();
+    const RigidBody& b = *members[k].body;
+    float T[3][4], TT[3][4] = {}, S[3][4], C1[3][4], C2[3][4];
+    for (int i = 0; i < 3; ++i) {
+        VecMat3(b.R[i], C, T[i]);
+        T[i][3] = 0;
+    }
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) TT[i][j] = T[j][i];
+    float r[3];
+    VecMat3(point, TT, r);
+    Skew(r, S);
+    for (int i = 0; i < 3; ++i) VecMat3(TT[i], S, C1[i]);
+    SMat X1, X2;
+    Blocks(TT, C1, X1);
+    const float n[3] = { point[0] * -1.0f, point[1] * -1.0f, point[2] * -1.0f };
+    Skew(n, S);
+    for (int i = 0; i < 3; ++i) VecMat3(T[i], S, C2[i]);
+    Blocks(T, C2, X2);
+    for (int i = 0; i < 3; ++i) {
+        SVec e, p, a, o;
+        e.t[i] = 1.0f;
+        VecTimesMat(e, X1, p);
+        TestImpulse(k, p, a);
+        a.t[3] = a.b[3] = 0;
+        VecTimesMat(a, X2, o);
+        K[i][0] = o.b[0]; K[i][1] = o.b[1]; K[i][2] = o.b[2]; K[i][3] = 0;
+    }
+    x1 = X1;
+}
+
+void Group::ContactImpulse(int k, const SMat& x1, const float P[3], bool negate)
+{
+    SVec s, p;
+    for (int i = 0; i < 3; ++i) s.t[i] = P[i];
+    if (negate) Scale(s, -1.0f, s);
+    VecTimesMat(s, x1, p);
+    BodyImpulse(k, p);
+}
+
+namespace
+{
+// RigidBody::ApplyImpulse's route for a grouped body (0x5b11c0 reads both
+// vectors in this branch; a missing one counts as zero here).
+void GroupImpulse(void* group, int member, const float* linear, const float* angular)
+{
+    const float zero[3] = {};
+    static_cast<Group*>(group)->Impulse(member, linear ? linear : zero, angular ? angular : zero);
+}
+struct InstallGroupImpulse
+{
+    InstallGroupImpulse() { g_groupImpulse = &GroupImpulse; }
+} g_installGroupImpulse;
+}  // namespace
+
+void Group::Impulse(int k, const float J[3], const float A[3])
+{
+    for (Member& m : members) m.body->state = 0x65;
+    const RigidBody& b = *members[k].body;
+    float rt[3][4] = {};
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) rt[r][c] = b.matrix[c][r];
+    SVec p;
+    VecMat3(J, rt, p.t);
+    VecMat3(A, rt, p.b);
+    p.t[3] = p.b[3] = 0;
+    ImpulseInertias();
+    BodyImpulse(k, p);
+}
+
+// 0x5c7280 + 0x5c81b0.
+void Group::LimitImpulse(int k, float impulse)
+{
+    ImpulseInertias();
 
     Member& m = members[k];
     V(m.rec, 0x220) = SVec();
@@ -971,6 +1120,35 @@ void HingeFrame(const float pos[3], const float axis[3], const float ref[3], flo
 
 // 0x5aada0 (the record's defaults: spring 10, damper 1, limits +-30) and
 // 0x5abd60.
+void Group::MakeRoot(RigidBody* body, float* rec)
+{
+    members.clear();
+    q.assign(1, 0.0f);
+    qd.assign(1, 0.0f);
+    toggle = 1;
+    IntAt(rec, 0x338) = 0;
+    F(rec, 0x350) = 10.0f;
+    F(rec, 0x354) = 1.0f;
+    F(rec, 0x35c) = 30.0f;
+    F(rec, 0x358) = -30.0f;
+    F(rec, 0x360) = 0;
+    F(rec, 0x364) = 0;
+    IntAt(rec, 0x368) = 0;
+    IntAt(rec, 0x330) = 0;
+    IntAt(rec, 0x334) = -1;
+    members.push_back({ body, rec, -1, {} });
+    Frames(0);
+    Link();
+}
+
+void Group::Link()
+{
+    for (size_t k = 0; k < members.size(); ++k) {
+        members[k].body->group = this;
+        members[k].body->member = static_cast<int>(k);
+    }
+}
+
 int Group::AddMember(int parent, RigidBody* body, float* rec, const float cp[3], const float cax[3],
                      const float cref[3], const float pp[3], const float pax[3], const float pref[3], int type)
 {

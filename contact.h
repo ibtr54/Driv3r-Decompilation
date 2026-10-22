@@ -37,6 +37,9 @@ struct BodyContact
     int surfaceA = 0, surfaceB = 0;        // +0x40 / +0x44
 };
 
+// Box A against box B (half sizes, world matrices; 0x5b8df0 / 0x5b9340).
+bool BoxBoxContact(const float sizeA[3], const float* worldA, const float sizeB[3], const float* worldB, BodyContact& c);
+
 class BodyContacts
 {
 public:

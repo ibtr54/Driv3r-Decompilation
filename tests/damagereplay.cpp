@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "../articulated.h"
+#include "../contact.h"
 #include "../damage.h"
 #include "../panels.h"
 #include "../vehicle.h"
@@ -144,6 +145,60 @@ void Check(const char* what, unsigned n, int k, uint32_t got, uint32_t want)
 }
 }  // namespace
 
+// "pairs" (DMG_PAIRS set): the car's contacts with its hinged bonnet in the
+// trace (body B = the panel) against box / box tests of the car's shapes
+// and the panel's under three guesses for the panel shapes' frame:
+// 0 local x E, 1 local x E^-1, 2 local (E: the record's damage entry).
+void RunPairs(const VehicleData& v, int record, unsigned limit)
+{
+    const VehicleData::Part* part = nullptr;
+    for (const VehicleData::Part& p : v.parts)
+        if (p.record == record) part = &p;
+    if (!part) return;
+    printf("record %d: part id 0x%x, %zu shapes\n", record, part->id, part->collision.size());
+    float inv[16];
+    InverseRows(v.damage[record].matrix, false, inv);
+    unsigned shown = 0;
+    for (const auto& de : g_de) {
+        const unsigned n = de.first;
+        if (g_dumps["DEb2"].count(n) == 0 || de.second.size() < 3 || de.second[2] == 0) continue;
+        const std::vector<uint32_t>& B = g_dumps["DEb2"][n].words;
+        const std::vector<uint32_t>& A = g_dumps["DEb1"][n].words;
+        const std::vector<uint32_t>& c = g_dumps["DEc"][n].words;
+        if (B[0x1c0 / 4] == 0 || F(B[0x1c0 / 4]) > 100.0f) continue;  // the panel weighs 5
+        if (shown++ >= limit) break;
+        float car[16], pan[16];
+        for (int i = 0; i < 16; ++i) { car[i] = F(A[4 + i]); pan[i] = F(B[4 + i]); }
+        printf("call %u: traced normal (%.4f %.4f %.4f) depth? %.5f, A point (%.4f %.4f %.4f), B point (%.4f %.4f %.4f)\n", n,
+               F(c[8]), F(c[9]), F(c[10]), F(c[0xfc / 4]), F(c[0x80 / 4]) + car[12], F(c[0x84 / 4]) + car[13],
+               F(c[0x88 / 4]) + car[14], F(c[0xc0 / 4]) + pan[12], F(c[0xc4 / 4]) + pan[13], F(c[0xc8 / 4]) + pan[14]);
+        for (int guess = 0; guess < 3; ++guess) {
+            BodyContact best;
+            bool found = false;
+            for (size_t i = 1; i < v.collision.size(); ++i) {
+                float wa[16];
+                Articulated::MatMul(v.collision[i].local, car, wa);
+                for (size_t j = 0; j < part->collision.size(); ++j) {
+                    float l[16], wb[16];
+                    if (guess == 0) Articulated::MatMul(part->collision[j].local, v.damage[record].matrix, l);
+                    else if (guess == 1) Articulated::MatMul(part->collision[j].local, inv, l);
+                    else memcpy(l, part->collision[j].local, sizeof(l));
+                    Articulated::MatMul(l, pan, wb);
+                    BodyContact k;
+                    if (!BoxBoxContact(v.collision[i].size, wa, part->collision[j].size, wb, k)) continue;
+                    if (!found || best.depth < k.depth) { best = k; found = true; }
+                }
+            }
+            if (found)
+                printf("   guess %d: normal (%.4f %.4f %.4f) depth %.5f, A (%.4f %.4f %.4f) B (%.4f %.4f %.4f)\n", guess,
+                       best.normal[0], best.normal[1], best.normal[2], best.depth, best.pointA[0], best.pointA[1],
+                       best.pointA[2], best.pointB[0], best.pointB[1], best.pointB[2]);
+            else
+                printf("   guess %d: no contact\n", guess);
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 5) {
@@ -160,6 +215,10 @@ int main(int argc, char** argv)
     float handling[kHandlingKeys];
     if (!VehicleHandling(ReadAll(argv[2]), ReadAll(argv[4]), 6, handling)) { printf("no handling\n"); return 1; }
     printf("handling [0x8a] %g [0x8b] %g [0x25] %g\n", handling[0x8a], handling[0x8b], handling[0x25]);
+    if (getenv("DMG_PAIRS")) {
+        RunPairs(*v, atoi(getenv("DMG_PAIRS")), 6);
+        return 0;
+    }
     const unsigned first = argc > 5 ? unsigned(atoi(argv[5])) : 0;
     const unsigned count = argc > 6 ? unsigned(atoi(argv[6])) : 100000;
 

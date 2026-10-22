@@ -228,8 +228,14 @@ void RigidBody::UpdateMatrix()
     matrix[3][3] = 1;
 }
 
+void (*g_groupImpulse)(void* group, int member, const float* linear, const float* angular) = nullptr;
+
 void RigidBody::ApplyImpulse(const float* linear, const float* angular)
 {
+    if (group && g_groupImpulse) {
+        g_groupImpulse(group, member, linear, angular);
+        return;
+    }
     if (linear) {
         const float inv = 1.0f / mass;
         vel[0] = inv * linear[0] + vel[0];

@@ -197,3 +197,43 @@ int HingePanel(Articulated::Group& g, int parent, RigidBody* panel, float* rec, 
     PanelJoint(g, k, partType, partId);
     return k;
 }
+
+bool CarGroup::Hinge(const VehicleData& v, const VehicleData::Part& p, RigidBody& car, const float carMatrix[16],
+                     const float X[16], const float half[2], float width)
+{
+    if (bodies.size() >= 9) return false;  // 0x4f7ff0: slot +0x18c0 < 9
+    PanelHinge h;
+    if (p.record < 0 || p.record >= static_cast<int>(v.damage.size()) ||
+        !PanelHingeInputs(v, p, X, half[0], half[1], width, h))
+        return false;
+    if (!Active()) {
+        recs.clear();
+        recs.emplace_back(0x3c0 / 4, 0.0f);
+        group.MakeRoot(&car, recs[0].data());
+    }
+    bodies.emplace_back();
+    RigidBody& b = bodies.back();
+    PanelBody(v.damage[p.record], X, carMatrix, car, b);
+    recs.emplace_back(0x3c0 / 4, 0.0f);
+    HingePanel(group, 0, &b, recs.back().data(), h, p.type, p.id);
+    records.push_back(p.record);
+    group.Link();
+    return true;
+}
+
+void CarGroup::Step(float h)
+{
+    if (!Active()) return;
+    group.Step(h);
+    for (Articulated::Group::Member& m : group.members) m.body->UpdateMatrix();  // 0x5a9bf0
+}
+
+int CarGroup::MemberOfRecord(int record) const
+{
+    for (size_t i = 0; i < records.size(); ++i) {
+        if (records[i] != record) continue;
+        for (size_t k = 0; k < group.members.size(); ++k)
+            if (group.members[k].body == &bodies[i]) return static_cast<int>(k);
+    }
+    return -1;
+}

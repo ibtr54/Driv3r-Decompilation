@@ -40,6 +40,7 @@
 #include "collision.h"
 #include "contact.h"
 #include "damage.h"
+#include "panels.h"
 #include "story.h"
 
 #pragma comment(lib, "winmm.lib")  // waveOut (menu sounds, music)
@@ -3515,6 +3516,13 @@ private:
             damage_.Init(*v, size, carTable_);
         }
         damageLog_ = 0;
+        carBody_.group = nullptr;
+        carBody_.member = -1;
+        carGroup_.group.members.clear();
+        carGroup_.bodies.clear();
+        carGroup_.recs.clear();
+        carGroup_.records.clear();
+        panelLog_ = panelTicks_ = 0;
         carContacts_.onImpulse = [this](const BodyContact& c, const float J[3]) { CarImpact(c, J); };
         Log("Level 0x%02x: vehicle %d: %zu collision shapes (PDL entry of the part of type 4)", mission, id,
             carShapes_.size());
@@ -3580,6 +3588,7 @@ private:
     void CarImpact(const BodyContact& c, const float J[3])
     {
         if (!carVehicle_ || damage_.records.empty()) return;
+        SyncPanels();
         std::vector<DamageRequest> req;
         damage_.Impact(*carVehicle_, &carBody_.matrix[0][0], carBody_.mass, -1, carBody_.mass, J, c.pointA,
                        c.surfaceB, req);
@@ -3589,13 +3598,41 @@ private:
                 "back %.4f / %.4f", damage_.lastS, damage_.lastPoint[0], damage_.lastPoint[1], damage_.lastPoint[2],
                 damage_.lastSide, damage_.total, damage_.front[0], damage_.front[1], damage_.back[0], damage_.back[1]);
         }
-        for (const DamageRequest& q : req) {
-            DamageRecord& r = damage_.records[q.record];
-            const VehicleData::Part& p = carVehicle_->parts[damage_.recordPart[q.record]];
-            Log("Car damage: record %d (part type %d id 0x%x) %s (+4 %.4f +8 %.4f, dent %.4f, impact %.4f)", q.record,
-                p.type, p.id, q.state == 2 ? "hinged" : "torn off", r.half[0], r.half[1], r.dent, r.impact);
-            r.state = q.state;
+        for (const DamageRequest& q : req) DamageState(q);
+    }
+    // The hinged parts' matrices and joint values for the damage's tests
+    // (the record's body +0x10, the group list's +0x20).
+    void SyncPanels()
+    {
+        for (size_t k = 0; k < damage_.records.size(); ++k) {
+            const int m = carGroup_.MemberOfRecord(static_cast<int>(k));
+            if (m < 0) continue;
+            memcpy(damage_.records[k].bodyMatrix, &carGroup_.group.members[m].body->matrix[0][0], 64);
+            damage_.records[k].jointQ = carGroup_.group.q[m];
         }
+    }
+    // 0x4f98b0 for a state the damage asks for: hinged (state 2) parts get
+    // their body in the car's group (panels.h); a part torn off (state 3)
+    // only changes state (0x4f9810, the loose piece, is not ported).
+    void DamageState(const DamageRequest& q)
+    {
+        DamageRecord& r = damage_.records[q.record];
+        const VehicleData::Part& p = carVehicle_->parts[damage_.recordPart[q.record]];
+        bool ok = true;
+        if (q.state == 2 && !r.body) {
+            ok = carGroup_.Hinge(*carVehicle_, p, carBody_, &carBody_.matrix[0][0], q.matrix, r.half, damage_.size[0]);
+            if (ok) {
+                r.body = 1;
+                r.f18 = 20.0f;
+                r.f28 = (r.half[0] + r.half[1]) * 0.5f;
+                r.flags |= 4;
+            }
+        }
+        Log("Car damage: record %d (part type %d id 0x%x) %s%s (+4 %.4f +8 %.4f, dent %.4f, impact %.4f)%s", q.record,
+            p.type, p.id, q.state == 2 ? "hinged" : "torn off", ok ? "" : " - refused",
+            r.half[0], r.half[1], r.dent, r.impact,
+            q.state == 2 && ok ? "; the car's group has its part bodies" : "");
+        if (ok) r.state = q.state;
     }
     // The world tick's order (0x4a7410): the vehicles' controls and car tick
     // (0x50e5f0), then the physics step (one 1/120 s sub-step: 0x5af710 and
@@ -3615,9 +3652,10 @@ private:
             if (carVehicle_) {
                 // the slot's pre-tick 0x4fbcc0: the records' cool-downs, the
                 // bonnet's timer (no panel moves yet: never due)
+                SyncPanels();
                 std::vector<DamageRequest> due;
                 damage_.Tick(*carVehicle_, &carBody_.matrix[0][0], due);
-                for (const DamageRequest& q : due) damage_.records[q.record].state = q.state;
+                for (const DamageRequest& q : due) DamageState(q);
             }
             wheelPrev_ = wheelVis_;  // 0x503e00, in the slot's pre-tick before the car's tick
             wheelVis_.Update(car_);
@@ -3638,7 +3676,21 @@ private:
                     std::sqrt(carBody_.vel[0] * carBody_.vel[0] + carBody_.vel[1] * carBody_.vel[1] +
                               carBody_.vel[2] * carBody_.vel[2]));
             }
-            if (carBody_.state != 0x78) {
+            if (carGroup_.Active()) {
+                // 0x5a9880: the group's solver moves the car and its parts
+                carGroup_.Step(1.0f / 120.0f);
+                if (panelLog_ < 20 && (++panelTicks_ % 30) == 0) {
+                    ++panelLog_;
+                    std::string qs;
+                    for (size_t k = 1; k < carGroup_.group.q.size(); ++k) {
+                        char t[32];
+                        snprintf(t, sizeof(t), " %.3f/%.3f", carGroup_.group.q[k], carGroup_.group.qd[k]);
+                        qs += t;
+                    }
+                    Log("Car group: %zu members, joints (q/qd):%s; car at (%.2f %.2f %.2f)", carGroup_.group.members.size(),
+                        qs.c_str(), carBody_.pos[0], carBody_.pos[1], carBody_.pos[2]);
+                }
+            } else if (carBody_.state != 0x78) {
                 carBody_.Integrate(1.0f / 120.0f);
                 carBody_.UpdateMatrix();
             }
@@ -3687,6 +3739,8 @@ private:
     const VehicleData* carVehicle_ = nullptr;
     VehicleDamage damage_;  // the slot's damage records (damage.h)
     int damageLog_ = 0;
+    CarGroup carGroup_;     // the car and its hinged parts (panels.h)
+    int panelLog_ = 0, panelTicks_ = 0;
     long contactCount_ = 0;
     int contactLog_ = 0;
     bool carOn_ = false;

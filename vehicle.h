@@ -82,6 +82,9 @@ struct VehicleData
         int shapes = 0;
         float shapeSize[3] = {};
         float shapeMatrix[16] = {};
+        // All the entry's shapes as the body's collision shapes are kept
+        // (local: the PDL matrix turned to y-up, in the vehicle's space).
+        std::vector<Shape> collision;
     };
     std::vector<Part> parts;
     struct Hardpoint

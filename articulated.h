@@ -105,6 +105,13 @@ public:
     // and velocity follow. Returns its index.
     int AddMember(int parent, RigidBody* body, float* rec, const float cp[3], const float cax[3], const float cref[3],
                   const float pp[3], const float pax[3], const float pref[3], int type);
+    // The game's group root (0x5aabe0: a member list with the toggle at 1;
+    // 0x5aada0: the record's defaults; 0x5aae70: joint type 0, no parent,
+    // +0x334 = -1, q = qd = 0, the frames 0x5ae2b0): body with record rec
+    // (0x3c0 bytes, zeroed by the caller) becomes member 0.
+    void MakeRoot(RigidBody* body, float* rec);
+    // Points every member's body at this group and its index (body +0x1d8).
+    void Link();
     // 0x5c2600: one physics sub-step of h.
     void Step(float h);
     // 0x5c2100: one evaluation of the dynamics (the joint accelerations
@@ -117,6 +124,36 @@ public:
     // 0x5c06d0: the member's body matrix, position, quaternion and rotation
     // from the frames (the root's matrix only).
     void BodyMatrix(int k);
+    // 0x5b11c0 for a member of a group: every member woken (0x65), the
+    // impulse J and the angular impulse A (world) turned into the member's
+    // frame (by its matrix's rotation transposed, 0x406ce0 / 0x41e510), the
+    // impulse inertias (0x5c7280), then BodyImpulse.
+    void Impulse(int k, const float J[3], const float A[3]);
+    // 0x5c7280: every member's rigid inertia (0x5c7740), then the impulse
+    // inertias inward (0x5c7930).
+    void ImpulseInertias();
+    // 0x5c7390: the spatial impulse p (the member's frame; linear, then
+    // angular) on member k through the group: rec +0x220 = -p handed up the
+    // chain to the root (0x5c7a70, flagged joints stop it), every member's
+    // response (0x5c7b40), the root's velocity and spin and the joint rates
+    // changed, the velocities again (0x5c1040).
+    void BodyImpulse(int k, const SVec& p);
+    // 0x5c72d0: the member's spatial acceleration (rec +0x280) under the
+    // test impulse p, nothing moved: rec +0x220 = -p handed up the chain
+    // (0x5c7a70, flag 0), the responses from the root down to the member
+    // (0x5c7b40, flag 1); the records keep these intermediates.
+    void TestImpulse(int k, const SVec& p, SVec& out);
+    // 0x5c67c0: the inverse inertia K of member k at a contact (rows C, the
+    // contact frame; point, the contact point relative to the body, world
+    // axes), in the contact frame: the impulse inertias (0x5c7280), T = R C
+    // (R the body's rotation rows, +0xf0), X1 = [[T', 0], [T' [r]x, T']]
+    // with r = point T', X2 = [[T, 0], [T [-point]x, T]] (0x5be170), then
+    // per axis e_i: K row i = bottom of TestImpulse((e_i, 0) X1) X2. x1:
+    // X1, for ContactImpulse (0x5c5fa0).
+    void ContactInertia(int k, const float C[3][4], const float point[3], float K[3][4], SMat& x1);
+    // The grouped side of 0x5c3110's impulse: (P, 0) (0x5a9da0; times -1
+    // for body B, 0x5be0b0) times X1 (0x5be2b0), then BodyImpulse.
+    void ContactImpulse(int k, const SMat& x1, const float P[3], bool negate);
 
 private:
     void Velocities(int k);         // 0x5c1040

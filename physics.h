@@ -30,6 +30,11 @@ struct RigidBody
     float sleep[6] = {};      // +0x1a0..+0x1b4: cleared when an impulse wakes the body
     float mass = 0;           // +0x1c0
     int state = 0x65;         // +0x1c4: 0x65 awake, 0x78 asleep (also 0x6e, 0x96, 0xa0)
+    // +0x1d8: the body's articulated group (articulated.h) and its member
+    // index there; null for a free body. A grouped body is moved by its
+    // group's solver, not by Integrate, and its impulses go through the group.
+    void* group = nullptr;
+    int member = -1;
 
     // 0x4b5170 + 0x5aeb20 + 0x5aee00 on the body: normalised q, R, invI, w, dq.
     void UpdateDerived();
@@ -41,9 +46,13 @@ struct RigidBody
     // 0x5a9bf0: the matrix from q and pos.
     void UpdateMatrix();
     // 0x5b11c0 (a free body, [+0] != 1 and no parent +0x1d8): v += J / m,
-    // L += angular, then w and dq; a sleeping body (0x78) wakes (0x65).
+    // L += angular, then w and dq; a sleeping body (0x78) wakes (0x65). A
+    // grouped body: g_groupImpulse (the group branch, Group::Impulse).
     void ApplyImpulse(const float* linear, const float* angular);
 };
+
+// Set by articulated.cpp: 0x5b11c0's branch for a body with a group.
+extern void (*g_groupImpulse)(void* group, int member, const float* linear, const float* angular);
 
 // Helpers with the game's operation order.
 // 0x41e720: rotation rows (stride 4 floats, column 3 zero) from a quaternion.

@@ -84,6 +84,34 @@ bool ReadUpvh(const std::vector<uint8_t>& d, size_t up, size_t size, VehicleData
         }
         v.wheels.push_back(w);
     }
+    // An entry's shapes as the body gets them.
+    auto readShapes = [&](uint32_t entry, std::vector<VehicleData::Shape>& out) {
+        if (entry >= nentries) return;
+        size_t e = entries + size_t(entry) * 16;
+        size_t first = e + U32(d, e + 4);
+        for (uint32_t s = 0; s < U32(d, e); ++s) {
+            size_t sh = first + size_t(s) * 0x60;
+            if (sh + 0x60 > up + size) break;
+            VehicleData::Shape shape;
+            shape.type = d[sh + 0x50];
+            shape.surface = d[sh + 0x51];
+            for (int k = 0; k < 3; ++k) shape.size[k] = F32(d, sh + 4 * k);
+            // The PDL is z-up with y forward (vehicle 6: the bounding box
+            // 0.88 x 2.29 x 0.49 about (0, 0.02, 0.33), the roof at y +0.36,
+            // the hood at +1.48); the body is y-up with z forward: each row
+            // (x, y, z) -> (-x, z, y), a rotation (where the game turns it,
+            // 0x4b6500's matrix from the model's +0x14.. before 0x5a0b60,
+            // was not traced).
+            for (int r = 0; r < 4; ++r) {
+                const float x = F32(d, sh + 0x10 + 16 * r), y = F32(d, sh + 0x14 + 16 * r), z = F32(d, sh + 0x18 + 16 * r);
+                shape.local[4 * r] = -x;
+                shape.local[4 * r + 1] = z;
+                shape.local[4 * r + 2] = y;
+                shape.local[4 * r + 3] = F32(d, sh + 0x1c + 16 * r);
+            }
+            out.push_back(shape);
+        }
+    };
     // The damage parts' tables.
     auto index = [](uint16_t u) { return u == 0xffff ? -1 : int(u); };
     for (size_t i = 0; i < nparts; ++i) {
@@ -105,6 +133,7 @@ bool ReadUpvh(const std::vector<uint8_t>& d, size_t up, size_t size, VehicleData
                 for (int k = 0; k < 3; ++k) p.shapeSize[k] = F32(d, sh + 4 * k);
                 for (int k = 0; k < 16; ++k) p.shapeMatrix[k] = F32(d, sh + 0x10 + 4 * k);
             }
+            readShapes(U16(d, r + 0x14), p.collision);
         }
         v.parts.push_back(p);
     }
@@ -131,32 +160,7 @@ bool ReadUpvh(const std::vector<uint8_t>& d, size_t up, size_t size, VehicleData
             bodyEntry = U16(d, parts + i * 0x20 + 0x14);
             break;
         }
-    if (bodyEntry < nentries) {
-        size_t e = entries + size_t(bodyEntry) * 16;
-        size_t first = e + U32(d, e + 4);
-        for (uint32_t s = 0; s < U32(d, e); ++s) {
-            size_t sh = first + size_t(s) * 0x60;
-            if (sh + 0x60 > up + size) break;
-            VehicleData::Shape shape;
-            shape.type = d[sh + 0x50];
-            shape.surface = d[sh + 0x51];
-            for (int k = 0; k < 3; ++k) shape.size[k] = F32(d, sh + 4 * k);
-            // The PDL is z-up with y forward (vehicle 6: the bounding box
-            // 0.88 x 2.29 x 0.49 about (0, 0.02, 0.33), the roof at y +0.36,
-            // the hood at +1.48); the body is y-up with z forward: each row
-            // (x, y, z) -> (-x, z, y), a rotation (where the game turns it,
-            // 0x4b6500's matrix from the model's +0x14.. before 0x5a0b60,
-            // was not traced).
-            for (int r = 0; r < 4; ++r) {
-                const float x = F32(d, sh + 0x10 + 16 * r), y = F32(d, sh + 0x14 + 16 * r), z = F32(d, sh + 0x18 + 16 * r);
-                shape.local[4 * r] = -x;
-                shape.local[4 * r + 1] = z;
-                shape.local[4 * r + 2] = y;
-                shape.local[4 * r + 3] = F32(d, sh + 0x1c + 16 * r);
-            }
-            v.collision.push_back(shape);
-        }
-    }
+    readShapes(bodyEntry, v.collision);
     return true;
 }
 

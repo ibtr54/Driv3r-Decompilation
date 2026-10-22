@@ -522,6 +522,30 @@ int main(int argc, char** argv)
     if (mode == "panels") return RunPanels(argc > 4 ? argv[4] : "D:/l/gta-vc/DRIV3R/Vehicles/miami.vvs");
     const unsigned first = argc > 4 ? static_cast<unsigned>(atoi(argv[4])) : 0;
     const unsigned count = argc > 5 ? static_cast<unsigned>(atoi(argv[5])) : 600;
+    if (mode == "free") {
+        // the port's solver alone from the traced state of call first, for
+        // count steps, against the traced joint values (the car's own
+        // impulses and the contacts are left out)
+        State s;
+        Build(first, s);
+        PortGroup port;
+        MakeGroup(s, port);
+        for (unsigned n = first; n < first + count && g_dumps["GB20"].count(n + 1); ++n) {
+            port.group.Step(GameCode::Float(0x3c088889));
+            for (auto& m : port.group.members) m.body->UpdateMatrix();
+            const std::vector<uint32_t>& q = g_dumps["GB20"][n + 1].words;
+            const std::vector<uint32_t>& qd = g_dumps["GB24"][n + 1].words;
+            printf("step %u:", n + 1);
+            for (size_t k = 1; k < port.group.q.size() && k < q.size(); ++k)
+                printf(" q %.4f (%.4f) qd %.3f (%.3f)", port.group.q[k], GameCode::Float(q[k]), port.group.qd[k],
+                       GameCode::Float(qd[k]));
+            const RigidBody& car = port.bodies[0];
+            const std::vector<uint32_t>& cb = g_dumps["GBb"][(n + 1) * 16].words;
+            printf("  car pos %.4f %.4f %.4f (%.4f %.4f %.4f)\n", car.pos[0], car.pos[1], car.pos[2],
+                   GameCode::Float(cb[0x80 / 4]), GameCode::Float(cb[0x84 / 4]), GameCode::Float(cb[0x88 / 4]));
+        }
+        return 0;
+    }
     int exact = 0, total = 0;
     for (unsigned n = first; n < first + count; ++n) {
         if (!g_dumps["GBL"].count(n) || !g_dumps["GAL"].count(n)) break;
@@ -553,6 +577,82 @@ int main(int argc, char** argv)
             port.group.Dynamics();
             PutGroup(port, s);
             bad = CompareStates(s, g, shown);
+        } else if (mode == "impulse") {
+            // 0x5b11c0's group branch (0x5c7280 + 0x5c7390): an impulse on
+            // member n % count, the port against the game on the same state
+            // (the game's world bookkeeping at 0x5b14b3 is cut off: the
+            // epilogue is copied there)
+            static bool patched = false;
+            if (!patched) {
+                static const uint8_t ret[] = { 0x5f, 0x5e, 0x5d, 0x5b, 0x81, 0xc4, 0x80, 0x00, 0x00, 0x00, 0xc3 };
+                uint8_t* at = reinterpret_cast<uint8_t*>(GameCode::At(0x5b14b3));
+                DWORD old;
+                VirtualProtect(at, sizeof(ret), PAGE_EXECUTE_READWRITE, &old);
+                memcpy(at, ret, sizeof(ret));
+                patched = true;
+            }
+            State g;
+            Build(n, g);
+            uint32_t* glist = reinterpret_cast<uint32_t*>(g.list);
+            const int members = static_cast<int>(glist[0]);
+            const int k = static_cast<int>(n % static_cast<unsigned>(members));
+            const float scale = 1.0f + static_cast<float>(n % 7);
+            alignas(16) static float J[4], A[4];
+            J[0] = 300.0f * scale; J[1] = -150.0f; J[2] = 900.0f / scale; J[3] = 0;
+            A[0] = 20.0f; A[1] = -40.0f * scale; A[2] = 10.0f; A[3] = 0;
+            r.eax = reinterpret_cast<uint32_t*>(glist[0x28 / 4])[k];
+            if (!GameCode::Call(0x5b11c0, r, { reinterpret_cast<uint32_t>(J), reinterpret_cast<uint32_t>(A) })) {
+                printf("call %u: fault at %08x\n", n, GameCode::Game(GameCode::g_faultAddr));
+                ++total;
+                continue;
+            }
+            PortGroup port;
+            MakeGroup(s, port);
+            port.group.Impulse(k, J, A);
+            PutGroup(port, s);
+            bad = CompareStates(s, g, shown);
+        } else if (mode == "contact") {
+            // 0x5c67c0 (the inverse inertia at a contact point of member n %
+            // count): a contact frame turned by n and a point near the body,
+            // the port against the game: K, X1 and the whole state
+            State g;
+            Build(n, g);
+            uint32_t* glist = reinterpret_cast<uint32_t*>(g.list);
+            const int members = static_cast<int>(glist[0]);
+            const int k = static_cast<int>(n % static_cast<unsigned>(members));
+            const float a = 0.37f * static_cast<float>(n % 17), c0 = cosf(a), s0 = sinf(a);
+            alignas(16) static float rows[64], point[4], K[12], X1[48];
+            const float fr[3][4] = { { c0, 0, -s0, 0 }, { 0, 1.0f, 0, 0 }, { s0, 0, c0, 0 } };
+            memset(rows, 0, sizeof(rows));
+            memcpy(rows, fr, sizeof(fr));
+            point[0] = 0.4f - 0.05f * static_cast<float>(n % 9);
+            point[1] = -0.3f;
+            point[2] = 1.1f - 0.13f * static_cast<float>(n % 5);
+            point[3] = 0;
+            const uint32_t body = reinterpret_cast<uint32_t*>(glist[0x28 / 4])[k];
+            r.eax = body + 0xf0;
+            r.ebx = reinterpret_cast<uint32_t>(K);
+            if (!GameCode::Call(0x5c67c0, r,
+                                { reinterpret_cast<uint32_t>(X1), body, reinterpret_cast<uint32_t>(rows),
+                                  reinterpret_cast<uint32_t>(point) })) {
+                printf("call %u: fault at %08x\n", n, GameCode::Game(GameCode::g_faultAddr));
+                ++total;
+                continue;
+            }
+            PortGroup port;
+            MakeGroup(s, port);
+            float mk[3][4];
+            Articulated::SMat mx;
+            port.group.ContactInertia(k, reinterpret_cast<const float(*)[4]>(rows), point, mk, mx);
+            PutGroup(port, s);
+            for (int i = 0; i < 12; ++i)
+                if (GameCode::Bits(mk[i / 4][i % 4]) != GameCode::Bits(K[i]) && bad++ < 6)
+                    printf("    K[%d][%d] %g, game %g\n", i / 4, i % 4, mk[i / 4][i % 4], K[i]);
+            const float* mxf = reinterpret_cast<const float*>(&mx);
+            for (int i = 0; i < 48; ++i)
+                if (GameCode::Bits(mxf[i]) != GameCode::Bits(X1[i]) && bad++ < 6)
+                    printf("    X1 +0x%x %g, game %g\n", i * 4, mxf[i], X1[i]);
+            bad += CompareStates(s, g, shown);
         } else if (mode == "step") {
             // the port's 0x5c2600 against the trace
             PortGroup port;

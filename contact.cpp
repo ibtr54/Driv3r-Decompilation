@@ -1,6 +1,8 @@
 // Body contacts (contact.h).
 #include "contact.h"
 
+#include "articulated.h"
+
 #include <cmath>
 #include <cstring>
 
@@ -350,9 +352,18 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr)
     float R[3][3];
     ContactFrame(c.normal, R);
     const float r[3] = { c.pointA[0] - body.pos[0], c.pointA[1] - body.pos[1], c.pointA[2] - body.pos[2] };
+    // A grouped body (0x5c5260's branches): a jointed member keeps its
+    // velocities in its own frame (0x5c1040), turned into the world by q
+    // (0x58c1f0); the root's are world ones.
+    Articulated::Group* group = static_cast<Articulated::Group*>(body.group);
+    float bv[4] = { body.vel[0], body.vel[1], body.vel[2], 0 }, bw[4] = { body.w[0], body.w[1], body.w[2], 0 };
+    if (group && group->members[body.member].parent >= 0) {
+        Articulated::QuatRotate(body.q, body.vel, bv);
+        Articulated::QuatRotate(body.q, body.w, bw);
+    }
     float wr[3];
-    Cross(body.w, r, wr);
-    const float vp[3] = { body.vel[0] + wr[0], body.vel[1] + wr[1], body.vel[2] + wr[2] };
+    Cross(bw, r, wr);
+    const float vp[3] = { bv[0] + wr[0], bv[1] + wr[1], bv[2] + wr[2] };
     float v[3];
     for (int i = 0; i < 3; ++i) v[i] = Dot(R[i], vp);
     if (v[2] >= 0) return false;
@@ -374,6 +385,17 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr)
                 for (int b = 0; b < 3; ++b) s += R[i][a] * Kw[a][b] * R[j][b];
             K[i][j] = s;
         }
+    // A grouped body's K through its group (0x5c3110 -> 0x5c67c0: test
+    // impulses along the frame's axes), in the contact frame.
+    Articulated::SMat x1;
+    if (group) {
+        const float rows[3][4] = { { R[0][0], R[0][1], R[0][2], 0 }, { R[1][0], R[1][1], R[1][2], 0 },
+                                   { R[2][0], R[2][1], R[2][2], 0 } };
+        float Kg[3][4];
+        group->ContactInertia(body.member, rows, r, Kg, x1);
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) K[i][j] = Kg[i][j];
+    }
     if (!Invert3(K, Ki)) return false;
     // 0x5c49c0: f stops the normal velocity alone, g all of it; P = f (1 +
     // e) + (g - f) grip, kept in the friction cone along the same line.
@@ -395,7 +417,8 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr)
     float J[3], ang[3];
     for (int k = 0; k < 3; ++k) J[k] = R[0][k] * P[0] + R[1][k] * P[1] + R[2][k] * P[2];
     Cross(r, J, ang);
-    body.ApplyImpulse(J, ang);
+    if (group) group->ContactImpulse(body.member, x1, P, false);  // 0x5a9da0, 0x5be2b0, 0x5c7390
+    else body.ApplyImpulse(J, ang);
     if (Jout)
         for (int k = 0; k < 3; ++k) Jout[k] = J[k];
     // 0x5c5c50: the depth along the normal, at most 0.01; a static B weighs
@@ -411,6 +434,14 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr)
 }
 
 }  // namespace
+
+bool BoxBoxContact(const float sizeA[3], const float* worldA, const float sizeB[3], const float* worldB, BodyContact& c)
+{
+    Box a, b;
+    MakeBox(sizeA, worldA, a);
+    MakeBox(sizeB, worldB, b);
+    return BoxBox(a, b, c);
+}
 
 int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& shapes, const CollisionWorld& world,
                        const CityGround* groundData)

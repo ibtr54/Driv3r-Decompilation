@@ -16,6 +16,9 @@
 //     -pi/4, spring, damper, stop gain and restitution by part id (0x4f5040).
 #pragma once
 
+#include <deque>
+#include <vector>
+
 #include "articulated.h"
 #include "physics.h"
 #include "vehicle.h"
@@ -57,3 +60,32 @@ void PanelJoint(Articulated::Group& g, int member, int partType, int partId);
 // joins below member parent. Returns its member index.
 int HingePanel(Articulated::Group& g, int parent, RigidBody* panel, float* rec, const PanelHinge& h, int partType,
                int partId);
+
+// The car's group while parts hang from it (BOOT_TO_MENU.md section 74):
+// the slot counts its hinged parts (+0x18c0, at most 9: 0x4f7ff0); the first
+// makes the group (0x4f8100 -> 0x50f1b0 -> 0x5a1820: the car's body as the
+// root, Group::MakeRoot), the last one gone ends it (0x4f8030 -> 0x5aad00).
+// A grouped body is stepped by the group (0x5a9880 runs 0x5c2600 per group
+// and only rebuilds the members' matrices, 0x5a9bf0) and takes its
+// impulses through it (0x5b11c0, 0x5c3110).
+class CarGroup
+{
+public:
+    bool Active() const { return !group.members.empty(); }
+    // 0x4f98b0 state 2 for the part p of record rec (X: the part's pose,
+    // half: the record's +4 / +8, width: the slot's +0x4a0): the part's body
+    // (PanelBody), the group if none yet, the hinge (HingePanel). False
+    // when the slot has 9 parts out or the part has no hinge; then nothing
+    // changes.
+    bool Hinge(const VehicleData& v, const VehicleData::Part& p, RigidBody& car, const float carMatrix[16],
+               const float X[16], const float half[2], float width);
+    // One physics sub-step: the group's solver, then every member's matrix.
+    void Step(float h);
+    // The member index of the body of record k's part, -1 if none.
+    int MemberOfRecord(int record) const;
+
+    Articulated::Group group;
+    std::deque<RigidBody> bodies;           // the parts' bodies
+    std::deque<std::vector<float>> recs;    // the group records (0x3c0 bytes each), [0] the car's
+    std::vector<int> records;               // the damage record of each part body (bodies order)
+};
