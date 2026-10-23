@@ -61,6 +61,21 @@ void PanelJoint(Articulated::Group& g, int member, int partType, int partId);
 int HingePanel(Articulated::Group& g, int parent, RigidBody* panel, float* rec, const PanelHinge& h, int partType,
                int partId);
 
+// 0x4f98b0 state 3 for a part with a body that left the group (the
+// pointers into the slot: +0x1f80 / +0x1f90 hold the car's velocity and
+// spin from the last pre-tick, 0x503e00): with the car's velocity Vc and
+// spin Wc, Vh = 0.5 (prev + Vc) and Wh = 0.5 (prevW + Wc); the part's
+// velocity is halved toward Vh (V = 0.5 (Vh + V)) at most 5 times while
+// longer than 2 |Vh|, its spin likewise toward Wh; then 0x5a0f40 and
+// 0x5a1000 set them. The game then hands the body to the debris manager
+// [0x8ac450] (0x4e5730: a ring of 30, body +0x7c = 0x4d, listener +0x78 =
+// the manager +0x3c).
+void TornPanelMotion(RigidBody& panel, const RigidBody& car, const float prevVel[4], const float prevW[4]);
+// The bonnet timer's push after its tear-off (0x4fbcc0 at 0x4fc1bc): the
+// impulse J = (Vc x -0.375) x the part's mass on the part (0x5b11c0 with a
+// zero angular impulse).
+void TornPanelKick(RigidBody& panel, const RigidBody& car);
+
 // The car's group while parts hang from it (BOOT_TO_MENU.md section 74):
 // the slot counts its hinged parts (+0x18c0, at most 9: 0x4f7ff0); the first
 // makes the group (0x4f8100 -> 0x50f1b0 -> 0x5a1820: the car's body as the
@@ -83,9 +98,26 @@ public:
     void Step(float h);
     // The member index of the body of record k's part, -1 if none.
     int MemberOfRecord(int record) const;
+    // The body of record k's part (hinged or torn off), null if none.
+    RigidBody* BodyOfRecord(int record);
+    // 0x4f98b0 state 3 for the hinged part of record k (BOOT_TO_MENU.md
+    // section 76): 0x505c90 (the body leaves the group, 0x5ad710; the
+    // slot's count less one, 0x4f8030: the last part out ends the group,
+    // 0x5aad00, and the car is free again), then the loose part's motion
+    // (TornPanelMotion; prevVel / prevW: the slot's +0x1f80 / +0x1f90).
+    // Returns the part's body, now a free body kept in bodies (its index
+    // joins torn), or null when the record has no body here.
+    RigidBody* Tear(int record, const RigidBody& car, const float prevVel[4], const float prevW[4]);
+    // 0x4f98b0 state 3 for a part still on the car (no body yet): its body
+    // made as for the hinge (0x4f8ef0, X: the request's matrix), free from
+    // the start, no motion change. Returns it (kept in bodies, joins torn).
+    RigidBody* Loose(const VehicleData& v, const VehicleData::Part& p, const RigidBody& car, const float carMatrix[16],
+                     const float X[16]);
 
     Articulated::Group group;
     std::deque<RigidBody> bodies;           // the parts' bodies
     std::deque<std::vector<float>> recs;    // the group records (0x3c0 bytes each), [0] the car's
     std::vector<int> records;               // the damage record of each part body (bodies order)
+    int hinged = 0;                         // the slot's +0x18c0: parts hanging from the car
+    std::vector<int> torn;                  // bodies torn off (indices into bodies): free bodies now
 };

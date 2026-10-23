@@ -3514,6 +3514,11 @@ private:
             const float size[3] = { h[0] + h[0], h[2] + h[2], h[1] + h[1] };
             damage_ = VehicleDamage();
             damage_.Init(*v, size, carTable_);
+            // the car's box that dents (0x5091b0; damage.h)
+            damage_.InitDent(id, &carShapes_, carTable_);
+            if (damage_.dentShape >= 0)
+                Log("Level 0x%02x: vehicle %d: shape %d dents along axis %d (scales %g / %g)", mission, id,
+                    damage_.dentShape, damage_.dentAxis, damage_.dentScale[0], damage_.dentScale[1]);
         }
         damageLog_ = 0;
         carBody_.group = nullptr;
@@ -3522,6 +3527,10 @@ private:
         carGroup_.bodies.clear();
         carGroup_.recs.clear();
         carGroup_.records.clear();
+        carGroup_.hinged = 0;
+        carGroup_.torn.clear();
+        panelDraw_.assign(damage_.records.size() * 17, 0.0f);
+        debrisLog_ = 0;
         panelLog_ = panelTicks_ = 0;
         carContacts_.onImpulse = [this](const BodyContact& c, const float J[3]) { CarImpact(c, J); };
         Log("Level 0x%02x: vehicle %d: %zu collision shapes (PDL entry of the part of type 4)", mission, id,
@@ -3582,9 +3591,9 @@ private:
         driver_.Update(keys, car_.vehicleId, car_.F(0x54c), controls_, handbrake_);
     }
     // The vehicle slot's contact listener (0x503fb0, damage.h) for one of the
-    // car body's contacts with a static object. The parts the hit frees get
-    // their new state (hinged / torn off) but no body yet: creating, solving
-    // and drawing the panels (panels.h, articulated.h) is not wired in.
+    // car body's contacts (a static object or a loose part). The parts the
+    // hit frees get their new state (DamageState: hinged in the car's group,
+    // or torn off as free bodies, drawn with their bodies).
     void CarImpact(const BodyContact& c, const float J[3])
     {
         if (!carVehicle_ || damage_.records.empty()) return;
@@ -3612,13 +3621,17 @@ private:
         }
     }
     // 0x4f98b0 for a state the damage asks for: hinged (state 2) parts get
-    // their body in the car's group (panels.h); a part torn off (state 3)
-    // only changes state (0x4f9810, the loose piece, is not ported).
-    void DamageState(const DamageRequest& q)
+    // their body in the car's group (panels.h); a part torn off (state 3,
+    // BOOT_TO_MENU.md section 76) leaves the group (the last one out ends
+    // it), takes its loose motion and stays a free body (the game's debris
+    // manager [0x8ac450]); one torn off the car directly gets its body now.
+    // timer: the bonnet timer's request (its push follows, 0x4fc1bc).
+    void DamageState(const DamageRequest& q, bool timer = false)
     {
         DamageRecord& r = damage_.records[q.record];
         const VehicleData::Part& p = carVehicle_->parts[damage_.recordPart[q.record]];
         bool ok = true;
+        RigidBody* made = nullptr;
         if (q.state == 2 && !r.body) {
             ok = carGroup_.Hinge(*carVehicle_, p, carBody_, &carBody_.matrix[0][0], q.matrix, r.half, damage_.size[0]);
             if (ok) {
@@ -3626,13 +3639,51 @@ private:
                 r.f18 = 20.0f;
                 r.f28 = (r.half[0] + r.half[1]) * 0.5f;
                 r.flags |= 4;
+                made = carGroup_.BodyOfRecord(q.record);
+            }
+        } else if (q.state == 3 && r.state < 3) {
+            RigidBody* b = nullptr;
+            if (r.state == 2 && r.body) {
+                b = carGroup_.Tear(q.record, carBody_, damage_.prevVel, damage_.prevW);  // 0x505c90 .. 0x5a1000
+            } else if (!r.body && !(r.flags & 1)) {
+                b = carGroup_.Loose(*carVehicle_, p, carBody_, &carBody_.matrix[0][0], q.matrix);  // 0x4f8ef0
+                made = b;
+            }
+            damage_.TearShare(q.record);  // 0x4f9810
+            if (b && timer) TornPanelKick(*b, carBody_);
+            r.body = 0;
+        }
+        if (made) {
+            // the part drawn with its body from now on: its place relative
+            // to the body as 0x4f8ef0 makes it (the part still in place; a
+            // hinged body's matrix is at the joint's 0 until the group's
+            // next step, the joint's start -pi/4 being the closed part)
+            const int dp = DrawPartOfRecord(q.record);
+            if (dp >= 0) {
+                RigidBody placed;
+                PanelBody(carVehicle_->damage[q.record], q.matrix, &carBody_.matrix[0][0], carBody_, placed);
+                float inv[16], rel[16];
+                Articulated::RigidInverse(&placed.matrix[0][0], inv);
+                MatMul4(&carLocal_[dp * 16], &carBody_.matrix[0][0], rel);
+                MatMul4(rel, inv, &panelDraw_[q.record * 17]);
+                panelDraw_[q.record * 17 + 16] = 1.0f;
             }
         }
         Log("Car damage: record %d (part type %d id 0x%x) %s%s (+4 %.4f +8 %.4f, dent %.4f, impact %.4f)%s", q.record,
-            p.type, p.id, q.state == 2 ? "hinged" : "torn off", ok ? "" : " - refused",
-            r.half[0], r.half[1], r.dent, r.impact,
-            q.state == 2 && ok ? "; the car's group has its part bodies" : "");
+            p.type, p.id, q.state == 2 ? "hinged" : timer ? "torn off by the bonnet timer" : "torn off",
+            ok ? "" : " - refused", r.half[0], r.half[1], r.dent, r.impact,
+            q.state == 2 && ok ? "; the car's group has its part bodies"
+            : q.state == 3 && !carGroup_.Active() ? "; the car's group ended" : "");
         if (ok) r.state = q.state;
+    }
+    // The draw part (VehicleDraw::parts index) of record k's part: the body
+    // models come first, in part order.
+    int DrawPartOfRecord(int record) const
+    {
+        const int part = damage_.recordPart[record];
+        for (size_t i = 0; i < carVehicle_->bodyParts.size(); ++i)
+            if (carVehicle_->bodyParts[i] == part && (i + 1) * 16 <= carLocal_.size()) return static_cast<int>(i);
+        return -1;
     }
     // The world tick's order (0x4a7410): the vehicles' controls and car tick
     // (0x50e5f0), then the physics step (one 1/120 s sub-step: 0x5af710 and
@@ -3651,14 +3702,18 @@ private:
             }
             if (carVehicle_) {
                 // the slot's pre-tick 0x4fbcc0: the records' cool-downs, the
-                // bonnet's timer (no panel moves yet: never due)
+                // bonnet's timer (open beyond 0.687 for 4 s: torn off)
                 SyncPanels();
                 std::vector<DamageRequest> due;
                 damage_.Tick(*carVehicle_, &carBody_.matrix[0][0], due);
-                for (const DamageRequest& q : due) DamageState(q);
+                for (const DamageRequest& q : due) DamageState(q, true);
             }
             wheelPrev_ = wheelVis_;  // 0x503e00, in the slot's pre-tick before the car's tick
             wheelVis_.Update(car_);
+            // 0x503e00 also keeps the car's velocity and spin (slot +0x1f80 /
+            // +0x1f90) for the next tear-off
+            memcpy(damage_.prevVel, carBody_.vel, sizeof(damage_.prevVel));
+            memcpy(damage_.prevW, carBody_.w, sizeof(damage_.prevW));
             car_.Tick(carRays_);
             // The controls reach the car after its tick (BOOT_TO_MENU.md
             // section 70: run 9 replays exactly only so; before the tick a
@@ -3675,6 +3730,30 @@ private:
                     carBody_.pos[0], carBody_.pos[1], carBody_.pos[2],
                     std::sqrt(carBody_.vel[0] * carBody_.vel[0] + carBody_.vel[1] * carBody_.vel[1] +
                               carBody_.vel[2] * carBody_.vel[2]));
+            }
+            // the loose parts (free bodies: the game's debris): their pairs
+            // with the world and the ground, and with the car (whose damage
+            // listener hears those too)
+            for (size_t t = 0; t < carGroup_.torn.size(); ++t) {  // (a hit can tear off another part)
+                const int i = carGroup_.torn[t];
+                RigidBody& b = carGroup_.bodies[i];
+                const int rec = carGroup_.records[i];
+                const std::vector<VehicleData::Shape>& shapes =
+                    carVehicle_->parts[damage_.recordPart[rec]].collision;
+                if (b.state != 0x78) debrisContacts_.Step(b, shapes, collision_, &loader_.City().ground);
+                const int hit = carContacts_.Pair(carBody_, carShapes_, b, shapes);
+                if ((hit || debrisContacts_.contacts) && debrisLog_ < 30) {
+                    ++debrisLog_;
+                    Log("Loose part (record %d): %d world / %d ground contacts, %d with the car; at (%.2f %.2f %.2f), "
+                        "speed %.2f", rec, debrisContacts_.contacts, debrisContacts_.ground, hit, b.pos[0], b.pos[1],
+                        b.pos[2], std::sqrt(b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1] + b.vel[2] * b.vel[2]));
+                }
+            }
+            for (int i : carGroup_.torn) {
+                RigidBody& b = carGroup_.bodies[i];
+                if (b.state == 0x78) continue;
+                b.Integrate(1.0f / 120.0f);  // 0x5af710 (the debris' sleep test 0x5af3f0 is not ported)
+                b.UpdateMatrix();
             }
             if (carGroup_.Active()) {
                 // 0x5a9880: the group's solver moves the car and its parts
@@ -3726,6 +3805,15 @@ private:
         }
         for (size_t i = 0; i * 16 < carLocal_.size(); ++i)
             MatMul4(&carLocal_[i * 16], carDrawBody_, &carWorld_[i * 16]);
+        // the parts with a body of their own (hinged or torn off) follow it
+        if (carVehicle_)
+            for (size_t k = 0; k < damage_.records.size() && (k + 1) * 17 <= panelDraw_.size(); ++k) {
+                if (panelDraw_[k * 17 + 16] == 0) continue;
+                const RigidBody* b = carGroup_.BodyOfRecord(static_cast<int>(k));
+                const int dp = DrawPartOfRecord(static_cast<int>(k));
+                if (!b || dp < 0) continue;
+                MatMul4(&panelDraw_[k * 17], &b->matrix[0][0], &carWorld_[dp * 16]);
+            }
         city_.SetVehiclePose(carWorld_, &carHidden_);
     }
 
@@ -3740,6 +3828,9 @@ private:
     VehicleDamage damage_;  // the slot's damage records (damage.h)
     int damageLog_ = 0;
     CarGroup carGroup_;     // the car and its hinged parts (panels.h)
+    BodyContacts debrisContacts_;  // the loose parts' contacts with the world
+    std::vector<float> panelDraw_;  // per record: the part's draw matrix in its body (16), drawn so (1)
+    int debrisLog_ = 0;
     int panelLog_ = 0, panelTicks_ = 0;
     long contactCount_ = 0;
     int contactLog_ = 0;

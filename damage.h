@@ -29,10 +29,19 @@
 // scale x [+0x94]) and the dent passes 1.5 x (1 - ...), else hinged (state
 // 2) when the hit reaches 0.09375 (twice that for ids 1 and 0x1f..0x39)
 // and the part may hinge (0x4f4620).
+// The dent (BOOT_TO_MENU.md section 76): at the slot's set-up 0x5091b0
+// picks the body's largest physics box (the largest |half size|^2 from
+// shape 1 on, at most 6 shapes, none for the vehicles of 0x513ec0) and its
+// longest axis (slot +0x1f6a / +0x1f6b) with the scales [0x26] / [0x27] of
+// the handling table (+0x1f6c / +0x1f70); every 0x4fd480(1) then shortens
+// that axis by the front and back groups' damage: half = (2 rest - (back +
+// front)) / 2, the centre moved by (back - front) / 2 along the game's z
+// (front = (+0x544 + +0x540) / 2 x scale, back likewise): the car's own
+// box gives in where it was hit.
 // Not ported: the wheel hits 0x507980 (burst tyres), the explosion contacts
 // (contact +0xf8 bit 0), the effects and sounds (0x5063f0, 0x50b100, sparks
-// 0x567840.., the scrape 0x56ff10), the body's dents 0x4f4d80 / 0x4f5890 and
-// the axle shift of 0x4fd480 (slot +0x1f6a).
+// 0x567840.., the scrape 0x56ff10), the visual dents 0x4f5890 (vertex
+// deformation).
 #pragma once
 
 #include <cstdint>
@@ -94,6 +103,15 @@ public:
     // 0.687 for 4 s (one timer for the slot, +0x1898). car: the car's matrix.
     void Tick(const VehicleData& v, const float car[16], std::vector<DamageRequest>& out);
 
+    // 0x5091b0's dent choice for vehicle id with the car's physics shapes
+    // (in the program's space; the half sizes are the PDL's): the shape and
+    // axis, the scales from handling [0x26] / [0x27], the rest shapes. The
+    // dents then go to *shapes (the program's live shapes).
+    void InitDent(int vehicleId, std::vector<VehicleData::Shape>* shapes, const float handling[kHandlingKeys]);
+    // 0x4f9810 (state 3): the slot's total takes the record's share,
+    // clamp01(1 - impact) / count, when the damage switch allows it.
+    void TearShare(int record);
+
     std::vector<DamageRecord> records;
     std::vector<int> recordPart;  // slot +0x480: the part of each record
     float size[3] = {};           // +0x4a0..+0x4a8
@@ -103,8 +121,14 @@ public:
     int linked = -1;              // +0x18a4: a record that takes the hits of parts 2 / 0x21 / 0x22 / 0x25
     float total = 0;              // +0x1f78
     float openTime = 0;           // +0x1898: how long the bonnet has been open
+    float tearQ = 0.687223434f, tearTime = 4.0f;  // the timer's limits ([0x78f1c4], [0x78e8a4])
     bool glass = false;           // +0x1f64 (byte)
     float front[2] = {}, back[2] = {};  // +0x540 / +0x544, +0x548 / +0x54c (0x4fd480)
+    int dentShape = -1, dentAxis = 0;   // +0x1f6a / +0x1f6b
+    float dentScale[2] = {};            // +0x1f6c / +0x1f70 (front, back)
+    std::vector<VehicleData::Shape> dentRest;            // the shapes as loaded (the model's, slot +0x444)
+    std::vector<VehicleData::Shape>* dentShapes = nullptr;  // the live ones (slot +0x18d0)
+    float prevVel[4] = {}, prevW[4] = {};  // +0x1f80 / +0x1f90: the car's at the last pre-tick (0x503e00)
 
     // Intermediates of the last Impact, for the tests: s after the raise,
     // the point and the direction in the car's frame, the side weight.

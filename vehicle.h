@@ -39,6 +39,7 @@ struct VehicleData
     int id = 0;
     int mdpc = -1;            // the file's k-th MDPC chunk
     std::vector<int> body;    // models of the parts of type 1, in part order
+    std::vector<int> bodyParts;  // the part (index into parts) of each of them
     std::vector<VehicleWheel> wheels;  // the parts of type 2, in part order
     // The exhaust tips (x, y, z in the vehicle's space, part after part):
     // the parts of type 3 with id 6, whose u16 +0x16 indexes the table of

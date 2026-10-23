@@ -42,7 +42,7 @@ struct BodySeen
 };
 std::vector<BodySeen> g_bodies;
 
-const char* kTags[] = { "DEc", "DEi", "DEb1", "DEb2", "DEs", "DXs", "PAq", "PAr", "PAv5", "PAm7", "PXr" };
+const char* kTags[] = { "DEc", "DEi", "DEb1", "DEb2", "DEs", "DXs", "PAq", "PAr", "PAv5", "PAm7", "PXr", "NPah" };
 
 void Read(const char* path)
 {
@@ -174,6 +174,10 @@ void RunPairs(const VehicleData& v, int record, unsigned limit)
         const VehicleData::Shape& s = part->collision[i];
         printf("  part shape %zu: type %d surface %d size (%.4f %.4f %.4f) at (%.4f %.4f %.4f)\n", i, s.type, s.surface,
                s.size[0], s.size[1], s.size[2], s.local[12], s.local[13], s.local[14]);
+        printf("    rows (%.4f %.4f %.4f) (%.4f %.4f %.4f) (%.4f %.4f %.4f); PDL rows", s.local[0], s.local[1], s.local[2],
+               s.local[4], s.local[5], s.local[6], s.local[8], s.local[9], s.local[10]);
+        for (int k = 0; k < 16; ++k) printf(" %.4f", part->shapeMatrix[k]);
+        printf("\n");
     }
     float inv[16];
     InverseRows(v.damage[record].matrix, false, inv);
@@ -209,16 +213,9 @@ void RunPairs(const VehicleData& v, int record, unsigned limit)
         for (int guess = 0; guess < 4; ++guess) {
             if (guess == 3) {
                 // the game's space: the game turns every PDL shape row
-                // (x, y, z) -> (x, z, -y) (run 16's live shapes), the
-                // program (-x, z, y) (vehicle.cpp), half a turn about y more
-                auto raw = [](const float* l, float* out) {
-                    for (int r2 = 0; r2 < 4; ++r2) {
-                        out[4 * r2] = -l[4 * r2];
-                        out[4 * r2 + 1] = l[4 * r2 + 1];
-                        out[4 * r2 + 2] = -l[4 * r2 + 2];
-                        out[4 * r2 + 3] = l[4 * r2 + 3];
-                    }
-                };
+                // (x, y, z) -> (x, z, -y) (run 16's live shapes); since
+                // 2026-10-23 the program does too (vehicle.cpp)
+                auto raw = [](const float* l, float* out) { memcpy(out, l, 16 * sizeof(float)); };
                 // the bonnet's shape frame: 0 as the car's shapes, 1 the
                 // PDL's own rows (z-up), 2 identity
                 for (int frame = 0; frame < 3; ++frame) {
@@ -232,8 +229,8 @@ void RunPairs(const VehicleData& v, int record, unsigned limit)
                         if (frame == 0) raw(l, lb2);
                         else if (frame == 1)
                             for (int r2 = 0; r2 < 4; ++r2) {
-                                lb2[4 * r2] = -l[4 * r2];
-                                lb2[4 * r2 + 1] = l[4 * r2 + 2];
+                                lb2[4 * r2] = l[4 * r2];
+                                lb2[4 * r2 + 1] = -l[4 * r2 + 2];
                                 lb2[4 * r2 + 2] = l[4 * r2 + 1];
                                 lb2[4 * r2 + 3] = l[4 * r2 + 3];
                             }
@@ -312,6 +309,11 @@ int main(int argc, char** argv)
     const unsigned count = argc > 6 ? unsigned(atoi(argv[6])) : 100000;
 
     int calls = 0, equal = 0, tested = 0, requests = 0;
+    // the dents (BOOT_TO_MENU.md section 76): the port's dented shape after
+    // every call, against the game's live car shapes (D3PROXY_NARROW "NPah"
+    // of pairs with A = the car's body), given in the game's space
+    std::vector<std::pair<uint32_t, uint32_t>> dents;  // the dented axis' half size, the centre's game z
+    int dentShape = 1, dentAxis = 0;
     for (const auto& de : g_de) {
         const unsigned n = de.first;
         if (n < first || n >= first + count) continue;
@@ -383,7 +385,22 @@ int main(int argc, char** argv)
         const float carMass = F(A[0x1c0 / 4]);
         const float Jv[3] = { F(J[0]), F(J[1]), F(J[2]) };
         std::vector<DamageRequest> req;
+        std::vector<VehicleData::Shape> shapes = v->collision;
+        d.InitDent(6, &shapes, handling);
+        if (calls == 1) {
+            Check("slot +1f6a", n, -1, uint32_t(d.dentShape), (S[0x1f68 / 4] >> 16) & 0xff);
+            Check("slot +1f6b", n, -1, uint32_t(d.dentAxis), (S[0x1f68 / 4] >> 24) & 0xff);
+            Check("slot +1f6c", n, -1, W(d.dentScale[0]), S[0x1f6c / 4]);
+            Check("slot +1f70", n, -1, W(d.dentScale[1]), S[0x1f70 / 4]);
+        }
         d.Impact(*v, car, carMass, -1, carMass, Jv, point, int(c[0xd0 / 4]), req);
+        if (d.dentShape >= 0) {
+            dentShape = d.dentShape;
+            dentAxis = d.dentAxis;
+            const VehicleData::Shape& sh = shapes[d.dentShape];
+            const std::pair<uint32_t, uint32_t> dent(W(sh.size[d.dentAxis]), W(sh.local[14]));
+            if (dents.empty() || dents.back() != dent) dents.push_back(dent);
+        }
 
         // the part tests' arguments of this call
         bool sawPa = false;
@@ -445,6 +462,28 @@ int main(int argc, char** argv)
         Check("slot +1f64", n, -1, d.glass ? 1u : 0u, X[0x1f64 / 4] & 0xff);
         same = g_bad == before;
         if (same) ++equal;
+    }
+    // the game's distinct dented shapes in the order seen (the car's shape
+    // set: the first NPah of each pair is side A, the car)
+    if (!dents.empty() && !g_dumps["NPah"].empty()) {
+        int found = 0, seen = 0;
+        std::pair<uint32_t, uint32_t> last(0, 0);
+        for (const auto& np : g_dumps["NPah"]) {
+            const std::vector<uint32_t>& w = np.second.words;
+            if (w.size() < size_t(dentShape + 1) * 24) continue;
+            const uint32_t* x = &w[dentShape * 24];
+            const std::pair<uint32_t, uint32_t> got(x[dentAxis], x[4 + 14]);
+            if (got == last) continue;
+            last = got;
+            ++seen;
+            bool ok = false;
+            for (const auto& dd : dents) ok = ok || dd == got;
+            if (ok) ++found;
+            printf("  the game's shape %d after NP %u: half %.6f, centre z %.6f: %s\n", dentShape, np.first,
+                   F(got.first), F(got.second), ok ? "made by the port too" : "NOT among the port's");
+        }
+        printf("dents: %d of the game's %d shape states made by the port (%zu port states)\n", found, seen,
+               dents.size());
     }
     printf("%d calls: %d equal, %d with part tests, %d state changes; %d differences\n", calls, equal, tested, requests,
            g_bad);

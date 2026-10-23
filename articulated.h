@@ -117,6 +117,20 @@ public:
     // 0x5c2100: one evaluation of the dynamics (the joint accelerations
     // rec +0x378, the root's spatial acceleration rec +0x280).
     void Dynamics();
+    // 0x5ad710 for a member without children (a panel): every member's
+    // velocity (0x5c1040) and matrix (0x5c06d0), then Leave. (A member with
+    // children would split the group into a new one: not ported.)
+    void Detach(int k);
+    // 0x5acea0: member k leaves the group as a free body: a jointed one's
+    // body-frame velocity and spin turned into the world by q (0x58c1f0),
+    // R from q, L = w (R' D R) (D the inertia diagonal, 0x41e510 products),
+    // then q normalised, R, invI, w and dq again (0x4b5170, 0x5aeb20,
+    // 0x5aee00); it leaves its parent's joints (+0x338..+0x34c) and the
+    // member list, and body +0x1d8 = 0.
+    void Leave(int k);
+    // 0x5aad00: the group's end: Leave for the last member until none is
+    // left.
+    void End();
     // 0x5ae2b0: the member's joint frames from its joint value (rec +0xc0
     // and its inverse +0x100; the root's: its world matrix +0x100 and the
     // inverse +0xc0).

@@ -259,3 +259,40 @@ void RigidBody::ApplyImpulse(const float* linear, const float* angular)
         }
     }
 }
+
+void RigidBody::SetVelocity(const float v[3])
+{
+    vel[0] = v[0];
+    vel[1] = v[1];
+    vel[2] = v[2];
+    vel[3] = 0;
+    if (state == 0x78) {
+        state = 0x65;
+        memset(sleep, 0, sizeof(sleep));
+    }
+}
+
+void RigidBody::SetSpin(const float W[3])
+{
+    const float* a = invI[0];
+    const float* b = invI[1];
+    const float* c = invI[2];
+    const float t0 = b[0] * a[2] - b[2] * a[0];
+    const float t1 = b[1] * a[0] - b[0] * a[1];
+    const float t2 = b[2] * a[1] - b[1] * a[2];
+    const float t3 = 1.0f / ((t0 * c[1] + t1 * c[2]) + t2 * c[0]);
+    const float l0 = W[2] * ((c[1] * b[0] - c[0] * b[1]) * t3) +
+                     (W[1] * ((c[0] * b[2] - c[2] * b[0]) * t3) + W[0] * ((c[2] * b[1] - c[1] * b[2]) * t3));
+    const float l1 = W[2] * ((a[1] * c[0] - a[0] * c[1]) * t3) +
+                     (W[1] * ((a[0] * c[2] - a[2] * c[0]) * t3) + W[0] * ((a[2] * c[1] - a[1] * c[2]) * t3));
+    const float l2 = W[2] * (t1 * t3) + (W[1] * (t0 * t3) + W[0] * (t2 * t3));
+    L[0] = l0;
+    L[1] = l1;
+    L[2] = l2;
+    L[3] = 0;
+    ::UpdateSpin(q, L, invI, w, dq);
+    if (state == 0x78) {
+        state = 0x65;
+        memset(sleep, 0, sizeof(sleep));
+    }
+}

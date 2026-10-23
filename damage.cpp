@@ -121,15 +121,15 @@ void VehicleDamage::Tick(const VehicleData& v, const float car[16], std::vector<
             r.cooldown = c <= 0 ? 0.0f : c;
         }
         // a hinged part of id 4 (the bonnet) held open beyond 0.687 for 4 s
-        // comes off (then the game pushes the car back by the part's
-        // momentum, 0x5a1700 / 0x5b11c0: not ported)
+        // comes off (then the game pushes the loose part back by the car's
+        // velocity, 0x5a1700 / 0x5b11c0: TornPanelKick, panels.h)
         if (v.parts[recordPart[k]].id != 4 || !r.body || r.state != 2) continue;
-        if (r.jointQ < 0.687223434f) {
+        if (r.jointQ < tearQ) {
             openTime = 0;
             continue;
         }
         openTime = openTime + kInv120;
-        if (!(4.0f <= openTime)) continue;
+        if (!(tearTime <= openTime)) continue;
         openTime = 0;
         float inv[16];
         InverseRows(car, false, inv);  // (the first row's order checked in the listing, not traced)
@@ -195,7 +195,7 @@ void VehicleDamage::Stage(DamageRecord& r, int vehicleId)
 
 void VehicleDamage::Share(const VehicleData& v)
 {
-    // 0x4fd480 (argument 1; the axle shift at slot +0x1f6a not ported)
+    // 0x4fd480 (argument 1)
     float f0 = 0, f1 = 0, b0 = 0, b1 = 0;
     for (size_t k = 0; k < records.size(); ++k) {
         const VehicleData::Part& p = v.parts[recordPart[k]];
@@ -216,6 +216,65 @@ void VehicleDamage::Share(const VehicleData& v)
         if (DamageBackGroup(p.type, p.id, p.flags8)) { r.half[0] = b0; r.half[1] = b1; }
     }
     front[0] = f0; front[1] = f1; back[0] = b0; back[1] = b1;
+    // the dent (argument 1, slot +0x1f5d clear, the body's own shapes)
+    if (dentShape < 0 || !dentShapes || dentShape >= static_cast<int>(dentShapes->size()) ||
+        dentShape >= static_cast<int>(dentRest.size()))
+        return;
+    const VehicleData::Shape& rest = dentRest[dentShape];
+    VehicleData::Shape& live = (*dentShapes)[dentShape];
+    const float fr = (f1 + f0) * 0.5f * dentScale[0];
+    const float bk = (b1 + b0) * 0.5f * dentScale[1];
+    live.size[dentAxis] = ((rest.size[dentAxis] + rest.size[dentAxis]) - (bk + fr)) * 0.5f;
+    memcpy(live.local, rest.local, sizeof(live.local));
+    live.local[14] = (bk - fr) * 0.5f + rest.local[14];
+}
+
+void VehicleDamage::InitDent(int vehicleId, std::vector<VehicleData::Shape>* shapes,
+                             const float handling[kHandlingKeys])
+{
+    // 0x5091b0
+    dentShape = -1;
+    dentAxis = 0;
+    dentScale[0] = handling[0x26];
+    dentScale[1] = handling[0x27];
+    dentShapes = shapes;
+    dentRest = shapes ? *shapes : std::vector<VehicleData::Shape>();
+    // 0x513ec0: the vehicles that never dent
+    static const unsigned char kNoDent[] = { 0x00, 0x01, 0x0f, 0x12, 0x13, 0x14, 0x17, 0x18, 0x1a, 0x1e, 0x1f, 0x20,
+                                             0x24, 0x27, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x34, 0x35, 0x36,
+                                             0x3a, 0x3b, 0x3c, 0x40, 0x41, 0x43, 0x44, 0x45, 0x46, 0x47, 0x49, 0x4c,
+                                             0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5f,
+                                             0x60 };
+    for (unsigned char id : kNoDent)
+        if (vehicleId == id) return;
+    const size_t n = dentRest.size();
+    if (n >= 7) return;
+    float best = 0;
+    int pick = 0;
+    float h[3] = {};
+    for (size_t i = n > 1 ? 1 : 0; i < n; ++i) {
+        const float* s = dentRest[i].size;
+        const float m = (s[2] * s[2] + s[0] * s[0]) + s[1] * s[1];  // the listing's order (z, x, y)
+        if (best < m) {
+            best = m;
+            pick = static_cast<int>(i);
+            memcpy(h, s, sizeof(h));
+        }
+    }
+    dentShape = pick;
+    if (h[1] < h[0] && h[2] < h[0]) dentAxis = 0;
+    else dentAxis = h[1] <= h[2] ? 2 : 1;
+}
+
+void VehicleDamage::TearShare(int record)
+{
+    // 0x4f9810 (the switch [[0x8ac444]] +0x31 clear in the traces, as Apply)
+    float d = 1.0f - records[record].impact;
+    if (d < 0.0f) d = 0;
+    d = d / static_cast<float>(records.size()) + total;
+    if (1.0f < d) d = 1.0f;
+    else if (d < 0.0f) d = 0;
+    total = d;
 }
 
 int VehicleDamage::PartTest(const VehicleData& v, const VehicleData::Part& p, int k, const VehicleData::DamageEntry& e,

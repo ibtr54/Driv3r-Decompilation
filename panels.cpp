@@ -201,7 +201,7 @@ int HingePanel(Articulated::Group& g, int parent, RigidBody* panel, float* rec, 
 bool CarGroup::Hinge(const VehicleData& v, const VehicleData::Part& p, RigidBody& car, const float carMatrix[16],
                      const float X[16], const float half[2], float width)
 {
-    if (bodies.size() >= 9) return false;  // 0x4f7ff0: slot +0x18c0 < 9
+    if (hinged >= 9) return false;  // 0x4f7ff0: slot +0x18c0 < 9
     PanelHinge h;
     if (p.record < 0 || p.record >= static_cast<int>(v.damage.size()) ||
         !PanelHingeInputs(v, p, X, half[0], half[1], width, h))
@@ -218,7 +218,82 @@ bool CarGroup::Hinge(const VehicleData& v, const VehicleData::Part& p, RigidBody
     HingePanel(group, 0, &b, recs.back().data(), h, p.type, p.id);
     records.push_back(p.record);
     group.Link();
+    ++hinged;
     return true;
+}
+
+RigidBody* CarGroup::Tear(int record, const RigidBody& car, const float prevVel[4], const float prevW[4])
+{
+    const int m = MemberOfRecord(record);
+    if (m < 0) return nullptr;
+    RigidBody* b = group.members[m].body;
+    group.Detach(m);                       // 0x5ad710
+    if (--hinged <= 0) {                   // 0x4f8030
+        hinged = 0;
+        group.End();                       // 0x5aad00
+    }
+    for (size_t i = 0; i < bodies.size(); ++i)
+        if (&bodies[i] == b) torn.push_back(static_cast<int>(i));
+    TornPanelMotion(*b, car, prevVel, prevW);
+    return b;
+}
+
+RigidBody* CarGroup::Loose(const VehicleData& v, const VehicleData::Part& p, const RigidBody& car,
+                           const float carMatrix[16], const float X[16])
+{
+    if (p.record < 0 || p.record >= static_cast<int>(v.damage.size())) return nullptr;
+    bodies.emplace_back();
+    RigidBody& b = bodies.back();
+    PanelBody(v.damage[p.record], X, carMatrix, car, b);
+    records.push_back(p.record);
+    torn.push_back(static_cast<int>(bodies.size()) - 1);
+    return &b;
+}
+
+namespace
+{
+// 0x43e890: (x x + y y) + z z below 1e-10.
+bool Tiny(const float v[3]) { return (v[0] * v[0] + v[1] * v[1]) + v[2] * v[2] < 9.99999944e-11f; }
+// 0x442ba0.
+float Length(const float v[3]) { return std::sqrt((v[0] * v[0] + v[1] * v[1]) + v[2] * v[2]); }
+// The loop at 0x4fa6c0: v halved toward h at most 5 times while longer
+// than limit.
+void Toward(float v[3], const float h[3], float limit)
+{
+    if (Tiny(v) || !(Length(v) > limit)) return;
+    int n = 5;
+    do {
+        if (n-- == 0) break;
+        for (int k = 0; k < 3; ++k) v[k] = 0.5f * (h[k] + v[k]);  // 0x4076e0, 0x4e23c0
+    } while (Length(v) > limit);
+}
+}  // namespace
+
+void TornPanelMotion(RigidBody& panel, const RigidBody& car, const float prevVel[4], const float prevW[4])
+{
+    float V[3], W[3], vh[3], wh[3];
+    for (int k = 0; k < 3; ++k) {
+        V[k] = panel.vel[k];                    // 0x5a1700 (a free body: +0x90)
+        W[k] = panel.w[k];                      // 0x5a1790 (+0x150)
+        vh[k] = 0.5f * (prevVel[k] + car.vel[k]);
+        wh[k] = 0.5f * (prevW[k] + car.w[k]);
+    }
+    float lv = Tiny(vh) ? 0.0f : Length(vh);
+    lv = lv + lv;
+    float lw = Tiny(wh) ? 0.0f : Length(wh);
+    lw = lw + lw;
+    Toward(V, vh, lv);
+    Toward(W, wh, lw);
+    panel.SetVelocity(V);                       // 0x5a0f40
+    panel.SetSpin(W);                           // 0x5a1000
+}
+
+void TornPanelKick(RigidBody& panel, const RigidBody& car)
+{
+    float J[3];
+    for (int k = 0; k < 3; ++k) J[k] = panel.mass * (-0.375f * car.vel[k]);  // 0x41e460 twice
+    const float zero[3] = { 0, 0, 0 };
+    panel.ApplyImpulse(J, zero);
 }
 
 void CarGroup::Step(float h)
@@ -236,4 +311,11 @@ int CarGroup::MemberOfRecord(int record) const
             if (group.members[k].body == &bodies[i]) return static_cast<int>(k);
     }
     return -1;
+}
+
+RigidBody* CarGroup::BodyOfRecord(int record)
+{
+    for (size_t i = records.size(); i-- > 0;)
+        if (records[i] == record) return &bodies[i];
+    return nullptr;
 }

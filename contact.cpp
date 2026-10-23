@@ -337,9 +337,12 @@ bool Invert3(const float m[3][3], float out[3][3])
     return true;
 }
 
-// 0x5a99d0 -> 0x5c5260 for the body against a static object (B does not
-// move): true when an impulse was applied.
-bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr)
+// 0x5a99d0 -> 0x5c5260 for the body against a static object (other null:
+// B does not move) or against a free body other (a loose panel,
+// BOOT_TO_MENU.md section 76: the relative velocity A - B, K = K_A + K_B,
+// -J on B, the push-out shared by the masses): true when an impulse was
+// applied.
+bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr, RigidBody* other = nullptr)
 {
     float tA[3], tB[3];
     SurfaceValues(c.surfaceA, tA);
@@ -363,7 +366,14 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr)
     }
     float wr[3];
     Cross(bw, r, wr);
-    const float vp[3] = { bv[0] + wr[0], bv[1] + wr[1], bv[2] + wr[2] };
+    float vp[3] = { bv[0] + wr[0], bv[1] + wr[1], bv[2] + wr[2] };
+    float rb[3] = {};
+    if (other) {
+        for (int k = 0; k < 3; ++k) rb[k] = c.pointB[k] - other->pos[k];
+        float wrb[3];
+        Cross(other->w, rb, wrb);
+        for (int k = 0; k < 3; ++k) vp[k] = vp[k] - (other->vel[k] + wrb[k]);
+    }
     float v[3];
     for (int i = 0; i < 3; ++i) v[i] = Dot(R[i], vp);
     if (v[2] >= 0) return false;
@@ -389,12 +399,39 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr)
     // impulses along the frame's axes), in the contact frame.
     Articulated::SMat x1;
     if (group) {
-        const float rows[3][4] = { { R[0][0], R[0][1], R[0][2], 0 }, { R[1][0], R[1][1], R[1][2], 0 },
-                                   { R[2][0], R[2][1], R[2][2], 0 } };
+        // (BOOT_TO_MENU.md section 76) the contact record's +0x00 holds the
+        // frame's axes as COLUMNS (R'; +0x30 is R) and its point +0x80 is
+        // the offset in the frame (world offset = point x R): passing R and
+        // the world offset, as stage 4 did, gave a K that does not match
+        // the impulse's effect (tests\groupreplay kcheck) and the grouped
+        // car gained speed into walls
+        const float rows[3][4] = { { R[0][0], R[1][0], R[2][0], 0 }, { R[0][1], R[1][1], R[2][1], 0 },
+                                   { R[0][2], R[1][2], R[2][2], 0 } };
+        float pf[3];
+        VecMat3(r, rows, pf);
         float Kg[3][4];
-        group->ContactInertia(body.member, rows, r, Kg, x1);
+        group->ContactInertia(body.member, rows, pf, Kg, x1);
         for (int i = 0; i < 3; ++i)
             for (int j = 0; j < 3; ++j) K[i][j] = Kg[i][j];
+    }
+    if (other) {
+        // B's share (free: 1/m and [rb]x invI [rb]x), in the frame
+        float Kb[3][3];
+        for (int k = 0; k < 3; ++k) {
+            float ek[3] = {}, a[3], wa[3], dv[3];
+            ek[k] = 1.0f;
+            Cross(rb, ek, a);
+            VecMat3(a, other->invI, wa);
+            Cross(wa, rb, dv);
+            for (int m = 0; m < 3; ++m) Kb[m][k] = ek[m] / other->mass + dv[m];
+        }
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) {
+                float s = 0;
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) s += R[i][a] * Kb[a][b] * R[j][b];
+                K[i][j] = K[i][j] + s;
+            }
     }
     if (!Invert3(K, Ki)) return false;
     // 0x5c49c0: f stops the normal velocity alone, g all of it; P = f (1 +
@@ -419,6 +456,12 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr)
     Cross(r, J, ang);
     if (group) group->ContactImpulse(body.member, x1, P, false);  // 0x5a9da0, 0x5be2b0, 0x5c7390
     else body.ApplyImpulse(J, ang);
+    if (other) {
+        const float nj[3] = { -J[0], -J[1], -J[2] };
+        float angB[3];
+        Cross(rb, nj, angB);
+        other->ApplyImpulse(nj, angB);
+    }
     if (Jout)
         for (int k = 0; k < 3; ++k) Jout[k] = J[k];
     // 0x5c5c50: the depth along the normal, at most 0.01; a static B weighs
@@ -427,9 +470,15 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr)
     const float len = std::sqrt(Dot(corr, corr));
     if (len > 0.00999999978f)
         for (float& x : corr) x *= 0.00999999978f / len;
-    const float share = 1e16f / (body.mass + 1e16f);
+    const float mB = other ? other->mass : 1e16f;
+    const float share = mB / (body.mass + mB);
     for (int k = 0; k < 3; ++k) body.pos[k] += corr[k] * share;
     body.UpdateMatrix();
+    if (other) {
+        const float shareB = body.mass / (body.mass + mB);
+        for (int k = 0; k < 3; ++k) other->pos[k] -= corr[k] * shareB;
+        other->UpdateMatrix();
+    }
     return true;
 }
 
@@ -540,4 +589,53 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
         }
     }
     return contacts + ground;
+}
+
+int BodyContacts::Pair(RigidBody& a, const std::vector<VehicleData::Shape>& shapesA, RigidBody& b,
+                       const std::vector<VehicleData::Shape>& shapesB)
+{
+    if (shapesA.empty() || shapesB.empty()) return 0;
+    if (a.state == 0x78 && b.state == 0x78) return 0;
+    // members of one group never meet (0x5a31f0)
+    if (a.group && a.group == b.group) return 0;
+    auto world = [](const VehicleData::Shape& s, const RigidBody& body, float out[16]) {
+        Mul(s.local, &body.matrix[0][0], out);
+    };
+    // 0x5a3730: the bounds first, then every shape pair but the bounds
+    float wa[16], wb[16];
+    world(shapesA[0], a, wa);
+    world(shapesB[0], b, wb);
+    BodyContact best;
+    if (!BoxBoxContact(shapesA[0].size, wa, shapesB[0].size, wb, best)) return 0;
+    bool found = false;
+    if (shapesA.size() == 1 && shapesB.size() == 1) {
+        best.surfaceA = shapesA[0].surface;
+        best.surfaceB = shapesB[0].surface;
+        found = true;
+    } else {
+        for (size_t i = shapesA.size() > 1 ? 1 : 0; i < shapesA.size(); ++i) {
+            world(shapesA[i], a, wa);
+            for (size_t j = shapesB.size() > 1 ? 1 : 0; j < shapesB.size(); ++j) {
+                world(shapesB[j], b, wb);
+                BodyContact c;
+                if (!BoxBoxContact(shapesA[i].size, wa, shapesB[j].size, wb, c)) continue;
+                if (!found || best.depth < c.depth) {
+                    best = c;
+                    best.surfaceA = shapesA[i].surface;
+                    best.surfaceB = shapesB[j].surface;
+                    found = true;
+                }
+            }
+        }
+    }
+    if (!found || !(best.depth > 9.99999975e-06f) || best.surfaceA == 0x13 || best.surfaceB == 0x13) return 0;
+    float J[3];
+    if (!Respond(a, best, J, &b)) return 0;
+    if (onImpulse) onImpulse(best, J);
+    return 1;
+}
+
+bool PairResponse(RigidBody& a, RigidBody& b, const BodyContact& c, float J[3])
+{
+    return Respond(a, c, J, &b);
 }

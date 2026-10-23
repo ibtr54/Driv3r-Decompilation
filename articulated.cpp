@@ -1249,6 +1249,68 @@ int Group::AddMember(int parent, RigidBody* body, float* rec, const float cp[3],
     return at;
 }
 
+void Group::Detach(int k)
+{
+    const int n = static_cast<int>(members.size());
+    for (int i = 0; i < n; ++i) Velocities(i);
+    for (int i = 0; i < n; ++i) BodyMatrix(i);
+    Leave(k);
+}
+
+void Group::Leave(int k)
+{
+    RigidBody* b = members[k].body;
+    if (Int(members[k].rec, 0x330)) {
+        float w[4], v[4];
+        QuatRotate(b->q, b->w, w);
+        QuatRotate(b->q, b->vel, v);
+        memcpy(b->w, w, 12);
+        b->w[3] = 0;
+        memcpy(b->vel, v, 12);
+        b->vel[3] = 0;
+    }
+    QuatToRows(b->q, b->R);
+    // R' (the rows' columns), D, M = D R, N = R' M, L = w N
+    float rt[3][4] = {}, d[3][4] = {}, m[3][4] = {}, n[3][4] = {};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) rt[i][j] = b->R[j][i];
+        d[i][i] = b->inertia[i];
+    }
+    for (int i = 0; i < 3; ++i) VecMat3(d[i], b->R, m[i]);
+    for (int i = 0; i < 3; ++i) VecMat3(rt[i], m, n[i]);
+    VecMat3(b->w, n, b->L);
+    b->L[3] = 0;
+    b->UpdateDerived();
+    // out of the parent's joints and the member list
+    const int parent = members[k].parent;
+    if (parent >= 0) {
+        std::vector<Member::Child>& ch = members[parent].children;
+        for (size_t i = 0; i < ch.size(); ++i)
+            if (ch[i].member == k) {
+                ch.erase(ch.begin() + static_cast<long>(i));
+                IntAt(members[parent].rec, 0x338) = IntAt(members[parent].rec, 0x338) - 1;
+                break;
+            }
+    }
+    members.erase(members.begin() + k);
+    q.erase(q.begin() + k);
+    qd.erase(qd.begin() + k);
+    for (Member& o : members) {
+        if (o.parent > k) --o.parent;
+        for (Member::Child& oc : o.children)
+            if (oc.member > k) --oc.member;
+    }
+    for (int i = 0; i < static_cast<int>(members.size()); ++i) IntAt(members[i].rec, 0x328) = i;
+    b->group = nullptr;
+    b->member = -1;
+    Link();
+}
+
+void Group::End()
+{
+    while (!members.empty()) Leave(static_cast<int>(members.size()) - 1);
+}
+
 // 0x5c2100.
 void Group::Dynamics()
 {

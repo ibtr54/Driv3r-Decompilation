@@ -68,7 +68,10 @@ bool ReadUpvh(const std::vector<uint8_t>& d, size_t up, size_t size, VehicleData
         }
         if ((ref >> 8) != 0xfc) continue;  // no model
         int model = ref & 0xff;
-        if (type == 1) v.body.push_back(model);
+        if (type == 1) {
+            v.body.push_back(model);
+            v.bodyParts.push_back(int(i));
+        }
         if (type != 2) continue;
         VehicleWheel w;
         w.model = model;
@@ -96,17 +99,19 @@ bool ReadUpvh(const std::vector<uint8_t>& d, size_t up, size_t size, VehicleData
             shape.type = d[sh + 0x50];
             shape.surface = d[sh + 0x51];
             for (int k = 0; k < 3; ++k) shape.size[k] = F32(d, sh + 4 * k);
-            // The PDL is z-up with y forward (vehicle 6: the bounding box
-            // 0.88 x 2.29 x 0.49 about (0, 0.02, 0.33), the roof at y +0.36,
-            // the hood at +1.48); the body is y-up with z forward: each row
-            // (x, y, z) -> (-x, z, y), a rotation (where the game turns it,
-            // 0x4b6500's matrix from the model's +0x14.. before 0x5a0b60,
-            // was not traced).
+            // The PDL is z-up (vehicle 6: the bounding box 0.88 x 2.29 x
+            // 0.49 about (0, 0.02, 0.33)); the body is y-up: each row
+            // (x, y, z) -> (x, z, -y), as the game's live shapes are (run
+            // 16's narrow phase dumps, BOOT_TO_MENU.md section 75; run 20's
+            // head-on contact sits on box 1's +z face, the body's front, as
+            // the damage parts' entries and hardpoints expect). Until
+            // 2026-10-23 the program turned them (-x, z, y), half a turn
+            // about y more: the car's boxes stood back to front.
             for (int r = 0; r < 4; ++r) {
                 const float x = F32(d, sh + 0x10 + 16 * r), y = F32(d, sh + 0x14 + 16 * r), z = F32(d, sh + 0x18 + 16 * r);
-                shape.local[4 * r] = -x;
+                shape.local[4 * r] = x;
                 shape.local[4 * r + 1] = z;
-                shape.local[4 * r + 2] = y;
+                shape.local[4 * r + 2] = -y;
                 shape.local[4 * r + 3] = F32(d, sh + 0x1c + 16 * r);
             }
             out.push_back(shape);

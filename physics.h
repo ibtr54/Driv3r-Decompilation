@@ -49,6 +49,12 @@ struct RigidBody
     // L += angular, then w and dq; a sleeping body (0x78) wakes (0x65). A
     // grouped body: g_groupImpulse (the group branch, Group::Impulse).
     void ApplyImpulse(const float* linear, const float* angular);
+    // 0x5a0f40: the velocity set to v (w 0); a sleeping body wakes.
+    void SetVelocity(const float v[3]);
+    // 0x5a1000: the spin set to W: L = W times the inverse of invI (its
+    // adjugate over the determinant, in the game's order), then w and dq
+    // (0x5aee00); a sleeping body wakes.
+    void SetSpin(const float W[3]);
 };
 
 // Set by articulated.cpp: 0x5b11c0's branch for a body with a group.

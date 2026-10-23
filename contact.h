@@ -13,11 +13,14 @@
 //     (0x59b090), an impulse in the contact frame (0x5c2bc0, 0x5c3110) with
 //     restitution and the friction cone (0x5c49c0), then the depth pushed
 //     out, at most 0.01 a step (0x5c5c50).
+// A body in an articulated group (the car with hinged damage panels,
+// articulated.h) answers through the group (0x5c3110 -> 0x5c67c0: the
+// contact's axes as columns, the point in the frame; BOOT_TO_MENU.md
+// section 76). Body / body: the car against a loose panel (Pair).
 // Not ported: box / cylinder (0x5b4380 and its helpers; a cylinder is taken
-// as its bounding box here), body / body contacts, and the articulated
-// groups (body +0x1d8, solved in 0x5c2600) the vehicle slot makes when a
-// crash frees a damage panel hinged to the car (BOOT_TO_MENU.md section 71;
-// while the car is in one, the game routes its impulses through the group).
+// as its bounding box here), the surface rename of the contact callback
+// 0x4e9160 (surface 0xb -> 0x18 / 0x1c), body / body pairs other than the
+// car's with its loose parts. The body / body response is not trace-checked.
 // Slow contacts only feed the sleep test (0x5af440) in the game.
 #pragma once
 
@@ -40,6 +43,10 @@ struct BodyContact
 // Box A against box B (half sizes, world matrices; 0x5b8df0 / 0x5b9340).
 bool BoxBoxContact(const float sizeA[3], const float* worldA, const float sizeB[3], const float* worldB, BodyContact& c);
 
+// 0x5c5260 for a contact c of body A with the free body B (the response
+// BodyContacts::Pair makes, for the tests): J the impulse on A.
+bool PairResponse(RigidBody& a, RigidBody& b, const BodyContact& c, float J[3]);
+
 class BodyContacts
 {
 public:
@@ -48,6 +55,13 @@ public:
     // does. Returns the number of contacts answered.
     int Step(RigidBody& body, const std::vector<VehicleData::Shape>& shapes, const CollisionWorld& world,
              const CityGround* ground);
+
+    // A pair of bodies (0x5a31f0's body pairs, BOOT_TO_MENU.md section 76):
+    // A (the car, possibly in its group) against the free body B (a loose
+    // panel), the shapes as for Step; one contact answered (Respond with B
+    // moving), onImpulse called with the impulse on A. 1 when answered.
+    int Pair(RigidBody& a, const std::vector<VehicleData::Shape>& shapesA, RigidBody& b,
+             const std::vector<VehicleData::Shape>& shapesB);
 
     // Diagnostics of the last step.
     int pairs = 0, contacts = 0, ground = 0;

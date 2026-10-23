@@ -520,6 +520,70 @@ int main(int argc, char** argv)
         return RunHinges();
     }
     if (mode == "panels") return RunPanels(argc > 4 ? argv[4] : "D:/l/gta-vc/DRIV3R/Vehicles/miami.vvs");
+    if (mode == "kcheck") {
+        // (2026-10-23, BOOT_TO_MENU.md section 76) the port's own
+        // consistency at a contact on member 0 (the car): K from
+        // ContactInertia (contact rows C, point p) against the velocity
+        // change ContactImpulse makes there for P = e_z, the point taken as
+        // the world offset r (pw) or as r in the frame (pf = r C')
+        State s;
+        Build(argc > 4 ? static_cast<unsigned>(atoi(argv[4])) : 0, s);
+        for (int variant = 0; variant < 8; ++variant) {
+            PortGroup port;
+            MakeGroup(s, port);
+            Articulated::Group& g = port.group;
+            RigidBody& b = *g.members[0].body;
+            const float a = 0.6f, c0 = cosf(a), s0 = sinf(a);
+            const float C0[3][4] = { { c0, 0.3f * s0, -s0, 0 }, { 0, 1.0f, 0, 0 }, { s0, 0, c0, 0 } };
+            // orthonormalise (rows), then C or its transpose
+            float Cr[3][4] = {};
+            {
+                float u[3] = { C0[0][0], C0[0][1], C0[0][2] };
+                float l = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+                for (float& x : u) x /= l;
+                float n[3] = { C0[2][0], C0[2][1], C0[2][2] };
+                float d = n[0] * u[0] + n[1] * u[1] + n[2] * u[2];
+                for (int i = 0; i < 3; ++i) n[i] -= d * u[i];
+                l = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                for (float& x : n) x /= l;
+                const float t[3] = { n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0] };
+                for (int i = 0; i < 3; ++i) { Cr[0][i] = u[i]; Cr[1][i] = t[i]; Cr[2][i] = n[i]; }
+            }
+            const bool transposed = (variant & 1) != 0, inFrame = (variant & 2) != 0, readT = (variant & 4) != 0;
+            float C[3][4] = {};
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j) C[i][j] = transposed ? Cr[j][i] : Cr[i][j];
+            const float r[3] = { 0.4f, -0.3f, 1.9f };
+            float pf[3];
+            VecMat3(r, C, pf);
+            float K[3][4];
+            Articulated::SMat x1;
+            g.ContactInertia(0, C, inFrame ? pf : r, K, x1);
+            auto vel = [&](float out[3]) {
+                const float wr[3] = { b.w[1] * r[2] - b.w[2] * r[1], b.w[2] * r[0] - b.w[0] * r[2],
+                                      b.w[0] * r[1] - b.w[1] * r[0] };
+                for (int i = 0; i < 3; ++i) {
+                    const float v = b.vel[i] + wr[i];
+                    out[i] = v;
+                }
+            };
+            float v0[3], v1[3];
+            vel(v0);
+            const float P[3] = { 0, 0, 1.0f };
+            g.ContactImpulse(0, x1, P, false);
+            vel(v1);
+            float d[3];
+            for (int i = 0; i < 3; ++i) d[i] = v1[i] - v0[i];
+            float df[3];
+            for (int i = 0; i < 3; ++i)
+                df[i] = readT ? C[0][i] * d[0] + C[1][i] * d[1] + C[2][i] * d[2]
+                              : C[i][0] * d[0] + C[i][1] * d[1] + C[i][2] * d[2];
+            printf("rows %s, point %s, read %s: K column 2 (%.6g %.6g %.6g) row 2 (%.6g %.6g %.6g); dv (%.6g %.6g %.6g)\n",
+                   transposed ? "C'" : "C", inFrame ? "r C'" : "world", readT ? "C'" : "C", K[0][2], K[1][2], K[2][2],
+                   K[2][0], K[2][1], K[2][2], df[0], df[1], df[2]);
+        }
+        return 0;
+    }
     const unsigned first = argc > 4 ? static_cast<unsigned>(atoi(argv[4])) : 0;
     const unsigned count = argc > 5 ? static_cast<unsigned>(atoi(argv[5])) : 600;
     if (mode == "free") {
