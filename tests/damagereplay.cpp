@@ -148,7 +148,12 @@ void Check(const char* what, unsigned n, int k, uint32_t got, uint32_t want)
 // "pairs" (DMG_PAIRS set): the car's contacts with its hinged bonnet in the
 // trace (body B = the panel) against box / box tests of the car's shapes
 // and the panel's under three guesses for the panel shapes' frame:
-// 0 local x E, 1 local x E^-1, 2 local (E: the record's damage entry).
+// 0 local x E, 1 local x E^-1, 2 local (E: the record's damage entry),
+// all in the program's shape space; then (BOOT_TO_MENU.md section 75) both
+// sides' shapes in the game's space ("game space", the bonnet's frame 0 as
+// the car's, 1 the PDL rows, 2 identity; DMG_SWAP swaps its x / z half
+// sizes). The traced points: the record's +0x80 / +0xc0 turned by its rows
+// +0x30, added to the bodies' positions.
 void RunPairs(const VehicleData& v, int record, unsigned limit)
 {
     const VehicleData::Part* part = nullptr;
@@ -156,6 +161,20 @@ void RunPairs(const VehicleData& v, int record, unsigned limit)
         if (p.record == record) part = &p;
     if (!part) return;
     printf("record %d: part id 0x%x, %zu shapes\n", record, part->id, part->collision.size());
+    for (size_t i = 0; i < v.collision.size(); ++i) {
+        const VehicleData::Shape& s = v.collision[i];
+        printf("  car shape %zu: type %d surface %d size (%.4f %.4f %.4f) at (%.4f %.4f %.4f)\n", i, s.type, s.surface,
+               s.size[0], s.size[1], s.size[2], s.local[12], s.local[13], s.local[14]);
+    }
+    for (const VehicleData::Part& p : v.parts)
+        for (const VehicleData::Shape& s : p.collision)
+            printf("  part id 0x%x record %d: shape type %d surface %d size (%.4f %.4f %.4f) at (%.4f %.4f %.4f)\n", p.id,
+                   p.record, s.type, s.surface, s.size[0], s.size[1], s.size[2], s.local[12], s.local[13], s.local[14]);
+    for (size_t i = 0; i < part->collision.size(); ++i) {
+        const VehicleData::Shape& s = part->collision[i];
+        printf("  part shape %zu: type %d surface %d size (%.4f %.4f %.4f) at (%.4f %.4f %.4f)\n", i, s.type, s.surface,
+               s.size[0], s.size[1], s.size[2], s.local[12], s.local[13], s.local[14]);
+    }
     float inv[16];
     InverseRows(v.damage[record].matrix, false, inv);
     unsigned shown = 0;
@@ -169,12 +188,77 @@ void RunPairs(const VehicleData& v, int record, unsigned limit)
         if (shown++ >= limit) break;
         float car[16], pan[16];
         for (int i = 0; i < 16; ++i) { car[i] = F(A[4 + i]); pan[i] = F(B[4 + i]); }
-        printf("call %u: traced normal (%.4f %.4f %.4f) depth? %.5f, A point (%.4f %.4f %.4f), B point (%.4f %.4f %.4f)\n", n,
-               F(c[8]), F(c[9]), F(c[10]), F(c[0xfc / 4]), F(c[0x80 / 4]) + car[12], F(c[0x84 / 4]) + car[13],
-               F(c[0x88 / 4]) + car[14], F(c[0xc0 / 4]) + pan[12], F(c[0xc4 / 4]) + pan[13], F(c[0xc8 / 4]) + pan[14]);
-        for (int guess = 0; guess < 3; ++guess) {
+        // the points are kept in the contact's frame: turned by the rows at
+        // +0x30 (as 0x5054b0 does) they are offsets from the bodies
+        float rows[3][4];
+        for (int r = 0; r < 3; ++r)
+            for (int j = 0; j < 4; ++j) rows[r][j] = F(c[(0x30 + 16 * r) / 4 + j]);
+        const float la[3] = { F(c[0x80 / 4]), F(c[0x84 / 4]), F(c[0x88 / 4]) };
+        const float lb[3] = { F(c[0xc0 / 4]), F(c[0xc4 / 4]), F(c[0xc8 / 4]) };
+        float ta[3], tb[3];
+        VecMat3(la, rows, ta);
+        VecMat3(lb, rows, tb);
+        // relative to the bodies' positions (+0x80 for type 0, else +0x40)
+        const float* posA = reinterpret_cast<const float*>(&A[(A[0] == 0 ? 0x80 : 0x40) / 4]);
+        const float* posB = reinterpret_cast<const float*>(&B[(B[0] == 0 ? 0x80 : 0x40) / 4]);
+        printf("call %u: surfaces %u / %u, frame row0 (%.4f %.4f %.4f), A point (%.4f %.4f %.4f), B point (%.4f %.4f %.4f)\n"
+               "   (matrix vs position: A %.4f %.4f %.4f, B %.4f %.4f %.4f)\n",
+               n, c[0x90 / 4], c[0xd0 / 4], F(c[0]), F(c[1]), F(c[2]), posA[0] + ta[0], posA[1] + ta[1], posA[2] + ta[2],
+               posB[0] + tb[0], posB[1] + tb[1], posB[2] + tb[2], car[12] - posA[0], car[13] - posA[1], car[14] - posA[2],
+               pan[12] - posB[0], pan[13] - posB[1], pan[14] - posB[2]);
+        for (int guess = 0; guess < 4; ++guess) {
+            if (guess == 3) {
+                // the game's space: the game turns every PDL shape row
+                // (x, y, z) -> (x, z, -y) (run 16's live shapes), the
+                // program (-x, z, y) (vehicle.cpp), half a turn about y more
+                auto raw = [](const float* l, float* out) {
+                    for (int r2 = 0; r2 < 4; ++r2) {
+                        out[4 * r2] = -l[4 * r2];
+                        out[4 * r2 + 1] = l[4 * r2 + 1];
+                        out[4 * r2 + 2] = -l[4 * r2 + 2];
+                        out[4 * r2 + 3] = l[4 * r2 + 3];
+                    }
+                };
+                // the bonnet's shape frame: 0 as the car's shapes, 1 the
+                // PDL's own rows (z-up), 2 identity
+                for (int frame = 0; frame < 3; ++frame) {
+                    BodyContact best;
+                    bool found = false;
+                    size_t bi = 0;
+                    for (size_t i = 1; i < v.collision.size(); ++i) {
+                        float la2[16], lb2[16], wa[16], wb[16];
+                        raw(v.collision[i].local, la2);
+                        const float* l = part->collision[0].local;
+                        if (frame == 0) raw(l, lb2);
+                        else if (frame == 1)
+                            for (int r2 = 0; r2 < 4; ++r2) {
+                                lb2[4 * r2] = -l[4 * r2];
+                                lb2[4 * r2 + 1] = l[4 * r2 + 2];
+                                lb2[4 * r2 + 2] = l[4 * r2 + 1];
+                                lb2[4 * r2 + 3] = l[4 * r2 + 3];
+                            }
+                        else
+                            for (int k2 = 0; k2 < 16; ++k2) lb2[k2] = (k2 % 5 == 0) ? 1.0f : 0.0f;
+                        Articulated::MatMul(la2, car, wa);
+                        Articulated::MatMul(lb2, pan, wb);
+                        BodyContact k;
+                        const float* hs = part->collision[0].size;
+                        const float swapped[3] = { hs[2], hs[1], hs[0] };
+                        if (!BoxBoxContact(v.collision[i].size, wa, getenv("DMG_SWAP") ? swapped : hs, wb, k)) continue;
+                        if (!found || best.depth < k.depth) { best = k; found = true; bi = i; }
+                    }
+                    if (found)
+                        printf("   game space %d: shape %zu normal (%.4f %.4f %.4f) depth %.5f, A (%.4f %.4f %.4f) B (%.4f %.4f %.4f)\n",
+                               frame, bi, best.normal[0], best.normal[1], best.normal[2], best.depth, best.pointA[0],
+                               best.pointA[1], best.pointA[2], best.pointB[0], best.pointB[1], best.pointB[2]);
+                    else
+                        printf("   game space %d: no contact\n", frame);
+                }
+                continue;
+            }
             BodyContact best;
             bool found = false;
+            size_t bi = 0, bj = 0;
             for (size_t i = 1; i < v.collision.size(); ++i) {
                 float wa[16];
                 Articulated::MatMul(v.collision[i].local, car, wa);
@@ -186,11 +270,16 @@ void RunPairs(const VehicleData& v, int record, unsigned limit)
                     Articulated::MatMul(l, pan, wb);
                     BodyContact k;
                     if (!BoxBoxContact(v.collision[i].size, wa, part->collision[j].size, wb, k)) continue;
-                    if (!found || best.depth < k.depth) { best = k; found = true; }
+                    if (guess == 2)
+                        printf("      pair %zu (type %d surface %d) / %zu: depth %.5f normal (%.4f %.4f %.4f) A (%.4f %.4f %.4f)\n",
+                               i, v.collision[i].type, v.collision[i].surface, j, k.depth, k.normal[0], k.normal[1],
+                               k.normal[2], k.pointA[0], k.pointA[1], k.pointA[2]);
+                    if (!found || best.depth < k.depth) { best = k; found = true; bi = i; bj = j; }
                 }
             }
             if (found)
-                printf("   guess %d: normal (%.4f %.4f %.4f) depth %.5f, A (%.4f %.4f %.4f) B (%.4f %.4f %.4f)\n", guess,
+                printf("   guess %d: shapes %zu (surface %d) / %zu (surface %d) normal (%.4f %.4f %.4f) depth %.5f, A (%.4f %.4f %.4f) B (%.4f %.4f %.4f)\n",
+                       guess, bi, v.collision[bi].surface, bj, part->collision[bj].surface,
                        best.normal[0], best.normal[1], best.normal[2], best.depth, best.pointA[0], best.pointA[1],
                        best.pointA[2], best.pointB[0], best.pointB[1], best.pointB[2]);
             else
