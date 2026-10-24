@@ -325,6 +325,9 @@ int main(int argc, char** argv)
                         if (v.id == car.vehicleId) carShapes = v.collision;
             }
             printf("contacts: %zu car shapes\n", carShapes.size());
+            // the vehicle's surface rename (0x4e9160), as the program does
+            contacts.vehicle = !carShapes.empty();
+            if (contacts.vehicle) contacts.vehicleBottom = VehicleBottom(carShapes[0]);
         }
         ChaseCamera cam;
         std::vector<std::array<float, 16>> camAt;

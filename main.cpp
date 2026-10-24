@@ -3504,6 +3504,8 @@ private:
         carRays_.world = &collision_;
         carRays_.ground = &loader_.City().ground;
         carShapes_ = v->collision;
+        carContacts_.vehicle = !carShapes_.empty();  // the surface rename 0x4e9160
+        carContacts_.vehicleBottom = carShapes_.empty() ? 0.0f : VehicleBottom(carShapes_[0]);
         contactCount_ = 0;
         contactLog_ = 0;
         // The slot's damage records (damage.h): the slot's sizes are twice

@@ -2,6 +2,7 @@
 #include "contact.h"
 
 #include "articulated.h"
+#include "panels.h"
 
 #include <cmath>
 #include <cstring>
@@ -545,6 +546,11 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
         // 0x5a9af0: a real depth, neither surface 0x13.
         if (!found || !(best.depth > 9.99999975e-06f) || best.surfaceA == 0x13 || best.surfaceB == 0x13) continue;
         if (best.depth > deepest) deepest = best.depth;
+        // 0x4e9160: the vehicle's surface against a static object (its +4
+        // is 0 in the traces, not -1: never 0x1c)
+        if (vehicle && !(best.surfaceA == 0xb && best.surfaceB == 0xb))
+            best.surfaceA = VehicleSurface(best.surfaceA, 0, best.pointA, &body.matrix[0][0], vehicleBottom,
+                                           best.normal, false);
         float J[3];
         if (Respond(body, best, J)) {
             ++contacts;
@@ -585,7 +591,16 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
         }
         if (found && g.depth > 9.99999975e-06f) {
             if (g.depth > deepest) deepest = g.depth;
-            if (Respond(body, g)) ++ground;
+            // the ground is a body too (+4 = -1, identity matrix, no shapes):
+            // the vehicle's surface is renamed against it (0x1c on its
+            // bottom) and the listener hears the impulse (runs 16..20)
+            if (vehicle && !(g.surfaceA == 0xb && g.surfaceB == 0xb))
+                g.surfaceA = VehicleSurface(g.surfaceA, 0, g.pointA, &body.matrix[0][0], vehicleBottom, g.normal, true);
+            float J[3];
+            if (Respond(body, g, J)) {
+                ++ground;
+                if (onImpulse) onImpulse(g, J);
+            }
         }
     }
     return contacts + ground;
@@ -629,10 +644,36 @@ int BodyContacts::Pair(RigidBody& a, const std::vector<VehicleData::Shape>& shap
         }
     }
     if (!found || !(best.depth > 9.99999975e-06f) || best.surfaceA == 0x13 || best.surfaceB == 0x13) return 0;
+    // 0x4e9160: the vehicle's surface against a body (B is not static)
+    if (vehicle && !(best.surfaceA == 0xb && best.surfaceB == 0xb))
+        best.surfaceA = VehicleSurface(best.surfaceA, 0, best.pointA, &a.matrix[0][0], vehicleBottom, best.normal,
+                                       false);
     float J[3];
     if (!Respond(a, best, J, &b)) return 0;
     if (onImpulse) onImpulse(best, J);
     return 1;
+}
+
+int VehicleSurface(int surface, int side, const float point[3], const float vehicle[16], float bottom,
+                   const float normal[3], bool otherStatic)
+{
+    if (surface != 0xb) return surface;
+    const float h = bottom + 0.0250000004f;  // [0x78ea80]
+    float inv[16], local[4];
+    InverseRows(vehicle, false, inv);
+    const float p[4] = { point[0], point[1], point[2], 1.0f };
+    Vec4Transform(p, inv, local);
+    if (!(local[1] < h)) return 0x18;
+    const float f = side == 0 ? 1.0f : -1.0f;  // [0x78e860] / [0x78e904]
+    if (otherStatic && 0.924000025f < normal[1] * f) return 0x1c;  // [0x78f244]
+    return surface;
+}
+
+float VehicleBottom(const VehicleData::Shape& b)
+{
+    const float e = std::fabs(b.local[1]) * b.size[0] + std::fabs(b.local[5]) * b.size[1] +
+                    std::fabs(b.local[9]) * b.size[2];
+    return b.local[13] + -e;
 }
 
 bool PairResponse(RigidBody& a, RigidBody& b, const BodyContact& c, float J[3])

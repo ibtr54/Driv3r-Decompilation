@@ -116,6 +116,7 @@ void Read(const char* path)
 }
 
 float F(uint32_t w) { float x; memcpy(&x, &w, 4); return x; }
+int g_renames = 0;  // surface renames checked
 uint32_t W(float x) { uint32_t w; memcpy(&w, &x, 4); return w; }
 
 std::vector<uint8_t> ReadAll(const char* path)
@@ -393,6 +394,22 @@ int main(int argc, char** argv)
             Check("slot +1f6c", n, -1, W(d.dentScale[0]), S[0x1f6c / 4]);
             Check("slot +1f70", n, -1, W(d.dentScale[1]), S[0x1f70 / 4]);
         }
+        // the surface rename (0x4e9160, BOOT_TO_MENU.md section 77): the
+        // car's side was 0xb before the callback; its bottom is slot
+        // +0x1894, the other side "static" when its +4 is -1 (the ground)
+        {
+            const std::vector<uint32_t>& B = g_dumps["DEb2"][n].words;
+            const float nrm[3] = { F(c[0x50 / 4]), F(c[0x54 / 4]), F(c[0x58 / 4]) };
+            const bool ground = B.size() > 1 && B[1] == 0xffffffffu;
+            const int mine = VehicleSurface(0xb, 0, point, car, F(S[0x1894 / 4]), nrm, ground);
+            ++g_renames;
+            if (static_cast<uint32_t>(mine) != c[0x90 / 4]) {
+                ++g_bad;
+                if (g_shown++ < 60) printf("  call %u: surface port %x, trace %x\n", n, mine, c[0x90 / 4]);
+            }
+            if (calls == 1 && !v->collision.empty())
+                Check("bottom (slot +0x1894)", n, -1, W(VehicleBottom(v->collision[0])), S[0x1894 / 4]);
+        }
         d.Impact(*v, car, carMass, -1, carMass, Jv, point, int(c[0xd0 / 4]), req);
         if (d.dentShape >= 0) {
             dentShape = d.dentShape;
@@ -485,6 +502,7 @@ int main(int argc, char** argv)
         printf("dents: %d of the game's %d shape states made by the port (%zu port states)\n", found, seen,
                dents.size());
     }
+    printf("surface renames: %d checked\n", g_renames);
     printf("%d calls: %d equal, %d with part tests, %d state changes; %d differences\n", calls, equal, tested, requests,
            g_bad);
     return g_bad ? 2 : 0;

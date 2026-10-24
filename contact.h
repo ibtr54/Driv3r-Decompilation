@@ -43,6 +43,26 @@ struct BodyContact
 // Box A against box B (half sizes, world matrices; 0x5b8df0 / 0x5b9340).
 bool BoxBoxContact(const float sizeA[3], const float* worldA, const float sizeB[3], const float* worldB, BodyContact& c);
 
+// The vehicle's surface rename (0x4e9160, the world's contact callback
+// +0x204 before the impulse; BOOT_TO_MENU.md section 77): a side of the
+// contact with surface 0xb (a vehicle's body boxes) whose body is a
+// vehicle becomes 0x18 when the contact point, in the vehicle's frame
+// (its matrix's rigid inverse, D3DXVec3Transform), lies at or above
+// bottom + 0.025 (bottom: the vehicle's vtbl+0xc4, slot +0x1894 = the
+// bounding box's lowest y), else 0x1c when the other side's +4 is -1
+// (the ground's pseudo-body of the probe 0x5a9b80; the static objects
+// have 0 there) and the normal (from B to A) points up: n.y (side A) or
+// -n.y (side B) above 0.924; else it stays 0xb. Nothing changes when both
+// sides are 0xb. side: 0 for A, 1 for B. The response then takes the
+// surfaces' values again (world +0x214).
+// otherStatic: the other side is the ground.
+int VehicleSurface(int surface, int side, const float point[3], const float vehicle[16], float bottom,
+                   const float normal[3], bool otherStatic);
+// The vehicle's bottom for VehicleSurface (the slot's set-up 0x502aa0
+// writes slot +0x1894 at 0x503c38): the bounding shape's centre y plus
+// minus its half extent along y (vehicle 6: -0.15897, bit-exact).
+float VehicleBottom(const VehicleData::Shape& bounds);
+
 // 0x5c5260 for a contact c of body A with the free body B (the response
 // BodyContacts::Pair makes, for the tests): J the impulse on A.
 bool PairResponse(RigidBody& a, RigidBody& b, const BodyContact& c, float J[3]);
@@ -62,6 +82,11 @@ public:
     // moving), onImpulse called with the impulse on A. 1 when answered.
     int Pair(RigidBody& a, const std::vector<VehicleData::Shape>& shapesA, RigidBody& b,
              const std::vector<VehicleData::Shape>& shapesB);
+
+    // Body A of Step / Pair is a vehicle with this bottom (VehicleSurface):
+    // its surface 0xb is renamed in its object and body pairs.
+    bool vehicle = false;
+    float vehicleBottom = 0;
 
     // Diagnostics of the last step.
     int pairs = 0, contacts = 0, ground = 0;
