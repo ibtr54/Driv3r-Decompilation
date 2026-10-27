@@ -30,6 +30,10 @@ struct RigidBody
     float sleep[6] = {};      // +0x1a0..+0x1b4: cleared when an impulse wakes the body
     float mass = 0;           // +0x1c0
     int state = 0x65;         // +0x1c4: 0x65 awake, 0x78 asleep (also 0x6e, 0x96, 0xa0)
+    // +0x70: the body's class in the world's surface pair table (world
+    // +0x218) and the push-out's weights (0x5c5c50); 1 for the car and its
+    // loose panels (run 21), the static objects have 0.
+    int pairClass = 1;
     // +0x1d8: the body's articulated group (articulated.h) and its member
     // index there; null for a free body. A grouped body is moved by its
     // group's solver, not by Integrate, and its impulses go through the group.

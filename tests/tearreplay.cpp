@@ -189,9 +189,8 @@ int main(int argc, char** argv)
     // velocities are taken back by J (v - J / m, L - r x J): a rough check
     // only. Run 20 (2026-10-23): far off for most calls (the listener's
     // bodies are not the response's inputs: other contacts of the step,
-    // the car's group before the tear-off); the response 0x5c5260 needs its
-    // own hook to be checked (the static case is not trace-checked either;
-    // the first car contact of run 20, the car still free, is within 0.1%).
+    // the car's group before the tear-off). The response 0x5c5260 itself is
+    // checked by respreplay.cpp on its own hook (run 21, D3PROXY_RESP).
     if (!g_lines["GX"].empty()) {
         const uint32_t torn = static_cast<uint32_t>(strtoul(g_lines["GX"].begin()->second[2].c_str(), nullptr, 16));
         int n = 0;
@@ -240,7 +239,7 @@ int main(int argc, char** argv)
             A.UpdateSpin();
             B.UpdateSpin();
             float mine[3];
-            if (!PairResponse(A, B, bc, mine)) {
+            if (!PairResponse(A, &B, bc, mine)) {
                 if (n < 8) printf("  DE %u: the port answers no impulse (traced |J| %.4f)\n", k,
                                   std::sqrt(J[0] * J[0] + J[1] * J[1] + J[2] * J[2]));
                 ++n;

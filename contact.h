@@ -12,7 +12,8 @@
 //   - response (0x5a9af0 -> 0x5a99d0 -> 0x5c5260): the surfaces' values
 //     (0x59b090), an impulse in the contact frame (0x5c2bc0, 0x5c3110) with
 //     restitution and the friction cone (0x5c49c0), then the depth pushed
-//     out, at most 0.01 a step (0x5c5c50).
+//     out, at most 0.01 a step, shared by weights (0x5c5c50; BOOT_TO_MENU.md
+//     section 78).
 // A body in an articulated group (the car with hinged damage panels,
 // articulated.h) answers through the group (0x5c3110 -> 0x5c67c0: the
 // contact's axes as columns, the point in the frame; BOOT_TO_MENU.md
@@ -20,7 +21,10 @@
 // Not ported: box / cylinder (0x5b4380 and its helpers; a cylinder is taken
 // as its bounding box here), the surface rename of the contact callback
 // 0x4e9160 (surface 0xb -> 0x18 / 0x1c), body / body pairs other than the
-// car's with its loose parts. The body / body response is not trace-checked.
+// car's with its loose parts, the push-out of a grouped body (0x5ae5b0).
+// The response is checked against run 21 (tests\respreplay.cpp): 412 / 412
+// impulse decisions, all within 7.7e-4 but two calls whose velocity the
+// listener dispatcher 0x44a890 changes again (not ported).
 // Slow contacts only feed the sleep test (0x5af440) in the game.
 #pragma once
 
@@ -63,9 +67,10 @@ int VehicleSurface(int surface, int side, const float point[3], const float vehi
 // minus its half extent along y (vehicle 6: -0.15897, bit-exact).
 float VehicleBottom(const VehicleData::Shape& bounds);
 
-// 0x5c5260 for a contact c of body A with the free body B (the response
-// BodyContacts::Pair makes, for the tests): J the impulse on A.
-bool PairResponse(RigidBody& a, RigidBody& b, const BodyContact& c, float J[3]);
+// 0x5c5260 for a contact c of body A with the free body B, or with a static
+// object when b is null (the responses BodyContacts::Pair / Step make, for
+// the tests): J the impulse on A.
+bool PairResponse(RigidBody& a, RigidBody* b, const BodyContact& c, float J[3]);
 
 class BodyContacts
 {

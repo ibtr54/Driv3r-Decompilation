@@ -338,6 +338,62 @@ bool Invert3(const float m[3][3], float out[3][3])
     return true;
 }
 
+// 0x5c5ed0: a body moved by m (0x41e4b0; the matrix is not rebuilt: the
+// step's 0x5a9bf0 does that after the integration). Moved up, it loses the
+// upward speed the climb costs (vy^2 - 20 m.y, g = 10): at or below 0 its
+// vertical speed is 0 and its angular momentum is damped by 0.99.
+void Shift(RigidBody& b, const float m[3])
+{
+    for (int k = 0; k < 3; ++k) b.pos[k] = m[k] + b.pos[k];
+    if (!(m[1] > 0.0f)) return;
+    const float v2 = b.vel[1] * b.vel[1] - m[1] * 20.0f;
+    if (v2 > 0.0f) {
+        const float s = std::sqrt(v2);
+        b.vel[1] = b.vel[1] > 0.0f ? s : -s;
+        return;
+    }
+    b.vel[1] = 0.0f;
+    for (int k = 0; k < 3; ++k) b.L[k] = 0.99000001f * b.L[k];
+    b.UpdateSpin();
+}
+
+// 0x5c5c50 (traced in run 21, BOOT_TO_MENU.md section 78): the depth along
+// the normal, at most 0.01 long, shared by weights: an awake free body
+// (+0 == 0, state 0x65) weighs its mass, anything else (a static object,
+// other null) 1e16; of two awake bodies, A is held (1e16) when its +0x70 is
+// 1, else B when B's is (the car against its loose panels: the panel takes
+// it all). Nothing when the weights reach 2e16; a side moves only by a
+// share above 1e-5.
+void PushOut(RigidBody& a, RigidBody* b, const BodyContact& c)
+{
+    float corr[3] = { c.depth * c.normal[0], c.depth * c.normal[1], c.depth * c.normal[2] };
+    const float len = std::sqrt((corr[2] * corr[2] + corr[1] * corr[1]) + corr[0] * corr[0]);
+    if (len > 0.00999999978f) {
+        const float s = 0.00999999978f / len;
+        for (float& x : corr) x = s * x;
+    }
+    const bool freeA = a.state == 0x65;
+    bool freeB = b && b->state == 0x65;
+    float wA = 1e16f;
+    if (freeA && !(freeB && a.pairClass == 1)) {
+        if (freeB && b->pairClass == 1) freeB = false;
+        wA = a.mass;
+    }
+    const float wB = freeB ? b->mass : 1e16f;
+    const float sum = wB + wA;
+    if (!(static_cast<double>(sum) < 2e16)) return;
+    const float inv = 1.0f / sum;
+    const float shareA = inv * wB, shareB = inv * wA;
+    if (shareA > 9.99999975e-06f) {
+        const float m[3] = { corr[0] * shareA, corr[1] * shareA, corr[2] * shareA };
+        Shift(a, m);  // a grouped body: 0x5ae5b0 in the game (not ported)
+    }
+    if (b && shareB > 9.99999975e-06f) {
+        const float m[3] = { corr[0] * -shareB, corr[1] * -shareB, corr[2] * -shareB };
+        Shift(*b, m);
+    }
+}
+
 // 0x5a99d0 -> 0x5c5260 for the body against a static object (other null:
 // B does not move) or against a free body other (a loose panel,
 // BOOT_TO_MENU.md section 76: the relative velocity A - B, K = K_A + K_B,
@@ -465,21 +521,7 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr, Rig
     }
     if (Jout)
         for (int k = 0; k < 3; ++k) Jout[k] = J[k];
-    // 0x5c5c50: the depth along the normal, at most 0.01; a static B weighs
-    // 1e16, so the body takes all of it.
-    float corr[3] = { c.depth * c.normal[0], c.depth * c.normal[1], c.depth * c.normal[2] };
-    const float len = std::sqrt(Dot(corr, corr));
-    if (len > 0.00999999978f)
-        for (float& x : corr) x *= 0.00999999978f / len;
-    const float mB = other ? other->mass : 1e16f;
-    const float share = mB / (body.mass + mB);
-    for (int k = 0; k < 3; ++k) body.pos[k] += corr[k] * share;
-    body.UpdateMatrix();
-    if (other) {
-        const float shareB = body.mass / (body.mass + mB);
-        for (int k = 0; k < 3; ++k) other->pos[k] -= corr[k] * shareB;
-        other->UpdateMatrix();
-    }
+    PushOut(body, other, c);
     return true;
 }
 
@@ -676,7 +718,7 @@ float VehicleBottom(const VehicleData::Shape& b)
     return b.local[13] + -e;
 }
 
-bool PairResponse(RigidBody& a, RigidBody& b, const BodyContact& c, float J[3])
+bool PairResponse(RigidBody& a, RigidBody* b, const BodyContact& c, float J[3])
 {
-    return Respond(a, c, J, &b);
+    return Respond(a, c, J, b);
 }
