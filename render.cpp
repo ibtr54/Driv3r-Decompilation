@@ -661,7 +661,7 @@ CityRenderer::Package::Group CityRenderer::GroupFor(uint32_t material, int id, b
             }
             // Several substances: their textures (0x5d92b0, 0x5de890).
             if (owner.data->materials[mi].size() > 1 && mi < owner.data->materialFlags.size()) {
-                auto key = std::make_pair(it->second, mi);
+                auto key = std::make_pair(ownerIndex, mi);
                 auto found = animOf_.find(key);
                 if (found == animOf_.end()) {
                     Anim a;
