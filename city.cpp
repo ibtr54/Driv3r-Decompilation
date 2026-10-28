@@ -55,6 +55,7 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
     ground.Clear();
     collision.clear();
     dynamicModels.clear();
+    propTypes.clear();
     error_.clear();
     if (d.size() < 16 || memcmp(d.data(), "CHNK", 4) != 0) { error_ = "not a CHNK file"; return false; }
     // Top level: GESR regions, GEIR cells, IRCT, PINF, GEGL, PCSL. The GEBI
@@ -118,8 +119,18 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
                         uint32_t n = U32(d, h);
                         for (uint32_t gi = 0; gi < n && h + 8 + 4 * size_t(gi) <= d.size(); ++gi) {
                             size_t rec = h + U32(d, h + 4 + 4 * size_t(gi));
-                            if (rec + 0x18 <= d.size() && memcmp(&d[rec], "AWHF", 4) == 0)
+                            if (rec + 0x18 <= d.size() && memcmp(&d[rec], "AWHF", 4) == 0) {
                                 dynamicModels.push_back(U32(d, rec + 0x14));
+                                if (rec + 0x44 <= d.size()) {
+                                    PropType t;
+                                    t.model = U32(d, rec + 0x14);
+                                    t.parts = U32(d, rec + 0x10);
+                                    t.shatter = F32(d, rec + 0x1c);
+                                    t.threshold = F32(d, rec + 0x20);
+                                    memcpy(&t.firstPartModel, &d[rec + 0x42], 2);
+                                    propTypes.push_back(t);
+                                }
+                            }
                         }
                     }
                 }
@@ -385,9 +396,11 @@ bool CityPlacement::LoadGebi(const std::vector<uint8_t>& d, size_t off, size_t s
     if (0x40 + size_t(n) * 0x20 > size) { error_ = "GEBI records"; return false; }
     uint32_t ends[6];
     for (int r = 0; r < 6; ++r) ends[r] = U32(d, off + 0x0c + 4 * r);
+    const int first = int(instances.size());
     for (uint32_t i = 0; i < n; ++i) {
         size_t p = off + 0x40 + size_t(i) * 0x20;
         CityInstance in;
+        in.gebiFirst = first;
         for (int k = 0; k < 3; ++k) in.position[k] = F32(d, p + 4 * k);
         memcpy(&in.model, &d[p + 0x0c], 2);
         memcpy(&in.extra, &d[p + 0x0e], 2);

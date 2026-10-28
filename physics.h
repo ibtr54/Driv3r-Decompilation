@@ -27,7 +27,16 @@ struct RigidBody
     float w[4] = {};          // +0x150: angular velocity invI L
     float dq[4] = {};         // +0x160: 0.5 (w x q)
     float inertia[4] = {};    // +0x170: body-space inertia diagonal
-    float sleep[6] = {};      // +0x1a0..+0x1b4: cleared when an impulse wakes the body
+    // The resting-contact record of 0x5af440 (BOOT_TO_MENU.md section 79):
+    // two horizontal support directions, how many are stored, a hold
+    // counter, up to three sleeping bodies it rests on and a miss counter;
+    // cleared (all but rest) when the body wakes (0x5af330) or moves fast
+    // (0x5af370).
+    float rest[2][4] = {};            // +0x180 / +0x190
+    int restCount = 0;                // +0x1a0
+    int restHold = 0;                 // +0x1a4
+    RigidBody* restNear[3] = {};      // +0x1a8..+0x1b0
+    int restMiss = 0;                 // +0x1b4
     float mass = 0;           // +0x1c0
     int state = 0x65;         // +0x1c4: 0x65 awake, 0x78 asleep (also 0x6e, 0x96, 0xa0)
     // +0x70: the body's class in the world's surface pair table (world
@@ -40,6 +49,13 @@ struct RigidBody
     void* group = nullptr;
     int member = -1;
 
+    // The resting record's counters and neighbours set to 0 (0x5af330 /
+    // 0x5af370 / the wake of an impulse).
+    void ClearRest()
+    {
+        restCount = restHold = restMiss = 0;
+        restNear[0] = restNear[1] = restNear[2] = nullptr;
+    }
     // 0x4b5170 + 0x5aeb20 + 0x5aee00 on the body: normalised q, R, invI, w, dq.
     void UpdateDerived();
     // 0x5aee00 alone: w and dq from L.

@@ -176,7 +176,10 @@ void CollisionWorld::Build(const CityPlacement& city)
         const CityInstance& in = city.instances[ii];
         if (!in.HasModel()) continue;
         const uint32_t id = in.model;
-        if (std::find(city.dynamicModels.begin(), city.dynamicModels.end(), id) != city.dynamicModels.end()) continue;
+        // the smashable props (GEBI ranges 3 / 4, the AWHF models): static
+        // objects of group 6 for body contacts, left out of the rays
+        const bool prop =
+            std::find(city.dynamicModels.begin(), city.dynamicModels.end(), id) != city.dynamicModels.end();
         const CityCollisionRegion* reg = nullptr;
         for (const CityCollisionRegion& r : city.collision)
             if (uint32_t(r.region) == (id >> 10) && !r.pdl.empty()) reg = &r;
@@ -196,6 +199,7 @@ void CollisionWorld::Build(const CityPlacement& city)
             const size_t first = ent + U32(p, ent + 4);
             Object obj;
             obj.instance = int(ii);
+            obj.prop = prop;
             obj.first = shapes_.size();
             obj.bounded = n > 1;
             for (int k = 0; k < 3; ++k) obj.lo[k] = 1e30f, obj.hi[k] = -1e30f;
@@ -274,6 +278,7 @@ bool CollisionWorld::Ray(const float start[3], const float dir[3], float length,
                 if (stamp_[i] == query_) continue;
                 stamp_[i] = query_;
                 const Object& o = objects_[i];
+                if (o.prop) continue;  // the wheel rays pass the props (run 7's 2968 rays)
                 if (o.hi[0] < lo[0] || o.lo[0] > hi[0] || o.hi[1] < lo[1] || o.lo[1] > hi[1] || o.hi[2] < lo[2] ||
                     o.lo[2] > hi[2])
                     continue;

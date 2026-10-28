@@ -18,6 +18,7 @@
 #include "../articulated.h"
 #include "../panels.h"
 #include "gamecode.h"
+#include "restwords.h"
 
 namespace
 {
@@ -156,7 +157,7 @@ void LoadBody(const uint32_t* w, RigidBody& b)
     }
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 4; ++c) { b.R[r][c] = f(0xf0 + r * 16 + c * 4); b.invI[r][c] = f(0x120 + r * 16 + c * 4); }
-    for (int i = 0; i < 6; ++i) b.sleep[i] = f(0x1a0 + 4 * i);
+    LoadRest(w, b);
     b.mass = f(0x1c0);
     b.state = static_cast<int>(w[0x1c4 / 4]);
 }
@@ -172,7 +173,7 @@ void StoreBody(const RigidBody& b, uint32_t* w)
     }
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 4; ++c) { f(0xf0 + r * 16 + c * 4, b.R[r][c]); f(0x120 + r * 16 + c * 4, b.invI[r][c]); }
-    for (int i = 0; i < 6; ++i) f(0x1a0 + 4 * i, b.sleep[i]);
+    StoreRest(b, w);
     f(0x1c0, b.mass);
     w[0x1c4 / 4] = static_cast<uint32_t>(b.state);
 }

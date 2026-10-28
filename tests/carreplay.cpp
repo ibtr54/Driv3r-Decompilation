@@ -23,6 +23,7 @@
 #include "../camera.h"
 #include "../contact.h"
 #include "../vehicle.h"
+#include "restwords.h"
 #include <array>
 #include <fstream>
 #include <iterator>
@@ -44,7 +45,7 @@ static void LoadBody(const std::vector<unsigned>& w, RigidBody& b)
     }
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 4; ++c) { b.R[r][c] = f(0xf0 + r * 16 + c * 4); b.invI[r][c] = f(0x120 + r * 16 + c * 4); }
-    for (int i = 0; i < 6; ++i) b.sleep[i] = f(0x1a0 + 4 * i);
+    LoadRest(w, b);
     b.mass = f(0x1c0);
     b.state = static_cast<int>(w[0x1c4 / 4]);
 }

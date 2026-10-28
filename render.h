@@ -136,6 +136,11 @@ public:
         collision_ = world;
         trees_.Reset();
     }
+    // A city instance no longer drawn (a broken prop, props.h).
+    void HideCityInstance(int cityInstance)
+    {
+        if (cityInstance >= 0 && size_t(cityInstance) < instanceOf_.size()) instanceOf_[size_t(cityInstance)] = -1;
+    }
     // The level's light, fog and sky matrix (used from the next Draw).
     void SetMood(const Mood& mood) { mood_ = mood; }
     // The profile's Shadows setting (+0xc8c).

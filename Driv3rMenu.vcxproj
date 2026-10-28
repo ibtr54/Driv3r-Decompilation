@@ -93,6 +93,7 @@
     <ClCompile Include="panels.cpp" />
     <ClCompile Include="damage.cpp" />
     <ClCompile Include="contact.cpp" />
+    <ClCompile Include="props.cpp" />
     <ClCompile Include="collision.cpp" />
     <ClCompile Include="mood.cpp" />
     <ClCompile Include="render.cpp" />
@@ -113,6 +114,7 @@
     <ClInclude Include="panels.h" />
     <ClInclude Include="damage.h" />
     <ClInclude Include="contact.h" />
+    <ClInclude Include="props.h" />
     <ClInclude Include="collision.h" />
     <ClInclude Include="mood.h" />
     <ClInclude Include="render.h" />

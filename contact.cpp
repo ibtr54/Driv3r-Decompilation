@@ -3,6 +3,7 @@
 
 #include "articulated.h"
 #include "panels.h"
+#include "props.h"
 
 #include <cmath>
 #include <cstring>
@@ -384,14 +385,133 @@ void PushOut(RigidBody& a, RigidBody* b, const BodyContact& c)
     if (!(static_cast<double>(sum) < 2e16)) return;
     const float inv = 1.0f / sum;
     const float shareA = inv * wB, shareB = inv * wA;
+    // a grouped body goes through 0x5ae5b0 instead of 0x5c5ed0: the group's
+    // root (joint type 0) only moves (0x41e4b0, no vertical speed rule); a
+    // jointed member is moved along its chain (not ported: hinged panels
+    // have no contacts, BOOT_TO_MENU.md section 75)
+    auto move = [](RigidBody& body, const float m[3]) {
+        if (!body.group) {
+            Shift(body, m);
+            return;
+        }
+        for (int k = 0; k < 3; ++k) body.pos[k] = m[k] + body.pos[k];
+    };
     if (shareA > 9.99999975e-06f) {
         const float m[3] = { corr[0] * shareA, corr[1] * shareA, corr[2] * shareA };
-        Shift(a, m);  // a grouped body: 0x5ae5b0 in the game (not ported)
+        move(a, m);
     }
     if (b && shareB > 9.99999975e-06f) {
         const float m[3] = { corr[0] * -shareB, corr[1] * -shareB, corr[2] * -shareB };
-        Shift(*b, m);
+        move(*b, m);
     }
+}
+
+// The resting threshold, argument 8 of 0x5c5260 (0x5a99d0): sqrt(sqrt(|g|)
+// x 0.02) x 4 for the world's gravity |g| = 10 (1.78885).
+const float kRestSpeed = std::sqrt(std::sqrt(100.0f) * 0.0199999996f) * 4.0f;
+
+float Speed(const float v[3]) { return std::sqrt((v[2] * v[2] + v[1] * v[1]) + v[0] * v[0]); }
+
+// 0x5a9230 -> 0x5af330: a sleeping body wakes with its resting record
+// cleared.
+void Wake(RigidBody& b)
+{
+    if (b.state != 0x78) return;
+    b.state = 0x65;
+    b.ClearRest();
+}
+
+// 0x5af370
+void ClearRestUnlessAsleep(RigidBody& b)
+{
+    if (b.state != 0x78) b.ClearRest();
+}
+
+// 0x5af1d0: a body resting on two supports either sleeps (|v| <= 0.5 and
+// |w| <= 1: v and L zero, state 0x78) or loses half its velocity and
+// angular momentum (and its record unless asleep).
+void SettleOrDamp(RigidBody& b)
+{
+    const float sv = std::sqrt((b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1]) + b.vel[2] * b.vel[2]);
+    const float sw = std::sqrt((b.w[0] * b.w[0] + b.w[1] * b.w[1]) + b.w[2] * b.w[2]);
+    if (!(sv > 0.5f) && !(sw > 1.0f)) {
+        for (float& x : b.vel) x = 0.0f;
+        Wake(b);
+        for (float& x : b.L) x = 0.0f;
+        b.UpdateSpin();
+        Wake(b);
+        b.state = 0x78;
+        return;
+    }
+    for (int k = 0; k < 3; ++k) b.vel[k] = 0.5f * b.vel[k];
+    b.vel[3] = 0.0f;
+    for (int k = 0; k < 3; ++k) b.L[k] = 0.5f * b.L[k];
+    b.L[3] = 0.0f;
+    b.UpdateSpin();
+    ClearRestUnlessAsleep(b);
+}
+
+// 0x5af3a0: a sleeping body the resting one lies on joins its first free
+// neighbour slot (of three).
+void NoteNeighbour(RigidBody& b, RigidBody* n)
+{
+    if (!n || n->state != 0x78) return;
+    if (!b.restNear[0]) { b.restNear[0] = n; return; }
+    if (b.restNear[0] == n) return;
+    if (!b.restNear[1]) { b.restNear[1] = n; return; }
+    if (b.restNear[1] == n) return;
+    if (!b.restNear[2]) b.restNear[2] = n;
+}
+
+// 0x5af440 (BOOT_TO_MENU.md section 79): a slow contact at p (the contact
+// point relative to the body) adds to the body's resting record unless the
+// body is held (0x96), the other body moves (awake, 0x65), or p lies within
+// 0.1 of the body's vertical axis. The first point is kept; the second, on
+// the other side (p . p1 horizontally < 0.01), turns both into the
+// horizontal directions across them (each pointing toward the other's
+// point); a later point between them (p.x d.x + p.z d.z < 0.01 for both
+// directions d) settles or damps the body (SettleOrDamp), after
+// restHold - which counts up from below 0 - reaches 0. Any other point
+// counts a miss; after 51 misses the record is cleared.
+void RestingContact(RigidBody& b, const float p[3], RigidBody* other)
+{
+    if (b.state == 0x96) return;
+    if (other && other->state != 0x6e && other->state != 0x78 && other->state != 0x8c) return;
+    if (p[0] * p[0] + p[2] * p[2] < 0.00999999978f) return;
+    auto miss = [&] {
+        if (b.restMiss++ > 0x32) ClearRestUnlessAsleep(b);
+    };
+    if (b.restCount == 0) {
+        b.rest[0][0] = p[0]; b.rest[0][1] = p[1]; b.rest[0][2] = p[2]; b.rest[0][3] = 0.0f;
+    } else if (b.restCount == 1) {
+        const float* n = b.rest[0];
+        if (!(p[2] * n[2] + n[0] * p[0] < 0.00999999978f)) { miss(); return; }
+        float t1[3] = { n[2], 0.0f, -n[0] }, t2[3] = { p[2], 0.0f, -p[0] };
+        if ((t1[1] * p[1] + t1[2] * p[2]) + t1[0] * p[0] < 0.0f)
+            for (float& x : t1) x = -x;
+        if ((t2[2] * n[2] + t2[1] * n[1]) + t2[0] * n[0] < 0.0f)
+            for (float& x : t2) x = -x;
+        for (int k = 0; k < 3; ++k) { b.rest[0][k] = t1[k]; b.rest[1][k] = t2[k]; }
+        b.rest[0][3] = b.rest[1][3] = 0.0f;
+    } else if (b.restCount == 2) {
+        for (int i = 0; i < 2; ++i) {
+            const float* d = b.rest[i];
+            if (!(static_cast<double>(p[2] * d[2] + p[0] * d[0]) < 0.01)) { miss(); return; }
+        }
+        if (b.restHold < 0) {
+            b.restCount = 0;
+            ++b.restHold;
+            return;
+        }
+        SettleOrDamp(b);
+        if (b.restHold == 0) NoteNeighbour(b, other);
+        return;
+    } else {
+        miss();
+        return;
+    }
+    ++b.restCount;
+    if (b.restHold == 0) NoteNeighbour(b, other);
 }
 
 // 0x5a99d0 -> 0x5c5260 for the body against a static object (other null:
@@ -399,7 +519,8 @@ void PushOut(RigidBody& a, RigidBody* b, const BodyContact& c)
 // BOOT_TO_MENU.md section 76: the relative velocity A - B, K = K_A + K_B,
 // -J on B, the push-out shared by the masses): true when an impulse was
 // applied.
-bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr, RigidBody* other = nullptr)
+bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr, RigidBody* other = nullptr,
+             Props* props = nullptr)
 {
     float tA[3], tB[3];
     SurfaceValues(c.surfaceA, tA);
@@ -434,6 +555,13 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr, Rig
     float v[3];
     for (int i = 0; i < 3; ++i) v[i] = Dot(R[i], vp);
     if (v[2] >= 0) return false;
+    // 0x4e9160 -> 0x4e8f70 (BOOT_TO_MENU.md section 81): a smashable prop
+    // broken before, or broken by this hit (the momentum of the body, a
+    // grouped one's root), drops the contact: no impulse, no push-out
+    if (c.propInstance >= 0 && props) {
+        const RigidBody& root = group ? *group->members[0].body : body;
+        if (props->Hit(c.propInstance, Props::Momentum(root.vel, root.mass))) return false;
+    }
     // 0x5c3110: K (velocity change per impulse) in the frame.
     float Kw[3][3];
     for (int k = 0; k < 3; ++k) {
@@ -511,9 +639,41 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr, Rig
     float J[3], ang[3];
     for (int k = 0; k < 3; ++k) J[k] = R[0][k] * P[0] + R[1][k] * P[1] + R[2][k] * P[2];
     Cross(r, J, ang);
+    // 0x5c3110's start: a resting contact (normal speed above -kRestSpeed)
+    // between light bodies (mass <= 1000, [0x78e8cc]) wakes nobody (else
+    // 0x5a9230); a body still asleep then gets no impulse.
+    if (!(v[2] > -kRestSpeed) || body.mass > 1000.0f || (other && other->mass > 1000.0f)) {
+        Wake(body);
+        if (other) Wake(*other);
+    }
+    // 0x5c5260 after the impulse is found (BOOT_TO_MENU.md section 79): a
+    // slow contact (|relative velocity| below kRestSpeed) feeds the resting
+    // record of a side that is awake, whose horizontal motion the impulse
+    // opposes, that moves slower than kRestSpeed and is pushed up (A: J.y >
+    // 0, B: J.y < 0); a fast one clears both records (0x5af370).
+    const float vv = (v[2] * v[2] + v[1] * v[1]) + v[0] * v[0];
+    if (vv < kRestSpeed * kRestSpeed) {
+        const bool jointed = group && group->members[body.member].parent >= 0;
+        if (!jointed && body.state == 0x65) {
+            const float inv = 1.0f / body.mass;
+            // a grouped root takes -1 ([0x78e904]): always opposing
+            const float s = group ? -1.0f : (J[0] * inv) * body.vel[0] + (J[2] * inv) * body.vel[2];
+            if (s < 0.0f && Speed(body.vel) < kRestSpeed && J[1] > 0.0f) RestingContact(body, r, other);
+        }
+        if (other && other->state == 0x65) {
+            const float inv = -1.0f / other->mass;
+            const float s = (J[0] * inv) * other->vel[0] + (J[2] * inv) * other->vel[2];
+            if (s < 0.0f && Speed(other->vel) < kRestSpeed && J[1] < 0.0f) RestingContact(*other, rb, &body);
+        }
+    } else {
+        ClearRestUnlessAsleep(body);
+        if (other) ClearRestUnlessAsleep(*other);
+    }
+    // the impulse reaches awake bodies only (0x5c3110 gives a sleeping one
+    // nothing)
     if (group) group->ContactImpulse(body.member, x1, P, false);  // 0x5a9da0, 0x5be2b0, 0x5c7390
-    else body.ApplyImpulse(J, ang);
-    if (other) {
+    else if (body.state == 0x65) body.ApplyImpulse(J, ang);
+    if (other && other->state == 0x65) {
         const float nj[3] = { -J[0], -J[1], -J[2] };
         float angB[3];
         Cross(rb, nj, angB);
@@ -593,8 +753,9 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
         if (vehicle && !(best.surfaceA == 0xb && best.surfaceB == 0xb))
             best.surfaceA = VehicleSurface(best.surfaceA, 0, best.pointA, &body.matrix[0][0], vehicleBottom,
                                            best.normal, false);
+        best.propInstance = ob.prop ? ob.instance : -1;
         float J[3];
-        if (Respond(body, best, J)) {
+        if (Respond(body, best, J, nullptr, props)) {
             ++contacts;
             if (onImpulse) onImpulse(best, J);
         }

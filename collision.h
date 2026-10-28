@@ -31,8 +31,11 @@ public:
         int instance = -1;     // the city instance hit (-1: the ground)
         int shape = -1;        // its shape (ShapeAt; -1: the ground)
     };
-    // The objects of every instance with a PMLD record in its region, but
-    // the dynamic props (CityPlacement::dynamicModels: bodies in the game).
+    // The objects of every instance with a PMLD record in its region; the
+    // smashable props (CityPlacement::dynamicModels) are flagged: the rays
+    // pass them (they matched the traced wheel rays only so), the body
+    // contacts meet them (a prop is a static object of group 6 in the game
+    // until a hit breaks it, run 25).
     void Build(const CityPlacement& city);
     // The nearest shape hit along dir (unit) within length; a start inside a
     // shape hits at 0 (as 0x5a3e40 returns 0 for an entry distance below 0)
@@ -69,6 +72,9 @@ public:
         size_t first = 0, count = 0;  // in shapes_
         int instance = -1;
         bool bounded = false;          // shape 0 bounds the others
+        // A smashable prop (GEBI ranges 3 / 4, an AWHF model; BOOT_TO_MENU.md
+        // section 81): in the body contacts (props.h), not in the rays.
+        bool prop = false;
         float lo[3] = {}, hi[3] = {};  // world AABB
     };
     // The objects whose bounding box overlaps [lo, hi] (each once; the

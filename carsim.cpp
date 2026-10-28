@@ -655,7 +655,7 @@ void CarSim::WakeBody()
     RigidBody& b = *body;
     if (b.state != 0x78) return;
     b.state = 0x65;
-    for (float& s : b.sleep) s = 0;
+    b.ClearRest();
 }
 
 // 0x5a96c0 with the tick's 0x4b2860..: the body stops (L and v zero, then q

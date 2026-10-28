@@ -244,7 +244,7 @@ void RigidBody::ApplyImpulse(const float* linear, const float* angular)
         vel[3] = 0;
         if (state == 0x78) {
             state = 0x65;
-            memset(sleep, 0, sizeof(sleep));
+            ClearRest();
         }
     }
     if (angular) {
@@ -255,7 +255,7 @@ void RigidBody::ApplyImpulse(const float* linear, const float* angular)
         ::UpdateSpin(q, L, invI, w, dq);
         if (state == 0x78) {
             state = 0x65;
-            memset(sleep, 0, sizeof(sleep));
+            ClearRest();
         }
     }
 }
@@ -268,7 +268,7 @@ void RigidBody::SetVelocity(const float v[3])
     vel[3] = 0;
     if (state == 0x78) {
         state = 0x65;
-        memset(sleep, 0, sizeof(sleep));
+        ClearRest();
     }
 }
 
@@ -293,6 +293,6 @@ void RigidBody::SetSpin(const float W[3])
     ::UpdateSpin(q, L, invI, w, dq);
     if (state == 0x78) {
         state = 0x65;
-        memset(sleep, 0, sizeof(sleep));
+        ClearRest();
     }
 }

@@ -26,6 +26,7 @@ struct CityInstance
     float world[16] = {};
     int column = 0, row = 0;  // GEBI header +4 / +8 (-2 / -2: the GESR one)
     int range = 0;            // which of the header's six ranges (+0x0c..)
+    int gebiFirst = 0;        // the index (in instances) of its GEBI's record 0
 
     bool HasModel() const { return (model & 0x3ff) != 0x3ff; }
     uint32_t PackageUid() const { return model >> 10; }
@@ -196,11 +197,24 @@ public:
     CityGround ground;
     // The GEPM / PMLD chunks of the GESR regions (collision).
     std::vector<CityCollisionRegion> collision;
-    // The dynamic props: the model ids of the GEPD / HRDT groups ('AWHF'
+    // The smashable props: the model ids of the GEPD / HRDT groups ('AWHF'
     // records like the vehicles' UPVH, model id at +0x14; 0x44f823 loads
-    // them). Their instances are physics bodies in the game, not static
-    // collision.
+    // them). Their instances (GEBI ranges 3 / 4) are static objects of group
+    // 6 for the body contacts until a hit breaks them, and the rays pass
+    // them (props.h; BOOT_TO_MENU.md section 81).
     std::vector<uint32_t> dynamicModels;
+    // Their 'AWHF' records as the smashable props' types (the game uses
+    // them in place: [0x8ac378] vtbl+0x14 finds one by the GEBI model;
+    // BOOT_TO_MENU.md section 81).
+    struct PropType
+    {
+        uint32_t model = 0;          // +0x14
+        uint32_t parts = 0;          // +0x10 (0x50-byte parts from +0x40)
+        float shatter = 0;           // +0x1c: above it a type of several parts breaks apart
+        float threshold = 0;         // +0x20: the hit's momentum that breaks it
+        uint16_t firstPartModel = 0; // +0x42 (0xffff: none)
+    };
+    std::vector<PropType> propTypes;
     // GEIR cells per side (12 in Miami, 15 in Nice and Istanbul); a cell
     // is 480 units and the grid is centred on 0, so column c starts at
     // x = 480 * (c - gridSide / 2) and row r ends at z = -480 * (r - gridSide / 2)

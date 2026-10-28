@@ -670,7 +670,7 @@ void Group::BodyMatrix(int k)
     b->pos[0] = b->matrix[3][0]; b->pos[1] = b->matrix[3][1]; b->pos[2] = b->matrix[3][2]; b->pos[3] = 0;
     if (b->state == 0x78) {
         b->state = 0x65;
-        for (float& s : b->sleep) s = 0;
+        b->ClearRest();
     }
     float quat[4];
     QuatFromRows(b->matrix, quat);

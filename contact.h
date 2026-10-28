@@ -19,13 +19,18 @@
 // contact's axes as columns, the point in the frame; BOOT_TO_MENU.md
 // section 76). Body / body: the car against a loose panel (Pair).
 // Not ported: box / cylinder (0x5b4380 and its helpers; a cylinder is taken
-// as its bounding box here), the surface rename of the contact callback
-// 0x4e9160 (surface 0xb -> 0x18 / 0x1c), body / body pairs other than the
-// car's with its loose parts, the push-out of a grouped body (0x5ae5b0).
-// The response is checked against run 21 (tests\respreplay.cpp): 412 / 412
-// impulse decisions, all within 7.7e-4 but two calls whose velocity the
-// listener dispatcher 0x44a890 changes again (not ported).
-// Slow contacts only feed the sleep test (0x5af440) in the game.
+// as its bounding box here), body / body pairs other than the car's with
+// its loose parts, the push-out of a jointed group member (0x5ae5b0's
+// chain; hinged panels have no contacts), the smashable props: the contact
+// callback drops a contact with a placed object whose GEBI record breaks
+// under the hit's momentum (0x4e9160 -> 0x4e8f70; BOOT_TO_MENU.md section
+// 80).
+// Slow contacts feed the bodies' resting records (0x5af440, physics.h): a
+// body resting on two supports sleeps or is damped (0x5af1d0; BOOT_TO_MENU.md
+// section 79). The response is checked against runs 21..24
+// (tests\respreplay.cpp; the grouped car with its whole group from run 24):
+// every impulse decision equal but one smashed prop, every call within
+// 7.7e-4 (state and resting record included).
 #pragma once
 
 #include <functional>
@@ -42,7 +47,10 @@ struct BodyContact
     float normal[3] = {};                  // from B to A
     float depth = 0;                       // +0x30
     int surfaceA = 0, surfaceB = 0;        // +0x40 / +0x44
+    int propInstance = -1;                 // B is this smashable prop (props.h)
 };
+
+class Props;
 
 // Box A against box B (half sizes, world matrices; 0x5b8df0 / 0x5b9340).
 bool BoxBoxContact(const float sizeA[3], const float* worldA, const float sizeB[3], const float* worldB, BodyContact& c);
@@ -92,6 +100,10 @@ public:
     // its surface 0xb is renamed in its object and body pairs.
     bool vehicle = false;
     float vehicleBottom = 0;
+
+    // The smashable props (0x4e8f70): a contact with a broken prop, or one
+    // the hit breaks, is dropped. Null: props are solid.
+    Props* props = nullptr;
 
     // Diagnostics of the last step.
     int pairs = 0, contacts = 0, ground = 0;
