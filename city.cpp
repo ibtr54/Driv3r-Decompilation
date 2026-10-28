@@ -56,6 +56,7 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
     collision.clear();
     dynamicModels.clear();
     propTypes.clear();
+    collisionKeys.clear();
     error_.clear();
     if (d.size() < 16 || memcmp(d.data(), "CHNK", 4) != 0) { error_ = "not a CHNK file"; return false; }
     // Top level: GESR regions, GEIR cells, IRCT, PINF, GEGL, PCSL. The GEBI
@@ -73,6 +74,7 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
         size_t first = instances.size();
         bool gebi = false;
         size_t scnd = 0, scndSize = 0;
+        size_t jnr = 0, jnrSize = 0;
         for (uint32_t j = 0; j < children; ++j) {
             size_t c = g + 16 + size_t(j) * 16;
             if (c + 16 > d.size()) break;
@@ -139,9 +141,25 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
                 scnd = g + U32(d, c + 4);
                 scndSize = U32(d, c + 12);
             }
+            if (memcmp(&d[c], "JNR!", 4) == 0 && !jnr) {
+                jnr = g + U32(d, c + 4);
+                jnrSize = U32(d, c + 12);
+            }
             if (memcmp(&d[c], "GEBI", 4) != 0) continue;
             if (!LoadGebi(d, g + U32(d, c + 4), U32(d, c + 12))) return false;
             gebi = true;
+        }
+        // the cell's collision keys (record indexes into this cell's GEBI)
+        if (gebi && jnr && jnrSize >= 0x20 && jnr + jnrSize <= d.size()) {
+            const size_t keys = jnr + U32(d, jnr + 0x18), n = U32(d, jnr + 0x1c);
+            if (keys + n * 4 > jnr + jnrSize) { error_ = "JNR! keys"; return false; }
+            const size_t records = instances.size() - first;
+            for (size_t i = 0; i < n; ++i) {
+                uint16_t id, rec;
+                memcpy(&id, &d[keys + 4 * i], 2);
+                memcpy(&rec, &d[keys + 4 * i + 2], 2);
+                if (rec < records) collisionKeys.push_back({ uint32_t(first + rec), id });
+            }
         }
         if (gebi && scnd) {
             CityCell cell;

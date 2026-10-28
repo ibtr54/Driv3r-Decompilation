@@ -3329,6 +3329,8 @@ public:
                         city_.vehicleInfo.empty() ? "none" : city_.vehicleInfo.c_str());
                     Log("Level 0x%02x: exhaust smoke: %s", mission,
                         city_.smokeInfo.empty() ? "not drawn" : city_.smokeInfo.c_str());
+                    Log("Level 0x%02x: skid marks: %s", mission,
+                        city_.skidInfo.empty() ? "not drawn" : city_.skidInfo.c_str());
                 } else
                     Log("Level 0x%02x: vehicle %d not drawn (%s)", mission, rideVehicle,
                         boat ? "a boat" : "not in the vehicle file");
@@ -3515,6 +3517,10 @@ private:
         contactLog_ = 0;
         smokeLog_ = 0;
         tyreSmoke_[0] = tyreSmoke_[1] = false;
+        skidLog_ = 0;
+        sprayLog_ = 0;
+        sprayOn_[0] = sprayOn_[1] = 0;
+        skidOn_[0] = skidOn_[1] = false;
         // The slot's damage records (damage.h): the slot's sizes are twice
         // the bounding shape's half sizes (PDL z-up: x, z, y).
         carVehicle_ = v;
@@ -3735,6 +3741,28 @@ private:
                 CarSmokeState smoke;
                 const bool ran = car_.Effects(carBody_.vel, smoke);
                 city_.StepSmoke(ran ? &smoke : nullptr);
+                if (ran) {
+                    city_.ApplySkid(smoke);
+                    for (int k = 0; k < 2; ++k) {
+                        const int on = int(smoke.sprayOn[k][0]) | int(smoke.sprayOn[k][1]) << 1 | int(smoke.sprayOn[k][2]) << 2;
+                        if (on != sprayOn_[k] && sprayLog_ < 40) {
+                            ++sprayLog_;
+                            Log("Spray: wheel %d emitters %d%d%d on (surface %u, rear wheels %.2f) at (%.2f %.2f %.2f)",
+                                k ? 3 : 1, on & 1, (on >> 1) & 1, (on >> 2) & 1, car_.OU(0x78 + (k ? 3 : 1) * 0xd0),
+                                smoke.spraySpeed, smoke.tyrePos[k][0], smoke.tyrePos[k][1], smoke.tyrePos[k][2]);
+                        }
+                        sprayOn_[k] = on;
+                    }
+                    for (int k = 0; k < 2; ++k)
+                        if (smoke.skidRan && smoke.skidOn[k] != skidOn_[k]) {
+                            skidOn_[k] = smoke.skidOn[k];
+                            if (skidLog_ < 40) {
+                                ++skidLog_;
+                                Log("Skid marks: wheel %d %s (slip %.3f, intensity %.3f)", k ? 3 : 1,
+                                    skidOn_[k] ? "on" : "off", car_.slip, smoke.skidIntensity[k]);
+                            }
+                        }
+                }
                 for (int k = 0; ran && k < 2; ++k)
                     if (smoke.tyreOn[k] != tyreSmoke_[k]) {
                         tyreSmoke_[k] = smoke.tyreOn[k];
@@ -3855,6 +3883,31 @@ private:
                 MatMul4(&panelDraw_[k * 17], &b->matrix[0][0], &carWorld_[dp * 16]);
             }
         city_.SetVehiclePose(carWorld_, &carHidden_);
+        // The skid marks' points (car vtbl+0x84 = 0x4b0830, every drawn
+        // frame, BOOT_TO_MENU.md section 84): per rear wheel with a ribbon,
+        // the wheel's rest contact (hardpoint + offset - radius, game vehicle
+        // vtbl+0x80; run 30 within 1e-4) lifted by 0x513db0 of the
+        // compression blended with the snapshot's (t = obj+0xb7c x 25),
+        // through the drawn body, its contact velocity (record +0xa0) and
+        // ground normal (+0x34, w 0); the colour row is the wheel's surface
+        // (the game looks the ground up under the point, 0x4e9da0).
+        const float t = car_.OF(0xb7c) * 25.0f;
+        for (int k = 0; k < 2; ++k) {
+            SkidRibbon* r = city_.Skid(k);
+            const int w = k ? 3 : 1;
+            if (!r || !(car_.OU(0x74 + w * 0xd0) & 0x40)) continue;
+            const float c = t * car_.OF(0x70 + w * 0xd0) + (1.0f - t) * car_.OF(0x6a0 + w * 0xb0);
+            const float local[3] = { car_.hardpoint[w][0] + car_.wheelOffset[w][0],
+                                     (car_.hardpoint[w][1] + car_.wheelOffset[w][1]) - car_.radius[w],
+                                     car_.hardpoint[w][2] + car_.wheelOffset[w][2] };
+            float point[4];
+            SkidPoint(local, WheelLift(carTable_, carClass_, c), carDrawBody_, r->width, w, car_.vehicleId, point);
+            float vel[4], normal[4];
+            for (int j = 0; j < 4; ++j) vel[j] = car_.OF(0x110 + w * 0xd0 + 4 * j);
+            for (int j = 0; j < 3; ++j) normal[j] = car_.OF(0xa4 + w * 0xd0 + 4 * j);
+            normal[3] = 0;
+            r->Add(point, vel, normal, int(car_.OU(0x78 + w * 0xd0)), city_.MoodParticle());
+        }
     }
 
     CarSim car_;
@@ -3878,6 +3931,10 @@ private:
     int contactLog_ = 0;
     int smokeLog_ = 0;
     bool tyreSmoke_[2] = {};
+    int skidLog_ = 0;
+    int sprayLog_ = 0;
+    int sprayOn_[2] = {};
+    bool skidOn_[2] = {};
     bool carOn_ = false;
     double carClock_ = 0;
     CarDriver driver_;

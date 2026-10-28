@@ -197,6 +197,18 @@ public:
     CityGround ground;
     // The GEPM / PMLD chunks of the GESR regions (collision).
     std::vector<CityCollisionRegion> collision;
+    // The cells' static collision objects (JNR! chunks, BOOT_TO_MENU.md
+    // section 86: +0x18 the offset, +0x1c the count of 4-byte keys {u16 id,
+    // u16 GEBI record}): one PDL entry (region id >> 12, entry id & 0xfff,
+    // 0x5a6110) placed with the record's matrix. They include the records
+    // without a model (range 1: paths, kerbs; 4369 in Miami) and differ
+    // from the records' PMLD models in 280 keys.
+    struct CollisionKey
+    {
+        uint32_t instance;  // index into instances
+        uint16_t id;
+    };
+    std::vector<CollisionKey> collisionKeys;
     // The smashable props: the model ids of the GEPD / HRDT groups ('AWHF'
     // records like the vehicles' UPVH, model id at +0x14; 0x44f823 loads
     // them). Their instances (GEBI ranges 3 / 4) are static objects of group

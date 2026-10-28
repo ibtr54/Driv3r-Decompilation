@@ -279,7 +279,14 @@ int main(int argc, char** argv)
                             hits[i].surface = h.surface;
                             for (int k = 0; k < 3; ++k) hits[i].normal[k] = h.normal[k];
                         }
-                        if (n < 1) {
+                        // SETTLE_RAYS=a,b: the rays of calls a..b (else call 0)
+                        static int ra = -1, rb = 0;
+                        if (ra < 0) {
+                            ra = 0;
+                            if (const char* e = getenv("SETTLE_RAYS")) sscanf(e, "%d,%d", &ra, &rb);
+                        }
+                        if (int(n) < 1 || (int(n) >= ra && int(n) <= rb)) {
+                            if (i == 0) printf("  call %u rays:\n", n);
                             const unsigned* tr = g_recs["Xr"].count(n) ? &g_recs["Xr"][n].w[i * 0x2c / 4] : nullptr;
                             const unsigned* th = g_recs["Xr"].count(n) ? &g_recs["Xr"][n].w[(0x210 + i * 0x30) / 4] : nullptr;
                             printf("   ray %d start %.6f %.6f %.6f len %.4f: %s %.6f surf %d n %.4f %.4f %.4f", i,

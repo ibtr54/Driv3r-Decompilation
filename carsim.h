@@ -133,10 +133,11 @@ public:
     // tyres' smoke from the slip (0x4b27c9..0x4b2f60) and the exhausts
     // (0x4b3631..; BOOT_TO_MENU.md section 83). vel: the body's velocity
     // (0x5a1700); obj+0xac0 must hold this tick's matrix (Tick copies it).
-    // Out: the decision for ExhaustSmoke::Apply. True when the block ran.
-    // (The skid-mark ribbon and the other wheels' records are not here; the
-    // game vehicle's checks (state < 5, part damage < 3, engine on) are
-    // taken as passed.)
+    // Out: the decision for ExhaustSmoke::Apply (exhausts, tyre smoke, the
+    // spray on loose ground 0x4b325c, section 85) and the skid-mark ribbons
+    // (0x4b3481, section 84; CityRenderer::ApplySkid). True when the block
+    // ran. (The game vehicle's checks (state < 5, part damage < 3, engine
+    // on) are taken as passed.)
     bool Effects(const float vel[3], CarSmokeState& out);
     float slip = 0;                     // the last block's slip amount (0..1)
 

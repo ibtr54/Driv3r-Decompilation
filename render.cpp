@@ -959,14 +959,18 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
         }
         const std::map<uint32_t, int> sfxUid = { { sfx->uid, sfxPackage } };
         smokeGroup_ = GroupFor(0x1f0000, 0x2c, false, true, sfxUid);
+        debrisGroup_ = GroupFor(0x1f0003, 0x2c, false, true, sfxUid);  // the spray's debris (0x5706e0)
         smoke_.Setup(vehicle->exhausts, vehicle->body, mood_.particle);
         UINT bytes = UINT(smoke_.Vertices().size() * sizeof(SmokeVertex));
         if (smokeGroup_.fx == 0x2c && smokeDecl_ &&
             SUCCEEDED(device_->CreateVertexBuffer(bytes, D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, &smokeVb_, nullptr))) {
-            char buf[160];
-            snprintf(buf, sizeof(buf), "%d emitters x %d slots, material 0x1f0000, effect 0x%x, type %d, preset 0x%02x",
-                     smoke_.Emitters(), ExhaustSmoke::kSlots, unsigned(smokeGroup_.fx), int(smokeGroup_.type),
-                     unsigned(states_[smokeGroup_.state].base));
+            char buf[320];
+            snprintf(buf, sizeof(buf),
+                     "%d emitters (%zu vertices), material 0x1f0000, effect 0x%x, type %d, preset 0x%02x; "
+                     "debris 0x1f0003: effect 0x%x, type %d, preset 0x%02x",
+                     smoke_.Emitters(), smoke_.Vertices().size(), unsigned(smokeGroup_.fx), int(smokeGroup_.type),
+                     unsigned(states_[smokeGroup_.state].base), unsigned(debrisGroup_.fx), int(debrisGroup_.type),
+                     unsigned(states_[debrisGroup_.state].base));
             smokeInfo = buf;
         } else {
             char buf[160];
@@ -976,6 +980,39 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
         }
     } else if (vehicle) {
         smokeInfo = vehicle->exhausts.empty() ? "not drawn (no exhaust tips)" : "not drawn (no sfx.pmu)";
+    }
+    // The skid marks (skid.h): sfx.pmu material 0x1f000d (substance type
+    // 0x13, preset 0x09: alpha blended, alpha test, no depth writes) with the
+    // effect of the render id (the substance does not remap it): run 30's
+    // vertex shader (hash ab6ac8ed) is in effects 0x0a and 0x16 alike, which
+    // differ only in six bytes of texture annotations; 0x0a is taken. One
+    // buffer for both ribbons, filled per frame.
+    skidInfo.clear();
+    for (int k = 0; k < 2; ++k) skids_[k].Reset(), skidTaken_[k] = false;
+    if (skidVb_) skidVb_->Release();
+    skidVb_ = nullptr;
+    if (vehicle && sfx && sfx->uid == 0x1f) {
+        int sfxPackage = -1;
+        for (size_t i = 0; i < packages_.size(); ++i)
+            if (packages_[i].data == sfx) sfxPackage = int(i);
+        if (sfxPackage < 0) {
+            sfxPackage = int(packages_.size());
+            AddPackage(*sfx);
+        }
+        const std::map<uint32_t, int> sfxUid = { { sfx->uid, sfxPackage } };
+        skidGroup_ = GroupFor(0x1f000d, 0x0a, false, true, sfxUid);
+        char buf[160];
+        if (skidGroup_.fx > 0 &&
+            SUCCEEDED(device_->CreateVertexBuffer(UINT(2 * SkidRibbon::kVertices * sizeof(SkidVertex)),
+                                                  D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, &skidVb_,
+                                                  nullptr)))
+            snprintf(buf, sizeof(buf), "2 ribbons x %d vertices, material 0x1f000d, effect 0x%x, type 0x%x, preset 0x%02x",
+                     SkidRibbon::kVertices, unsigned(skidGroup_.fx), unsigned(skidGroup_.type),
+                     unsigned(states_[skidGroup_.state].base));
+        else
+            snprintf(buf, sizeof(buf), "not drawn (material 0x1f000d: effect %d, type %d)", skidGroup_.fx,
+                     int(skidGroup_.type));
+        skidInfo = buf;
     }
     // Instances no quadtree reaches are not drawn (as in the game).
     std::vector<bool> reached(city.instances.size(), false);
@@ -1500,10 +1537,75 @@ void CityRenderer::DrawSmoke(float fov, float aspect, int& applied)
     BindGroup(smokeGroup_, smokeGroup_.state, kIdentity, applied, 1.0f, 0);
     SetDecl(smokeDecl_);
     device_->SetStreamSource(0, smokeVb_, 0, sizeof(SmokeVertex));
-    for (int i = 0; i < smoke_.Emitters(); ++i) {
-        device_->DrawPrimitive(D3DPT_TRIANGLELIST, UINT(i * ExhaustSmoke::kSlots * 6), ExhaustSmoke::kSlots * 2);
-        ++frameDraws;
+    // every emitter's ring (the spray's debris with material 0x1f0003)
+    for (int pass = 0; pass < 2; ++pass) {
+        if (pass == 1) {
+            if (debrisGroup_.fx != 0x2c) break;
+            BindGroup(debrisGroup_, debrisGroup_.state, kIdentity, applied, 1.0f, 0);
+        }
+        for (int i = 0; i < smoke_.Emitters(); ++i) {
+            if (smoke_.Material(i) != pass) continue;
+            device_->DrawPrimitive(D3DPT_TRIANGLELIST, UINT(smoke_.First(i) * 6), UINT(smoke_.Slots(i) * 2));
+            ++frameDraws;
+        }
     }
+    e.fx->EndPass();
+    e.fx->End();
+}
+
+// 0x4b3481..: per rear wheel, a ribbon is taken (0x55f7a0) the first time
+// it skids, with the tyre's width; then every block sets its intensity and
+// switches it: off -> on 0 and a new segment next; on while off -> on and a
+// new segment; on while on -> unchanged.
+void CityRenderer::ApplySkid(const CarSmokeState& s)
+{
+    if (!s.skidRan) return;
+    for (int k = 0; k < 2; ++k) {
+        SkidRibbon& r = skids_[k];
+        if (s.skidOn[k] && !skidTaken_[k]) {
+            r.Reset();
+            r.width = s.skidWidth[k];
+            skidTaken_[k] = true;
+        }
+        if (!skidTaken_[k]) continue;
+        r.intensity = s.skidIntensity[k];
+        if (!s.skidOn[k]) {
+            r.on = false;
+        } else {
+            if (r.on) continue;
+            r.on = true;
+        }
+        r.fresh = true;
+    }
+}
+
+// The ribbons (0x5dfe4d in run 30): every ribbon in use as one triangle
+// strip of its count vertices (World identity), with its group's states.
+void CityRenderer::DrawSkid(int& applied)
+{
+    if (!skidVb_ || skidGroup_.fx <= 0 || !fx_[skidGroup_.fx].fx) return;
+    UINT n[2] = {};
+    void* p = nullptr;
+    if (FAILED(skidVb_->Lock(0, 0, &p, 0)) || !p) return;
+    for (int k = 0; k < 2; ++k) {
+        if (!skidTaken_[k]) continue;
+        n[k] = skids_[k].count;
+        memcpy(static_cast<SkidVertex*>(p) + k * SkidRibbon::kVertices, skids_[k].v, n[k] * sizeof(SkidVertex));
+    }
+    skidVb_->Unlock();
+    if (n[0] < 3 && n[1] < 3) return;
+    Effect& e = fx_[skidGroup_.fx];
+    UINT passes = 0;
+    if (FAILED(e.fx->Begin(&passes, D3DXFX_DONOTSAVESTATE)) || FAILED(e.fx->BeginPass(0))) return;
+    static const float kIdentity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    BindGroup(skidGroup_, skidGroup_.state, kIdentity, applied, 1.0f, 0);
+    SetDecl(decl_);
+    device_->SetStreamSource(0, skidVb_, 0, sizeof(SkidVertex));
+    for (int k = 0; k < 2; ++k)
+        if (n[k] >= 3) {
+            device_->DrawPrimitive(D3DPT_TRIANGLESTRIP, UINT(k * SkidRibbon::kVertices), n[k] - 2);
+            ++frameDraws;
+        }
     e.fx->EndPass();
     e.fx->End();
 }
@@ -2039,8 +2141,10 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
         SetLight(mood_.ambient, mood_.directional, dir);
         SetEnvSpec(mood_.directional);
     }
-    // The particles: in the trace right after the tree shadows (the last
-    // draws of the shadow pass), before the HUD.
+    // The skid marks (type 0x13, alpha blended on the road), then the
+    // particles: in the trace right after the tree shadows (the last draws
+    // of the shadow pass), before the HUD.
+    DrawSkid(applied);
     DrawSmoke(fov, aspect, applied);
     drawList(late, false);  // list 2, mode 2
 }
@@ -2119,6 +2223,8 @@ void CityRenderer::Release()
     smokeDecl_ = nullptr;
     if (smokeVb_) smokeVb_->Release();
     smokeVb_ = nullptr;
+    if (skidVb_) skidVb_->Release();
+    skidVb_ = nullptr;
     smokeInfo.clear();
     cameraToScreen_ = timeAndConstants_ = compression_ = nullptr;
     currentDecl_ = nullptr;

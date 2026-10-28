@@ -65,6 +65,9 @@ struct ParticleParams
 };
 extern const ParticleParams kExhaustParticles;  // 0x568e30
 extern const ParticleParams kTyreParticles;     // 0x570ed0
+extern const ParticleParams kSprayParticles[3]; // 0x5706e0 (colours from 0x570c60)
+// 0x406570: the game's approximate atan2(a, b) (the emitters' yaw).
+float GameAtan2(float a, float b);
 
 // What the car's effects block decided for its smoke (CarSim::Effects).
 struct CarSmokeState
@@ -78,6 +81,21 @@ struct CarSmokeState
     bool tyreOn[2] = {};
     float tyreAlpha[2] = {};
     float tyrePos[2][3] = {};
+    // the rear wheels' skid marks (0x4b3481, skid.h): skidding (smoking with
+    // slip >= 0.5, flags without 4), the ribbon's intensity clamp(k x slip,
+    // 0, 1) (k 0.9 when obj+0x578 > 0, else 0.75) and the tyre's width
+    // (obj+0xc84 + 4 w, taken with the ribbon)
+    // the rear wheels' spray on loose ground (0x4b2f98..0x4b3340, the record
+    // of 0x5706e0 at obj+0xca4 + 16 w): emitter 0 (puffs), 1 (thrown back),
+    // 2 (debris) on; sand (surface 2) or dirt colours (0x570c60); the rear
+    // wheels' speed S+0x548 / 32 for 0x570b90; placed at tyrePos
+    bool sprayOn[2][3] = {};
+    bool spraySand[2] = {};
+    float spraySpeed = 0;
+    bool skidRan = false;  // the block ran (not under water)
+    bool skidOn[2] = {};
+    float skidIntensity[2] = {};
+    float skidWidth[2] = {};
 };
 
 class ExhaustSmoke
@@ -103,11 +121,19 @@ public:
     const std::vector<SmokeVertex>& Vertices() const { return vertices_; }
     int Emitters() const { return int(emitters_.size()); }
     int Spawned() const { return spawned_; }
+    // Emitter i's ring: its first slot in Vertices() (six vertices a slot),
+    // its slot count and its material (0: sfx 0x1f0000, 1: 0x1f0003, the
+    // spray's debris).
+    int First(int i) const { return int(emitters_[size_t(i)].first); }
+    int Slots(int i) const { return int(emitters_[size_t(i)].death.size()); }
+    int Material(int i) const { return emitters_[size_t(i)].material; }
 
 private:
     struct Emitter
     {
-        const ParticleParams* p = nullptr;
+        ParticleParams p = {};  // the maker's values (the spray's change at run time)
+        int material = 0;
+        size_t first = 0;     // the ring's first slot in vertices_
         bool taken = false;   // from the world's pool
         float local[3] = {};  // an exhaust's tip in the vehicle's space
         float tip[3] = {};    // +0x20: in the world
@@ -116,14 +142,19 @@ private:
         float alpha = 0;      // +0x124
         float rate = 0;       // +0xac
         uint32_t next = 0;    // +0x18: the ring's search start
-        float death[kSlots] = {};  // +0x14
+        std::vector<float> death;  // +0x14: one per slot (the maker's count)
         uint32_t live = 0;    // +0xa8
     };
     float Random();
-    void Tick(Emitter& e, size_t index);
+    void Tick(Emitter& e);
+    void Add(const ParticleParams& p, int slots, int material);
+    void SprayColours(size_t first, bool sand);  // 0x570c60
 
     std::vector<Emitter> emitters_;
     size_t exhausts_ = 0;     // emitters [0, exhausts_) are the exhausts, then the two tyres
+    size_t spray_ = 0;        // then the two spray records' three emitters each (0x5706e0)
+    bool sprayTaken_[2] = {};
+    int spraySand_[2] = {};   // the record's +0xc (1 at the maker, then 0x570c60)
     std::vector<SmokeVertex> vertices_;
     float particle_[4] = { 1, 1, 1, 1 };
     float tick_ = 0, fraction_ = 0;

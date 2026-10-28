@@ -71,6 +71,7 @@
 #include "collision.h"
 #include "mdpc.h"
 #include "mood.h"
+#include "skid.h"
 #include "smoke.h"
 #include "treeshadow.h"
 
@@ -221,6 +222,14 @@ public:
     // particles spawned so far.
     std::string smokeInfo;
     int SmokeSpawned() const { return smoke_.Spawned(); }
+    // The rear wheels' skid-mark ribbons (wheels 1 and 3; skid.h): the car's
+    // effects block takes and switches them (ApplySkid), the frame adds the
+    // points (SkidRibbon::Add), the draw shows every ribbon in use.
+    // skidInfo: the material / effect / preset ("": none).
+    void ApplySkid(const CarSmokeState& s);
+    SkidRibbon* Skid(int k) { return skidTaken_[k] ? &skids_[k] : nullptr; }
+    const float* MoodParticle() const { return mood_.particle; }  // +0x210, the ribbons' colour
+    std::string skidInfo;
 
 private:
     struct Package
@@ -340,6 +349,7 @@ private:
     // The exhaust emitters' rings (smoke.h), effect 0x2c, after the shadow
     // pass. fov / aspect: s_CameraToScreen.
     void DrawSmoke(float fov, float aspect, int& applied);
+    void DrawSkid(int& applied);
     void DrawGroup(const Package& p, const MdpcModel& m, const MdpcGroup& g, const Package::Group& info, int state,
                    const float world[16], int& applied, float alpha = 1.0f, uint32_t substance = 0);
     void BindGroup(const Package::Group& info, int state, const float world[16], int& applied, float alpha,
@@ -453,12 +463,20 @@ private:
     // s_CameraToScreen / g_TimeAndConstants / g_Compression.
     ExhaustSmoke smoke_;
     Package::Group smokeGroup_;
+    Package::Group debrisGroup_;  // sfx 0x1f0003: the spray's debris
     IDirect3DVertexBuffer9* smokeVb_ = nullptr;
     const char* cameraToScreen_ = nullptr;
     const char* timeAndConstants_ = nullptr;
     const char* compression_ = nullptr;
     float smokeTime_ = -1;  // time_ of the last Advance
     bool smokeStepped_ = false;  // StepSmoke drives the smoke (the car's physics)
+    // Skid marks: sfx.pmu material 0x1f000d (the ribbons' renderer request,
+    // 0x55c6fa), two of the world's four ribbons (the player's rear wheels),
+    // one dynamic buffer of 1600 vertices each (the game's 4 x 1600 x 48).
+    std::vector<SkidRibbon> skids_ = std::vector<SkidRibbon>(2);  // 77 KB each
+    bool skidTaken_[2] = {};
+    Package::Group skidGroup_;
+    IDirect3DVertexBuffer9* skidVb_ = nullptr;
     LodTable tables_[2];           // mode 1 (0x4ddc50) and mode 3 (0x4dde20)
     std::vector<StateSet> states_;
     // What the device has (valid: set by ApplyState since the last reset).

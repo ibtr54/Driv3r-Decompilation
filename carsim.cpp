@@ -897,6 +897,77 @@ bool CarSim::Effects(const float vel[3], CarSmokeState& out)
             for (int j = 0; j < 3; ++j) out.tyrePos[k][j] = ground[w][j];
         }
     }
+    // The spray on loose ground (0x4b2f98..0x4b3340, BOOT_TO_MENU.md section
+    // 85), per rear wheel on surface 3, 5, 2, 8 or 7: with flag 0x1000 while
+    // braking (obj+0x578 > 0) all three emitters (1 not on 7, 2 only on 3 /
+    // 7; no skid mark while the brake is below 0.5); else emitter 0 when
+    // sliding: on 5 / 2 faster than 10 or the tyre's slip ratio (record
+    // +0x10) above 1, on 3 / 8 / 7 faster than 10 with the wheel locked
+    // (flag 1) or the ratio above 4 (above 1 with flag 0x1000). Each needs a
+    // compression above 0.001, no flag 0x80, the tyre whole. The same test
+    // marks the wheel for the skid marks.
+    bool sprayMark[2] = {};
+    for (int k = 0; k < 2; ++k)
+        for (int j = 0; j < 3; ++j) out.sprayOn[k][j] = false;
+    out.spraySpeed = F(0x548) * 0.03125f;
+    if (!obj[0x664]) {
+        for (int k = 0; k < 2; ++k) {
+            const int w = k ? 3 : 1;
+            const uint32_t flags = OU(0x74 + w * 0xd0);
+            if (!(flags & 0x40)) continue;
+            const uint32_t surface = OU(0x78 + w * 0xd0);
+            out.spraySand[k] = surface == 2;
+            bool e0 = false, e1 = false, e2 = false, noMark = false;
+            if (surface == 3 || surface == 5 || surface == 2 || surface == 8 || surface == 7) {
+                const bool deep = (flags & 0x1000) != 0;
+                float ratio = OF(0x80 + w * 0xd0);
+                if (ratio <= 0) ratio = -ratio;
+                if (deep && 0 < OF(0x578)) {
+                    e0 = true;
+                    e1 = surface != 7;
+                    e2 = surface == 3 || surface == 7;
+                    noMark = OF(0x578) < 0.5f;
+                } else if (surface == 5 || surface == 2) {
+                    e0 = 10.0f < speed || 1.0f < ratio;
+                } else if (10.0f < speed && (flags & 1)) {
+                    e0 = true;
+                } else if (deep) {
+                    e0 = 1.0f < ratio;
+                } else {
+                    e0 = 4.0f < ratio;
+                }
+            }
+            const bool pressed = 0.00100000005f < OF(0x70 + w * 0xd0) && !(flags & 0x80);
+            e0 = e0 && pressed;
+            e1 = e1 && pressed;
+            e2 = e2 && pressed;
+            sprayMark[k] = (e0 || e1 || e2) && !noMark;
+            out.sprayOn[k][0] = e0 && tyre[w];
+            out.sprayOn[k][1] = e1 && tyre[w];
+            out.sprayOn[k][2] = e2 && tyre[w];
+            for (int j = 0; j < 3; ++j) out.tyrePos[k][j] = ground[w][j];
+        }
+    }
+    // The skid marks (0x4b3481..): a wheel smoking with slip >= 0.5 or
+    // marked by the spray test above (the block's byte per wheel),
+    // compressed above 0.001, flags without 0x84 (the vehicle's checks taken
+    // as passed).
+    out.skidOn[0] = out.skidOn[1] = false;
+    out.skidRan = !obj[0x664];
+    if (out.skidRan) {
+        const float k = 0 < OF(0x578) ? 0.899999976f : 0.75f;
+        float inten = k * s;
+        if (inten > 1.0f) inten = 1.0f;
+        else if (inten < 0) inten = 0;
+        for (int j = 0; j < 2; ++j) {
+            const int w = j ? 3 : 1;
+            const uint32_t flags = OU(0x74 + w * 0xd0);
+            out.skidIntensity[j] = inten;
+            out.skidWidth[j] = OF(0xc84 + 4 * w);
+            out.skidOn[j] = ((out.tyreOn[j] && 0.5f <= s) || sprayMark[j]) && 0.00100000005f < OF(0x70 + w * 0xd0) &&
+                            !(flags & 0x84);
+        }
+    }
 
     // The exhausts (0x4b3631..): mph = |v| x 2.23704 <= 5, alpha factor
     // 1 - mph x 0.2.

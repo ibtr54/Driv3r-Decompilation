@@ -172,29 +172,26 @@ void CollisionWorld::Build(const CityPlacement& city)
     shapes_.clear();
     objects_.clear();
     cells_.clear();
-    for (size_t ii = 0; ii < city.instances.size(); ++ii) {
-        const CityInstance& in = city.instances[ii];
-        if (!in.HasModel()) continue;
-        const uint32_t id = in.model;
-        // the smashable props (GEBI ranges 3 / 4, the AWHF models): static
-        // objects of group 6 for body contacts, left out of the rays
-        const bool prop =
-            std::find(city.dynamicModels.begin(), city.dynamicModels.end(), id) != city.dynamicModels.end();
-        const CityCollisionRegion* reg = nullptr;
+    auto regionOf = [&](uint32_t region) -> const CityCollisionRegion* {
         for (const CityCollisionRegion& r : city.collision)
-            if (uint32_t(r.region) == (id >> 10) && !r.pdl.empty()) reg = &r;
-        if (!reg) continue;
-        const CityCollisionRegion::Model* model = nullptr;
-        for (const CityCollisionRegion::Model& m : reg->models)
-            if (m.id == id) model = &m;
-        if (!model) continue;
-        const std::vector<uint8_t>& p = reg->pdl;
+            if (uint32_t(r.region) == region && !r.pdl.empty()) return &r;
+        return nullptr;
+    };
+    // One object per PDL entry (0x5a3e40 tests one entry's shape list),
+    // placed with the instance's matrix. The smashable props (GEBI ranges
+    // 3 / 4, the AWHF models): static objects of group 6 for body contacts,
+    // left out of the rays.
+    auto addEntry = [&](size_t ii, const CityCollisionRegion& reg, uint32_t e) {
+        const CityInstance& in = city.instances[ii];
+        const bool prop = in.HasModel() && std::find(city.dynamicModels.begin(), city.dynamicModels.end(),
+                                                     uint32_t(in.model)) != city.dynamicModels.end();
+        const std::vector<uint8_t>& p = reg.pdl;
         const uint32_t entries = U32(p, 0);
         const size_t table = U32(p, 8);
-        // One object per PDL entry (0x5a3e40 tests one entry's shape list).
-        for (uint32_t e = model->first; e < model->first + model->count && e < entries; ++e) {
+        {
+            if (e >= entries) return;
             const size_t ent = table + size_t(e) * 16;
-            if (ent + 16 > p.size()) break;
+            if (ent + 16 > p.size()) return;
             const uint32_t n = U32(p, ent);
             const size_t first = ent + U32(p, ent + 4);
             Object obj;
@@ -230,6 +227,33 @@ void CollisionWorld::Build(const CityPlacement& city)
             obj.count = shapes_.size() - obj.first;
             if (obj.count) objects_.push_back(obj);
         }
+    };
+    // The cells' JNR! keys (BOOT_TO_MENU.md section 86, the game's static
+    // collision objects: 0x5a6110 takes the region id >> 12 and the entry
+    // id & 0xfff); the instances of no cell with keys (the region GEBI)
+    // by their model's PMLD record.
+    std::vector<bool> keyed(city.instances.size(), false);
+    for (const CityPlacement::CollisionKey& k : city.collisionKeys) {
+        keyed[k.instance] = true;
+        if (const CityCollisionRegion* reg = regionOf(uint32_t(k.id) >> 12)) addEntry(k.instance, *reg, k.id & 0xfffu);
+    }
+    std::vector<bool> cellKeys(city.instances.size(), false);
+    for (const CityCell& c : city.cells)
+        if (c.instanceCount && keyed.size() >= c.firstInstance + c.instanceCount)
+            for (size_t i = c.firstInstance; i < c.firstInstance + c.instanceCount; ++i)
+                if (keyed[i]) {
+                    std::fill(cellKeys.begin() + std::ptrdiff_t(c.firstInstance),
+                              cellKeys.begin() + std::ptrdiff_t(c.firstInstance + c.instanceCount), true);
+                    break;
+                }
+    for (size_t ii = 0; ii < city.instances.size(); ++ii) {
+        const CityInstance& in = city.instances[ii];
+        if (cellKeys[ii] || !in.HasModel()) continue;
+        const CityCollisionRegion* reg = regionOf(uint32_t(in.model) >> 10);
+        if (!reg) continue;
+        for (const CityCollisionRegion::Model& m : reg->models)
+            if (m.id == in.model)
+                for (uint32_t e = m.first; e < m.first + m.count; ++e) addEntry(ii, *reg, e);
     }
     // The grid.
     if (objects_.empty()) return;

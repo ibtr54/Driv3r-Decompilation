@@ -26,6 +26,9 @@
     <ClCompile Include="treeshadow.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="skid.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="smoke.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -81,6 +84,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="treeshadow.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="skid.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="smoke.h">
