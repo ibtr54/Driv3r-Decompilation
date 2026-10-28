@@ -45,11 +45,23 @@ class ExhaustSmoke
 public:
     static const int kSlots = 30;  // 0x568e30: count 0x1e
 
-    // The vehicle's tips (world positions) and its body matrix (row vector):
-    // one emitter per tip, switched on, alpha 60 / 256 (standing still).
+    // The vehicle's tips (x, y, z each, in the vehicle's space) and its body
+    // matrix (row vector): one emitter per tip, placed by Update.
     // particle: the mood's PARTICLE_COLOUR and PARTICLE_INTENSITY (+0x210).
     void Setup(const std::vector<float>& tips, const float body[16], const float particle[4]);
-    // Advances by seconds of game time (60 emitter ticks a second).
+    // The vehicle's effects update for its exhausts (0x517b00 at 0x517fc6..,
+    // the end of the vehicle tick 0x516f20, every 120 Hz world update;
+    // BOOT_TO_MENU.md section 82): each tip through the body's current matrix
+    // (body +0x10, 0x605106) into the emitter (+0x20), its direction from the
+    // matrix's row 2 (yaw atan2(row2.x, -row2.z) +0xc0, pitch asin(-row2.y)
+    // +0xc8); the emitters are on (+0x9c) only while |v|^2 x 2.23704 <= 5
+    // (vel: the body's velocity, 0x5a1700; the game's mph factor [0x78ee98]
+    // applied to the squared speed: below 1.495 m/s), with alpha (+0x124) =
+    // (1 - |v| x 2.23704 x 0.2) x 60 / 256; faster, no new puffs (the old
+    // ones live on where they were spawned).
+    void Update(const float body[16], const float vel[3]);
+    // Advances by seconds of game time (60 emitter ticks a second; the world
+    // update adds 0.5 to the emitters' clock, 0x55c984).
     void Advance(float seconds);
     // The particles' clock for the draw (g_TimeAndConstants.x): the
     // emitters' tick plus the fraction of the next.
@@ -62,8 +74,11 @@ public:
 private:
     struct Emitter
     {
-        float tip[3] = {};
+        float local[3] = {};  // the tip in the vehicle's space
+        float tip[3] = {};    // +0x20: in the world, set by Update
         float yaw = 0, pitch = 0;
+        bool on = true;       // +0x9c
+        float alpha = 60.0f / 256.0f;  // +0x124
         float rate = 0;      // +0xac
         uint32_t next = 0;   // +0x18: the ring's search start
         float death[kSlots] = {};  // +0x14
@@ -75,7 +90,6 @@ private:
     std::vector<Emitter> emitters_;
     std::vector<SmokeVertex> vertices_;
     float particle_[4] = { 1, 1, 1, 1 };
-    float alpha_ = 60.0f / 256.0f;
     float tick_ = 0, fraction_ = 0;
     uint32_t seed_ = 0;  // [0x8df128], shared by every emitter
     int spawned_ = 0;

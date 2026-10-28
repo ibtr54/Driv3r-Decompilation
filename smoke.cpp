@@ -49,20 +49,39 @@ void ExhaustSmoke::Setup(const std::vector<float>& tips, const float body[16], c
     spawned_ = 0;
     if (tips.empty() || !body) return;
     memcpy(particle_, particle, sizeof(particle_));
-    // 0x518109..: the tip through the body matrix (0x605119); the angles
-    // from the body's row 2 (0x406570 = atan2, 0x6cda60 = asin).
-    float yaw = std::atan2(body[8], -body[10]);
-    float pitch = std::asin(-body[9]);
     for (size_t i = 0; i + 2 < tips.size(); i += 3) {
         Emitter e;
-        for (int k = 0; k < 3; ++k)
-            e.tip[k] = tips[i] * body[k] + tips[i + 1] * body[4 + k] + tips[i + 2] * body[8 + k] + body[12 + k];
-        e.yaw = yaw;
-        e.pitch = pitch;
+        for (int k = 0; k < 3; ++k) e.local[k] = tips[i + k];
         emitters_.push_back(e);
     }
+    const float still[3] = { 0, 0, 0 };
+    Update(body, still);
     // Every slot's six vertices; uv and corner signs of the traced records.
     vertices_.assign(emitters_.size() * kSlots * 6, SmokeVertex());
+}
+
+void ExhaustSmoke::Update(const float body[16], const float vel[3])
+{
+    if (!body) return;
+    // 0x518006..: the squared speed x [0x78ee98] against [0x78e954] (5);
+    // slow: the factor 1 - |v| (0x442ba0) x [0x78ee98] x [0x78ea54] (0.2)
+    const float sq = ((vel[2] * vel[2] + vel[1] * vel[1]) + vel[0] * vel[0]) * 2.23704004f;
+    const bool slow = !(sq > 5.0f);
+    const float speed = std::sqrt((vel[0] * vel[0] + vel[1] * vel[1]) + vel[2] * vel[2]);
+    const float factor = slow ? 1.0f - speed * 2.23704004f * 0.200000003f : 0.0f;
+    // the angles from the body's row 2 (0x406570 = atan2, 0x6cda60 = asin)
+    const float yaw = std::atan2(body[8], -body[10]);
+    const float pitch = std::asin(-body[9]);
+    for (Emitter& e : emitters_) {
+        // 0x518a10 (the engine's state) and the tip's part not destroyed
+        // are taken as true here
+        e.on = slow;
+        if (slow) e.alpha = factor * 60.0f * 0.00390625f;  // x the emitter's 60 x [0x78e874]
+        for (int k = 0; k < 3; ++k)
+            e.tip[k] = e.local[0] * body[k] + e.local[1] * body[4 + k] + e.local[2] * body[8 + k] + body[12 + k];
+        e.yaw = yaw;
+        e.pitch = pitch;
+    }
 }
 
 void ExhaustSmoke::Advance(float seconds)
@@ -89,6 +108,7 @@ void ExhaustSmoke::Tick(Emitter& e, size_t index)
             }
     // On (+0x9c): the rate, then int(rate) particles of 38 random numbers
     // each (taken even when the ring is full).
+    if (!e.on) return;
     e.rate += Random() * kRateR + kRate;
     if (e.rate < 1.0f) return;
     int n = int(e.rate);
@@ -107,7 +127,7 @@ void ExhaustSmoke::Tick(Emitter& e, size_t index)
         float sx1 = r[20] * kSize1R + kSize1 + r[19] * kSize1C, sy1 = r[21] * kSize1R + kSize1 + r[19] * kSize1C;
         const float* m = particle_;  // colour x intensity (+0x160.. x +0x16c)
         float g0 = kGrey0 + r[22] * kGreyC, g1 = kGrey1 + r[27] * kGreyC;
-        uint32_t c0 = Pack(alpha_, g0 * m[0] * m[3], g0 * m[1] * m[3], g0 * m[2] * m[3]);
+        uint32_t c0 = Pack(e.alpha, g0 * m[0] * m[3], g0 * m[1] * m[3], g0 * m[2] * m[3]);
         uint32_t c1 = Pack(0.0f, g1 * m[0] * m[3], g1 * m[1] * m[3], g1 * m[2] * m[3]);
         float life = float(int(r[32] * kLifeR)) + kLife;
         float yaw = r[33] * kAngle + e.yaw, pitch = r[34] * kAngle + e.pitch;

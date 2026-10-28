@@ -3726,6 +3726,10 @@ private:
             // section 70: run 9 replays exactly only so; before the tick a
             // change shows one 0.04 s step early).
             car_.SetControls(controls_, handbrake_);
+            // the end of the vehicle tick (0x516f20 -> 0x517b00): the
+            // exhaust emitters at the tips of the body as it is now, on only
+            // while the car is nearly still (smoke.h)
+            city_.StepSmoke(&carBody_.matrix[0][0], carBody_.vel);
             // The physics step's contacts (0x5a31f0, 0x5a0020), then the
             // integration (0x5a9880).
             const int touched = carContacts_.Step(carBody_, carShapes_, collision_, &loader_.City().ground);

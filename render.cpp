@@ -946,6 +946,7 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
     smokeInfo.clear();
     smoke_.Setup({}, vehicle ? vehicle->body : nullptr, mood_.particle);
     smokeTime_ = -1;
+    smokeStepped_ = false;
     if (smokeVb_) smokeVb_->Release();
     smokeVb_ = nullptr;
     if (vehicle && !vehicle->exhausts.empty() && sfx && sfx->uid == 0x1f) {
@@ -1477,7 +1478,9 @@ void CityRenderer::DrawShadowAlpha(int& applied)
 void CityRenderer::DrawSmoke(float fov, float aspect, int& applied)
 {
     if (!smokeVb_ || smokeGroup_.fx != 0x2c || !fx_[0x2c].fx) return;
-    if (smokeTime_ >= 0 && time_ > smokeTime_) smoke_.Advance(time_ - smokeTime_);
+    // without the car's physics the emitters stay where they were set up and
+    // follow the draw time
+    if (!smokeStepped_ && smokeTime_ >= 0 && time_ > smokeTime_) smoke_.Advance(time_ - smokeTime_);
     smokeTime_ = time_;
     const std::vector<SmokeVertex>& verts = smoke_.Vertices();
     void* p = nullptr;

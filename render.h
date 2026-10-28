@@ -127,8 +127,18 @@ public:
     // The player's vehicle moved: the parts' World (VehicleDraw::parts order,
     // 16 floats each), from the next Draw; hidden (optional, one per part):
     // nonzero leaves the part out (a burst tyre's wheel, an unused rim, a
-    // missing wheel). (The exhaust smoke keeps the tips it was set up with.)
+    // missing wheel).
     void SetVehiclePose(const std::vector<float>& worlds, const std::vector<uint8_t>* hidden = nullptr);
+    // One 120 Hz world update of the exhaust smoke: the vehicle's effects
+    // update (ExhaustSmoke::Update with the physics body's matrix and
+    // velocity), then the emitters' clock (half a tick). Once called, the
+    // smoke no longer follows the draw time.
+    void StepSmoke(const float body[16], const float vel[3])
+    {
+        smoke_.Update(body, vel);
+        smoke_.Advance(1.0f / 120.0f);
+        smokeStepped_ = true;
+    }
     // The physics world for the tree shadows' ray (0x5a03f0); null: trees
     // without GRTD ground get no shadow.
     void SetCollision(const CollisionWorld* world)
@@ -448,6 +458,7 @@ private:
     const char* timeAndConstants_ = nullptr;
     const char* compression_ = nullptr;
     float smokeTime_ = -1;  // time_ of the last Advance
+    bool smokeStepped_ = false;  // StepSmoke drives the smoke (the car's physics)
     LodTable tables_[2];           // mode 1 (0x4ddc50) and mode 3 (0x4dde20)
     std::vector<StateSet> states_;
     // What the device has (valid: set by ApplyState since the last reset).
