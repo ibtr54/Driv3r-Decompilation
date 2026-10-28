@@ -15,6 +15,7 @@
 #include <cstring>
 
 #include "physics.h"
+#include "smoke.h"
 
 // One wheel ray of the batch the dynamics queues (0x4b5a30) and the world
 // answers (0x5a0820): the game keeps them in two global arrays.
@@ -126,6 +127,18 @@ public:
     // (The rest of the tick, sounds, skid marks and damage, is not here.)
     bool Tick(WheelRayCaster& world);
     uint8_t wheelAlt[6] = {}, wheelOff[6] = {};
+
+    // The tick's effects block (0x4b2785..0x4b38c6), every 1/60 s
+    // (accumulator obj+0xb80 += 1/120 against [0x71bdf8] = 1/60): the rear
+    // tyres' smoke from the slip (0x4b27c9..0x4b2f60) and the exhausts
+    // (0x4b3631..; BOOT_TO_MENU.md section 83). vel: the body's velocity
+    // (0x5a1700); obj+0xac0 must hold this tick's matrix (Tick copies it).
+    // Out: the decision for ExhaustSmoke::Apply. True when the block ran.
+    // (The skid-mark ribbon and the other wheels' records are not here; the
+    // game vehicle's checks (state < 5, part damage < 3, engine on) are
+    // taken as passed.)
+    bool Effects(const float vel[3], CarSmokeState& out);
+    float slip = 0;                     // the last block's slip amount (0..1)
 
     // 0x4b6a00 for the player's car (arguments 5..8 zero: rays against the
     // world). Water (0x524f00 with 0x526290) is not handled: the car is

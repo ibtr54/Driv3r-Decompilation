@@ -800,6 +800,113 @@ bool CarSim::Tick(WheelRayCaster& world)
 }
 
 // ---------------------------------------------------------------------------
+// The effects block of 0x4b1bb0, in the game's operation order.
+bool CarSim::Effects(const float vel[3], CarSmokeState& out)
+{
+    // |v| and |v . row 2| (0x4b2425..: the body's velocity against the
+    // matrix copied at the tick's start, obj+0xae0)
+    const float speed = sqrtf((vel[1] * vel[1] + vel[2] * vel[2]) + vel[0] * vel[0]);
+    float along = (vel[0] * OF(0xae0) + OF(0xae4) * vel[1]) + OF(0xae8) * vel[2];
+    if (along <= 0) along = -along;
+
+    const float acc = OF(0xb80) + 0.00833333377f;
+    OF(0xb80) = acc;
+    if (!(0.0166666675f < acc)) return false;
+    OF(0xb80) = acc - 0.0166666675f;
+    memcpy(out.matrix, obj + 0xac0, 64);
+
+    // The slip: a = |(2 - c^2) x |m||, m the mean of the rear wheels' (1, 3)
+    // contact velocities (record +0xa0), c = |v . row 2| / |v|; b = c^2 x
+    // the rear wheels' speed S+0x548 (when S+0x134 bit 0 is clear and |S+0x548|
+    // > 1e-5, else 1e-5); slip = clamp((|a - b| - 5) x 0.04, 0, 1).
+    const float mx = (OF(0x380) + OF(0x1e0)) * 0.5f;
+    const float my = (OF(0x384) + OF(0x1e4)) * 0.5f;
+    const float mz = (OF(0x388) + OF(0x1e8)) * 0.5f;
+    const float c = speed != 0 ? along / speed : 0.0f;
+    float a;
+    float sq = mx * mx + my * my + mz * mz;
+    if (sq < 9.99999944e-11f || (sq = sqrtf(sq), sq <= 9.99999975e-06f)) {
+        a = 9.99999975e-06f;
+    } else {
+        float c2 = c * c;
+        if (c2 <= 0) c2 = -c2;
+        a = (2.0f - c2) * sq;
+    }
+    float b = 9.99999975e-06f;
+    if (!(U(0x134) & 1)) {
+        float w = F(0x548);
+        if (w <= 0) w = -w;
+        if (w > 9.99999975e-06f) {
+            b = c * c;
+            if (b <= 0) b = -b;
+            b = b * F(0x548);
+        }
+    }
+    if (a <= 0) a = -a;
+    if (b <= 0) b = -b;
+    float d = a - b;
+    if (d <= 0) d = -d;
+    float s = d - 5.0f;
+    if (s < 0) s = 0;
+    s = s * 0.0399999991f;
+    if (s > 1.0f) s = 1.0f;
+    else if (s < 0) s = 0;
+    slip = s;
+    const float inv = 1.0f - s;
+    const float strength = 1.0f - inv * inv * inv;
+
+    // Each wheel's ground point: its contact (record +0x14) blended with the
+    // snapshot's (obj+0x6a4 + 0xb0 w) by t = obj+0xb7c x 25 (0x4b0600).
+    const float t = OF(0xb7c) * 25.0f;
+    const float u = 1.0f - t;
+    float ground[6][3] = {};
+    for (int w = 0; w < 6; ++w) {
+        if (!(OU(0x74 + w * 0xd0) & 0x40)) continue;
+        for (int k = 0; k < 3; ++k)
+            ground[w][k] = u * OF(0x6a4 + w * 0xb0 + 4 * k) + t * OF(0x84 + w * 0xd0 + 4 * k);
+    }
+    // The tyre's state (obj+0x648.., one per wheel the model has, by its
+    // index among them): above 0.2 no smoke.
+    bool tyre[6];
+    for (int i = 0, n = 0; i < 6; ++i) {
+        if (slots[i] == 0) {
+            tyre[i] = true;
+            continue;
+        }
+        n = 0;
+        for (int j = 0; j < i; ++j)
+            if (slots[j]) ++n;
+        tyre[i] = OF(0x648 + 4 * n) <= 0.2f;
+    }
+    // Rear wheels 1 and 3 (0x4b2e6d..): present, slipping, compressed above
+    // 0.001, on a smoking surface (0x17, 1, 6, 0, 9, 8, 0x12), the tyre
+    // whole, not off or on the alternative point (flags 0x80 / 0x100).
+    out.tyreOn[0] = out.tyreOn[1] = false;
+    if (!obj[0x664]) {   // not under water
+        for (int k = 0; k < 2; ++k) {
+            const int w = k ? 3 : 1;
+            const uint32_t flags = OU(0x74 + w * 0xd0);
+            if (!(flags & 0x40)) continue;
+            const uint32_t surface = OU(0x78 + w * 0xd0);
+            const bool smoky = surface == 0x17 || surface == 1 || surface == 6 || surface == 0 ||
+                               surface == 9 || surface == 8 || surface == 0x12;
+            const bool on = 0 < s && 0.00100000005f < OF(0x70 + w * 0xd0) && smoky && tyre[w] &&
+                            !(flags & 0x180);
+            out.tyreOn[k] = on;
+            out.tyreAlpha[k] = 0 < s ? strength * 0.1875f : 0.1875f;
+            for (int j = 0; j < 3; ++j) out.tyrePos[k][j] = ground[w][j];
+        }
+    }
+
+    // The exhausts (0x4b3631..): mph = |v| x 2.23704 <= 5, alpha factor
+    // 1 - mph x 0.2.
+    const float mph = speed * 2.23704004f;
+    out.exhaustSlow = !obj[0x664] && mph <= 5.0f;
+    out.exhaustFactor = out.exhaustSlow ? 1.0f - mph * 0.200000003f : 0.0f;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 void CarSim::Dynamics(WheelRayCaster& world)
 {
     const float* T = table;

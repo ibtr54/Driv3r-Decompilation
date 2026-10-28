@@ -129,13 +129,13 @@ public:
     // nonzero leaves the part out (a burst tyre's wheel, an unused rim, a
     // missing wheel).
     void SetVehiclePose(const std::vector<float>& worlds, const std::vector<uint8_t>* hidden = nullptr);
-    // One 120 Hz world update of the exhaust smoke: the vehicle's effects
-    // update (ExhaustSmoke::Update with the physics body's matrix and
-    // velocity), then the emitters' clock (half a tick). Once called, the
-    // smoke no longer follows the draw time.
-    void StepSmoke(const float body[16], const float vel[3])
+    // One 120 Hz world update of the car's smoke: the car's effects block's
+    // decision when it ran this tick (CarSim::Effects, else null), then the
+    // emitters' clock (half a tick). Once called, the smoke no longer
+    // follows the draw time.
+    void StepSmoke(const CarSmokeState* state)
     {
-        smoke_.Update(body, vel);
+        if (state) smoke_.Apply(*state);
         smoke_.Advance(1.0f / 120.0f);
         smokeStepped_ = true;
     }

@@ -3513,6 +3513,8 @@ private:
         carContacts_.vehicleBottom = carShapes_.empty() ? 0.0f : VehicleBottom(carShapes_[0]);
         contactCount_ = 0;
         contactLog_ = 0;
+        smokeLog_ = 0;
+        tyreSmoke_[0] = tyreSmoke_[1] = false;
         // The slot's damage records (damage.h): the slot's sizes are twice
         // the bounding shape's half sizes (PDL z-up: x, z, y).
         carVehicle_ = v;
@@ -3726,10 +3728,24 @@ private:
             // section 70: run 9 replays exactly only so; before the tick a
             // change shows one 0.04 s step early).
             car_.SetControls(controls_, handbrake_);
-            // the end of the vehicle tick (0x516f20 -> 0x517b00): the
-            // exhaust emitters at the tips of the body as it is now, on only
-            // while the car is nearly still (smoke.h)
-            city_.StepSmoke(&carBody_.matrix[0][0], carBody_.vel);
+            // the car tick's effects block (every 1/60 s): the exhausts on
+            // while slower than 5 mph, the rear tyres' smoke while slipping
+            // (smoke.h)
+            {
+                CarSmokeState smoke;
+                const bool ran = car_.Effects(carBody_.vel, smoke);
+                city_.StepSmoke(ran ? &smoke : nullptr);
+                for (int k = 0; ran && k < 2; ++k)
+                    if (smoke.tyreOn[k] != tyreSmoke_[k]) {
+                        tyreSmoke_[k] = smoke.tyreOn[k];
+                        if (smokeLog_ < 40) {
+                            ++smokeLog_;
+                            Log("Tyre smoke: wheel %d %s (slip %.3f, alpha %.4f) at (%.2f %.2f %.2f); %d particles so far",
+                                k ? 3 : 1, smoke.tyreOn[k] ? "on" : "off", car_.slip, smoke.tyreAlpha[k],
+                                smoke.tyrePos[k][0], smoke.tyrePos[k][1], smoke.tyrePos[k][2], city_.SmokeSpawned());
+                        }
+                    }
+            }
             // The physics step's contacts (0x5a31f0, 0x5a0020), then the
             // integration (0x5a9880).
             const int touched = carContacts_.Step(carBody_, carShapes_, collision_, &loader_.City().ground);
@@ -3860,6 +3876,8 @@ private:
     int panelLog_ = 0, panelTicks_ = 0;
     long contactCount_ = 0;
     int contactLog_ = 0;
+    int smokeLog_ = 0;
+    bool tyreSmoke_[2] = {};
     bool carOn_ = false;
     double carClock_ = 0;
     CarDriver driver_;
