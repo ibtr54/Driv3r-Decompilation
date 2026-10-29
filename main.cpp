@@ -3569,6 +3569,7 @@ private:
         wheelPrev_ = wheelVis_;
         tyres_ = WheelTyres();
         for (float& x : wheelDamageSeen_) x = 0;
+        looseWheels_.clear();
         chase_.Init(&carBody_.matrix[0][0], carBody_.vel, &collision_, &loader_.City().ground);
         chase_.Matrix(1.0f, carCamera_);
         Log("Level 0x%02x: chase camera at (%.3f, %.3f, %.3f), looking along (%.4f, %.4f, %.4f)", mission,
@@ -3636,10 +3637,84 @@ private:
                         damage_.wheels[k].gone ? ", comes off" : "");
                 }
             }
+        if (damage_.wheelOff >= 0) SpawnLooseWheel(damage_.wheelOff);
         for (int k = 0; k < 6; ++k) {
             tyres_.gone[k] = damage_.wheels[k].gone ? 1 : 0;
             car_.wheelOff[k] = damage_.wheels[k].gone ? 1 : 0;
         }
+    }
+    // 0x506cd0 (BOOT_TO_MENU.md section 87, run 36): the wheel that came off
+    // becomes a free body of mass 10 and inertia 1 from its part's PDL entry,
+    // at the wheel's centre (the UPVH hardpoint: run 36 (-0.7539, -0.1774,
+    // 1.4416) for wheel 0) with gravity (accel -10) and
+    // the car's rotation; its velocity the car's at that point (v + w x the
+    // offset with the part along w removed) plus 2.5 along the car's x
+    // (wheels 2, 3, 5: +, the others -: 0x48aeb0); its spin the car's plus
+    // the car's x times the front (wheels 0, 2) or rear wheel speed
+    // (vtbl+0x58 / +0x54; run 36: 18.7213 in all three components).
+    void SpawnLooseWheel(int slot)
+    {
+        if (!carVehicle_) return;
+        int part = -1, nth = 0, wheel = -1;
+        for (size_t i = 0; i < carVehicle_->parts.size(); ++i) {
+            if (carVehicle_->parts[i].type != 2) continue;
+            if (nth < int(carWheels_.size()) && carWheels_[size_t(nth)].slot == slot) part = int(i), wheel = nth;
+            ++nth;
+        }
+        if (part < 0) return;
+        const VehicleWheel& wh = carWheels_[size_t(wheel)];
+        const bool plus = slot == 3 || slot == 5 || slot == 2;
+        const float local[3] = { wh.hardpoint[0], wh.hardpoint[1], wh.hardpoint[2] };  // the UPVH hardpoint
+        const float* M = &carBody_.matrix[0][0];
+        LooseWheel lw;
+        lw.wheel = wheel;
+        RigidBody& b = lw.body;
+        for (int k = 0; k < 3; ++k) b.pos[k] = ((local[0] * M[k] + local[1] * M[4 + k]) + local[2] * M[8 + k]) + M[12 + k];
+        b.pos[3] = 1.0f;
+        memcpy(b.q, carBody_.q, sizeof(b.q));
+        b.mass = 10.0f;
+        b.inertia[0] = b.inertia[1] = b.inertia[2] = 1.0f;
+        b.accel[1] = -10.0f;  // the world's gravity (+0xe0, as the loose panels)
+        b.state = 0x65;
+        b.UpdateDerived();
+        float v[3], W[3];
+        const float* w = carBody_.w;
+        float d[3] = { b.pos[0] - carBody_.pos[0], b.pos[1] - carBody_.pos[1], b.pos[2] - carBody_.pos[2] };
+        float cross[3] = {};
+        if (!((w[0] * w[0] + w[1] * w[1]) + w[2] * w[2] < 9.99999944e-11f)) {
+            const float inv = 1.0f / std::sqrt((w[0] * w[0] + w[1] * w[1]) + w[2] * w[2]);
+            const float n[3] = { inv * w[0], inv * w[1], inv * w[2] };
+            const float along = (d[0] * n[0] + d[1] * n[1]) + d[2] * n[2];
+            for (int k = 0; k < 3; ++k) d[k] = d[k] - n[k] * along;
+            cross[0] = w[1] * d[2] - w[2] * d[1];
+            cross[1] = w[2] * d[0] - w[0] * d[2];
+            cross[2] = w[0] * d[1] - w[1] * d[0];
+        }
+        const float push = plus ? 2.5f : -2.5f;
+        const float spin = (slot == 0 || slot == 2) ? car_.FrontWheelSpeed() : car_.RearWheelSpeed();
+        for (int k = 0; k < 3; ++k) {
+            v[k] = (carBody_.vel[k] + cross[k]) + M[k] * push;
+            W[k] = w[k] + M[k] * spin;
+        }
+        b.SetVelocity(v);
+        b.SetSpin(W);
+        b.UpdateMatrix();
+        // its shapes: the wheel part's PDL entry, centred on the wheel (one
+        // cylinder, radius 0.3393, half width 0.1201 for vehicle 6). The
+        // contacts take a moving cylinder as its bounding box (r, h, r), as
+        // contact.cpp does for static ones (the game's cylinder tests, e.g.
+        // 0x5b4380, are not ported): it slides rather than rolls.
+        lw.shapes = carVehicle_->parts[size_t(part)].collision;
+        for (VehicleData::Shape& s : lw.shapes)
+            if (s.type == 1) s.type = 0, s.size[2] = s.size[0];
+        // drawn as the wheel was, relative to its body from now on
+        float inv[16], drawn[16];
+        InverseRows(&b.matrix[0][0], false, inv);
+        MatMul4(&carLocal_[(carWheelPart0_ + size_t(wheel)) * 16], M, drawn);
+        MatMul4(drawn, inv, lw.drawRel);
+        looseWheels_.push_back(lw);
+        Log("Wheel %d came off: body at (%.3f %.3f %.3f), v (%.3f %.3f %.3f), spin (%.3f %.3f %.3f)", slot, b.pos[0],
+            b.pos[1], b.pos[2], b.vel[0], b.vel[1], b.vel[2], b.w[0], b.w[1], b.w[2]);
     }
     // The hinged parts' matrices and joint values for the damage's tests
     // (the record's body +0x10, the group list's +0x20).
@@ -3821,6 +3896,11 @@ private:
                         b.pos[2], std::sqrt(b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1] + b.vel[2] * b.vel[2]));
                 }
             }
+            // the loose wheels (0x506cd0): as the loose parts
+            for (LooseWheel& lw : looseWheels_) {
+                if (lw.body.state != 0x78) debrisContacts_.Step(lw.body, lw.shapes, collision_, &loader_.City().ground);
+                carContacts_.Pair(carBody_, carShapes_, lw.body, lw.shapes);
+            }
             // props broken by this step's contacts disappear (stage 1: no
             // debris yet, BOOT_TO_MENU.md section 81)
             for (int inst : props_.TakeBroken()) {
@@ -3839,6 +3919,11 @@ private:
                 if (b.state == 0x78) continue;
                 b.Integrate(1.0f / 120.0f);  // 0x5af710 (the debris' sleep test 0x5af3f0 is not ported)
                 b.UpdateMatrix();
+            }
+            for (LooseWheel& lw : looseWheels_) {
+                if (lw.body.state == 0x78) continue;
+                lw.body.Integrate(1.0f / 120.0f);
+                lw.body.UpdateMatrix();
             }
             if (carGroup_.Active()) {
                 // 0x5a9880: the group's solver moves the car and its parts
@@ -3890,6 +3975,13 @@ private:
         }
         for (size_t i = 0; i * 16 < carLocal_.size(); ++i)
             MatMul4(&carLocal_[i * 16], carDrawBody_, &carWorld_[i * 16]);
+        // a wheel that came off follows its loose body (0x506cd0)
+        for (const LooseWheel& lw : looseWheels_) {
+            const size_t part = carWheelPart0_ + size_t(lw.wheel);
+            if ((part + 1) * 16 > carWorld_.size()) continue;
+            MatMul4(lw.drawRel, &lw.body.matrix[0][0], &carWorld_[part * 16]);
+            if (part < carHidden_.size()) carHidden_[part] = 0;
+        }
         // the parts with a body of their own (hinged or torn off) follow it
         if (carVehicle_)
             for (size_t k = 0; k < damage_.records.size() && (k + 1) * 17 <= panelDraw_.size(); ++k) {
@@ -3939,6 +4031,16 @@ private:
     int damageLog_ = 0;
     CarGroup carGroup_;     // the car and its hinged parts (panels.h)
     BodyContacts debrisContacts_;  // the loose parts' contacts with the world
+    // The wheels that came off (0x506cd0): free bodies, their shapes about
+    // their centre, the wheel's draw matrix relative to the body.
+    struct LooseWheel
+    {
+        RigidBody body;
+        std::vector<VehicleData::Shape> shapes;
+        float drawRel[16] = {};
+        int wheel = -1;  // index into carWheels_
+    };
+    std::deque<LooseWheel> looseWheels_;
     Props props_;                  // the smashable props (props.h)
     int propLog_ = 0;
     std::vector<float> panelDraw_;  // per record: the part's draw matrix in its body (16), drawn so (1)

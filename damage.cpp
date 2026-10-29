@@ -367,6 +367,7 @@ void VehicleDamage::Impact(const VehicleData& v, const float car[16], float carM
 {
     const bool own = hitRecord < 0;
     lastPassed = false;
+    wheelOff = -1;
     // 0x5054b0: the hit's strength and direction
     const float inv = 1.0f / carMass;  // 0x487780
     const float dv[3] = { inv * J[0], inv * J[1], inv * J[2] };
@@ -396,7 +397,6 @@ void VehicleDamage::Impact(const VehicleData& v, const float car[16], float carM
     const float t = 1.0f - Abs(x);
     const float side = (1.0f - t * t * t) * x;
     // 0x504424: the wheel hit (the car's own contacts)
-    wheelOff = -1;
     if (own) WheelHit(L, s);  // s before the raise below (runs 15..25: all 12 hits bit-exact)
     // the direction in the car's frame (the inverse without its offset, w 1)
     float rot[16];
