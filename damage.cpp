@@ -109,11 +109,54 @@ void VehicleDamage::Init(const VehicleData& v, const float sz[3], const float ha
     reach = handling[0x8a];
     strength = handling[0x8b];
     crushScale = handling[0x25];
+    // the wheels: 0x5115c0's place (offset + hardpoint, w 1), part order
+    wheelScale = handling[0xbd];
+    for (Wheel& w : wheels) w = Wheel();
+    wheelPlaces.clear();
+    const float off = WheelOffset(handling, HandlingClass(v.id));
+    for (const VehicleWheel& w : v.wheels) {
+        if (w.slot < 0 || w.slot > 5) continue;
+        wheelPlaces.push_back({ w.slot, { 0.0f + w.hardpoint[0], off + w.hardpoint[1], 0.0f + w.hardpoint[2], 1.0f } });
+    }
+    wheelOff = -1;
+}
+
+// 0x507980: a hit of strength s at L (the car's frame, w 0) on the nearest
+// wheel (squared distance over the four components below 4); a hit below
+// 0.25 does nothing, above 1 counts 1; a wheel not gone and out of its
+// cool-down adds it and comes off at 1.5 (0x506cd0). Model 0x13's check of
+// [0x8ac3ac] vtbl+0x98 is not ported.
+void VehicleDamage::WheelHit(const float L[4], float s)
+{
+    float h = (((wheelScale * hitScale) * strength) * s) * 0.00999999978f;
+    if (1.0f < h) h = 1.0f;
+    else if (h < 0.25f) return;
+    float best = 4.0f;
+    int slot = -1;
+    for (const auto& wp : wheelPlaces) {
+        const float* p = wp.second.data();
+        const float d[4] = { p[0] - L[0], p[1] - L[1], p[2] - L[2], p[3] - L[3] };
+        const float q = ((d[3] * d[3] + d[2] * d[2]) + d[1] * d[1]) + d[0] * d[0];
+        if (q < best) best = q, slot = wp.first;
+    }
+    if (slot < 0) return;
+    Wheel& w = wheels[slot];
+    if (w.gone || !(w.cooldown <= 0)) return;
+    w.cooldown = 0.25f;
+    w.damage = h + w.damage;
+    if (1.5f <= w.damage) {
+        w.gone = true;  // 0x506cd0 (the loose wheel's body: section 87)
+        wheelOff = slot;
+    }
 }
 
 void VehicleDamage::Tick(const VehicleData& v, const float car[16], std::vector<DamageRequest>& out)
 {
-    // 0x4fbcc0
+    // 0x4fbcc0: the wheels' cool-downs (+0x17fc + 0xc k), then the records'
+    for (Wheel& w : wheels) {
+        const float c = w.cooldown - kInv120;
+        w.cooldown = c < 0 ? 0.0f : c;
+    }
     for (size_t k = 0; k < records.size(); ++k) {
         DamageRecord& r = records[k];
         if (r.cooldown != 0) {
@@ -352,6 +395,9 @@ void VehicleDamage::Impact(const VehicleData& v, const float car[16], float carM
     const float x = (L[0] / (size[0] * 0.5f) + 1.0f) * 0.5f;
     const float t = 1.0f - Abs(x);
     const float side = (1.0f - t * t * t) * x;
+    // 0x504424: the wheel hit (the car's own contacts)
+    wheelOff = -1;
+    if (own) WheelHit(L, s);  // s before the raise below (runs 15..25: all 12 hits bit-exact)
     // the direction in the car's frame (the inverse without its offset, w 1)
     float rot[16];
     memcpy(rot, carInv, sizeof(rot));

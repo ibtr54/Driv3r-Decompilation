@@ -117,6 +117,7 @@ void Read(const char* path)
 
 float F(uint32_t w) { float x; memcpy(&x, &w, 4); return x; }
 int g_renames = 0;  // surface renames checked
+int g_wheelHits = 0;  // wheel hits seen (game or port)
 uint32_t W(float x) { uint32_t w; memcpy(&w, &x, 4); return w; }
 
 std::vector<uint8_t> ReadAll(const char* path)
@@ -347,6 +348,13 @@ int main(int argc, char** argv)
         d.glass = ((S[0x1f64 / 4]) & 0xff) != 0;
         d.front[0] = F(S[0x540 / 4]); d.front[1] = F(S[0x544 / 4]);
         d.back[0] = F(S[0x548 / 4]); d.back[1] = F(S[0x54c / 4]);
+        // the wheels (slot +0x17f8 + 0xc k: damage, cool-down, burst / gone)
+        for (int k = 0; k < 6; ++k) {
+            d.wheels[k].damage = F(S[(0x17f8 + 0xc * k) / 4]);
+            d.wheels[k].cooldown = F(S[(0x17fc + 0xc * k) / 4]);
+            d.wheels[k].burst = (S[(0x1800 + 0xc * k) / 4] & 0xff) != 0;
+            d.wheels[k].gone = ((S[(0x1800 + 0xc * k) / 4] >> 8) & 0xff) != 0;
+        }
         // the hinged parts' bodies: their last dump up to this call's entry
         // (this call's own "DEb2" when the panel is the other body)
         const long entry = g_dumps["DEs"][n].order;
@@ -477,6 +485,17 @@ int main(int argc, char** argv)
         Check("slot +54c", n, -1, W(d.back[1]), X[0x54c / 4]);
         Check("slot +1f78", n, -1, W(d.total), X[0x1f78 / 4]);
         Check("slot +1f64", n, -1, d.glass ? 1u : 0u, X[0x1f64 / 4] & 0xff);
+        for (int k = 0; k < 6; ++k) {
+            const bool hit = F(X[(0x17f8 + 0xc * k) / 4]) != F(S[(0x17f8 + 0xc * k) / 4]);
+            if (hit || d.wheels[k].damage != F(S[(0x17f8 + 0xc * k) / 4])) {
+                ++g_wheelHits;
+                printf("  call %u wheel %d: damage game %.6f port %.6f\n", n, k, F(X[(0x17f8 + 0xc * k) / 4]),
+                       d.wheels[k].damage);
+            }
+            Check("wheel damage", n, k, W(d.wheels[k].damage), X[(0x17f8 + 0xc * k) / 4]);
+            Check("wheel cool-down", n, k, W(d.wheels[k].cooldown), X[(0x17fc + 0xc * k) / 4]);
+            Check("wheel gone", n, k, d.wheels[k].gone ? 1u : 0u, (X[(0x1800 + 0xc * k) / 4] >> 8) & 0xff);
+        }
         same = g_bad == before;
         if (same) ++equal;
     }

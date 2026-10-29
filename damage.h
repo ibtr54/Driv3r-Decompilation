@@ -38,12 +38,15 @@
 // front)) / 2, the centre moved by (back - front) / 2 along the game's z
 // (front = (+0x544 + +0x540) / 2 x scale, back likewise): the car's own
 // box gives in where it was hit.
-// Not ported: the wheel hits 0x507980 (burst tyres), the explosion contacts
+// The wheel hits 0x507980 (section 87): s before the raise above, on the
+// nearest wheel; a wheel comes off at 1.5 (Wheel, WheelHit).
+// Not ported: the loose wheel's body (0x506cd0), the explosion contacts
 // (contact +0xf8 bit 0), the effects and sounds (0x5063f0, 0x50b100, sparks
 // 0x567840.., the scrape 0x56ff10), the visual dents 0x4f5890 (vertex
 // deformation).
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -114,6 +117,25 @@ public:
 
     std::vector<DamageRecord> records;
     std::vector<int> recordPart;  // slot +0x480: the part of each record
+    // The wheels (slot +0x17f8 + 0xc x slot, BOOT_TO_MENU.md section 87):
+    // the hits 0x507980 add up, a cool-down of 0.25 s between them (less
+    // 1/120 a pre-tick, 0x4fbcc0); at 1.5 the wheel comes off (0x506cd0
+    // sets gone). burst is set only by the spawn description (0x4fb3e0).
+    struct Wheel
+    {
+        float damage = 0;    // +0x17f8
+        float cooldown = 0;  // +0x17fc
+        bool burst = false;  // +0x1800
+        bool gone = false;   // +0x1801
+    };
+    Wheel wheels[6];
+    // 0x5115c0: each wheel slot's place in the car (offset +0x92c +
+    // hardpoint +0x89c, w 1), in part order (the slot's list +0x470); the
+    // scale [+0x490] +0x2f4 (handling [0xbd]).
+    std::vector<std::pair<int, std::array<float, 4>>> wheelPlaces;
+    float wheelScale = 0;
+    int wheelOff = -1;  // the wheel the last Impact knocked off (-1: none)
+    void WheelHit(const float L[4], float s);  // 0x507980
     float size[3] = {};           // +0x4a0..+0x4a8
     float reach = 1, strength = 1, crushScale = 0.25f;  // [+0x490] +0x228 / +0x22c / +0x94
     float hitScale = 1;           // +0x1888 (1 in the traces)

@@ -3568,6 +3568,7 @@ private:
         wheelVis_.Update(car_);  // the slot's set-up (0x4fadc0 / 0x4fba70 run 0x503e00 too)
         wheelPrev_ = wheelVis_;
         tyres_ = WheelTyres();
+        for (float& x : wheelDamageSeen_) x = 0;
         chase_.Init(&carBody_.matrix[0][0], carBody_.vel, &collision_, &loader_.City().ground);
         chase_.Matrix(1.0f, carCamera_);
         Log("Level 0x%02x: chase camera at (%.3f, %.3f, %.3f), looking along (%.4f, %.4f, %.4f)", mission,
@@ -3623,6 +3624,22 @@ private:
                 damage_.lastSide, damage_.total, damage_.front[0], damage_.front[1], damage_.back[0], damage_.back[1]);
         }
         for (const DamageRequest& q : req) DamageState(q);
+        // the wheel hits (0x507980): a wheel at 1.5 comes off; the slot's
+        // gone byte hides it (0x4fd7f0) and the car's tick takes the wheel
+        // as off (vtbl+0x7c, flag 0x80)
+        for (int k = 0; k < 6; ++k)
+            if (damage_.wheels[k].damage != wheelDamageSeen_[k]) {
+                wheelDamageSeen_[k] = damage_.wheels[k].damage;
+                if (damageLog_ < 60) {
+                    ++damageLog_;
+                    Log("Wheel hit: wheel %d damage %.4f%s", k, damage_.wheels[k].damage,
+                        damage_.wheels[k].gone ? ", comes off" : "");
+                }
+            }
+        for (int k = 0; k < 6; ++k) {
+            tyres_.gone[k] = damage_.wheels[k].gone ? 1 : 0;
+            car_.wheelOff[k] = damage_.wheels[k].gone ? 1 : 0;
+        }
     }
     // The hinged parts' matrices and joint values for the damage's tests
     // (the record's body +0x10, the group list's +0x20).
@@ -3943,7 +3960,8 @@ private:
     bool handbrake_ = false;
     std::vector<float> carLocal_, carWorld_;  // the parts relative to the body, and in the world
     WheelVisuals wheelVis_, wheelPrev_;       // the slot's wheel block (slot+0x554) and the previous (+0x578)
-    WheelTyres tyres_;                        // slot+0x1800: burst / gone (kept clear: no damage)
+    WheelTyres tyres_;                        // slot+0x1800: burst / gone (gone from the wheel hits)
+    float wheelDamageSeen_[6] = {};           // the last logged wheel damage
     std::vector<uint8_t> carHidden_;          // per part, for SetVehiclePose
     float carDrawBody_[16] = {};              // the body's World for the draw (BlendBodyMatrix)
     ChaseCamera chase_;                       // the player's chase camera (camera.h)
