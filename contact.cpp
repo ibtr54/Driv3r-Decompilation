@@ -1097,6 +1097,99 @@ bool BoxCylinderContact(const float sizeA[3], const float* worldA, float radius,
     return BoxCylinder(a, worldA, radius, halfHeight, worldB, c);
 }
 
+// 0x407640 (eax e, ecx c): c x e.
+static void CrossCE(const float e[3], const float c[3], float out[3])
+{
+    const float x = e[2] * c[1] - e[1] * c[2];
+    const float y = e[0] * c[2] - e[2] * c[0];
+    const float z = e[1] * c[0] - e[0] * c[1];
+    out[0] = x; out[1] = y; out[2] = z;
+}
+
+void CylinderGroundPoints(float r, float h, const float* m, float probe[8][3], float low[8])
+{
+    const float* r0 = m;
+    const float* a = m + 4;
+    const float* r2 = m + 8;
+    const float* pos = m + 12;
+    float up = a[1] - 1.0f;
+    if (!(up > 0.0f)) up = -up;
+    if (up < 9.99999975e-06f) {
+        // 0x5b2a20: standing up: the top rim's eight points, the depth from
+        // the bottom rim's (y - 2h)
+        float X[3], Z[3], s[3], D1[3], D2[3];
+        for (int k = 0; k < 3; ++k) X[k] = r * r0[k], Z[k] = r * r2[k];
+        for (int k = 0; k < 3; ++k) s[k] = Z[k] + X[k];
+        Normalize(s, D1);
+        for (float& v : D1) v = r * v;
+        for (int k = 0; k < 3; ++k) s[k] = Z[k] - X[k];
+        Normalize(s, D2);
+        for (float& v : D2) v = r * v;
+        const float top = pos[1] + h;
+        const float* d[4] = { X, Z, D1, D2 };
+        for (int i = 0; i < 4; ++i) {
+            float* p = probe[2 * i];
+            float* q = probe[2 * i + 1];
+            p[0] = d[i][0] + pos[0]; p[1] = d[i][1] + top; p[2] = pos[2] + d[i][2];
+            q[0] = pos[0] - d[i][0]; q[1] = top - d[i][1]; q[2] = pos[2] - d[i][2];
+        }
+        const float twoH = h + h;
+        for (int i = 0; i < 8; ++i) low[i] = probe[i][1] - twoH;
+        return;
+    }
+    // 0x5b1f00: L the lower end's centre, U the upper one's
+    float A[3], L[3], U[3];
+    for (int k = 0; k < 3; ++k) A[k] = h * a[k];
+    for (int k = 0; k < 3; ++k) {
+        const float top = A[k] + pos[k], bot = pos[k] - A[k];
+        L[k] = a[1] > 0.0f ? bot : top;
+        U[k] = a[1] > 0.0f ? top : bot;
+    }
+    float ay = a[1];
+    if (!(ay > 0.0f)) ay = -ay;
+    if (ay > 0.899999976f) {
+        // steep: the lower rim's eight points (0, 90, 45 and 135 degrees)
+        float X[3], Z[3], s[3], D1[3], D2[3];
+        for (int k = 0; k < 3; ++k) X[k] = r * r0[k], Z[k] = r * r2[k];
+        for (int k = 0; k < 3; ++k) s[k] = Z[k] + X[k];
+        Normalize(s, D1);
+        for (float& v : D1) v = r * v;
+        for (int k = 0; k < 3; ++k) s[k] = Z[k] - X[k];
+        Normalize(s, D2);
+        for (float& v : D2) v = r * v;
+        for (int k = 0; k < 3; ++k) {
+            probe[0][k] = L[k] + X[k];
+            probe[1][k] = L[k] - X[k];
+            probe[2][k] = L[k] + Z[k];
+            probe[3][k] = L[k] - Z[k];
+            probe[4][k] = D1[k] + L[k];
+            probe[5][k] = L[k] - D1[k];
+            probe[6][k] = D2[k] + L[k];
+            probe[7][k] = L[k] - D2[k];
+        }
+    } else {
+        // lying: both rims at +-P (level, across the axis) and +-Q (P x
+        // the axis, the side facing up and down)
+        const float Y[3] = { 0.0f, 1.0f, 0.0f };
+        float P[3], Q[3];
+        CrossCE(Y, a, P);
+        CrossCE(P, a, Q);
+        for (float& v : P) v = r * v;
+        for (float& v : Q) v = r * v;
+        for (int k = 0; k < 3; ++k) {
+            probe[0][k] = L[k] + P[k];
+            probe[1][k] = L[k] - P[k];
+            probe[2][k] = L[k] + Q[k];
+            probe[3][k] = L[k] - Q[k];
+            probe[4][k] = U[k] + P[k];
+            probe[5][k] = U[k] - P[k];
+            probe[6][k] = U[k] + Q[k];
+            probe[7][k] = U[k] - Q[k];
+        }
+    }
+    for (int i = 0; i < 8; ++i) low[i] = probe[i][1];
+}
+
 int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& shapes, const CollisionWorld& world,
                        const CityGround* groundData)
 {
@@ -1163,38 +1256,50 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
         }
         bodyWorld = &body.matrix[0][0];
     }
-    // 0x5a9b80 -> 0x5b36f0: the ground under the boxes' corners (a cylinder's
-    // own ground test is not ported: its bounding box's corners).
+    // 0x5a9b80 -> 0x5b36f0 -> 0x5b3570: the ground under eight points of
+    // each shape (a box's corners 0x5b2960; a cylinder's rim points 0x5b3010,
+    // CylinderGroundPoints), the deepest one below. The contact takes the
+    // surface of the last shape tested once one was found (0x5b3570 stamps
+    // the best record with every shape that returns 5).
     if (groundData) {
         BodyContact g;
         bool found = false;
         for (size_t s = first; s < shapes.size(); ++s) {
-            float sw[16], sh[3];
+            float sw[16];
             shapeWorld(s, sw);
-            BoundingHalf(shapes[s], sh);
-            Box b;
-            MakeBox(sh, sw, b);
+            float probe[8][3], low[8];
+            if (shapes[s].type == 1) {
+                CylinderGroundPoints(shapes[s].size[0], shapes[s].size[1], sw, probe, low);
+            } else {
+                float sh[3];
+                BoundingHalf(shapes[s], sh);
+                Box b;
+                MakeBox(sh, sw, b);
+                for (int k = 0; k < 8; ++k) {
+                    for (int m = 0; m < 3; ++m)
+                        probe[k][m] = b.c[m] + ((k & 1) ? b.sa[0][m] : -b.sa[0][m]) +
+                                      ((k & 2) ? b.sa[1][m] : -b.sa[1][m]) + ((k & 4) ? b.sa[2][m] : -b.sa[2][m]);
+                    low[k] = probe[k][1];
+                }
+            }
             for (int k = 0; k < 8; ++k) {
-                float p[3];
-                for (int m = 0; m < 3; ++m)
-                    p[m] = b.c[m] + ((k & 1) ? b.sa[0][m] : -b.sa[0][m]) + ((k & 2) ? b.sa[1][m] : -b.sa[1][m]) +
-                           ((k & 4) ? b.sa[2][m] : -b.sa[2][m]);
+                const float* p = probe[k];
                 float h, n[3];
                 int surf = 0;
                 if (!groundData->Probe(p[0], p[1], p[2], h, n, &surf)) continue;
-                const float depth = h - p[1];
+                const float depth = h - low[k];
                 if (depth > (found ? g.depth : 0.0f)) {
                     const float l = std::sqrt(Dot(n, n));
                     if (!(l > 0)) continue;
                     found = true;
                     g.depth = depth;
                     for (int m = 0; m < 3; ++m) g.normal[m] = n[m] / l;
-                    g.pointA[0] = p[0]; g.pointA[1] = p[1]; g.pointA[2] = p[2];
+                    g.pointA[0] = p[0]; g.pointA[1] = low[k]; g.pointA[2] = p[2];
                     g.pointB[0] = p[0]; g.pointB[1] = h; g.pointB[2] = p[2];
-                    g.surfaceA = shapes[s].surface;
                     g.surfaceB = surf;
                 }
             }
+            if (found) g.surfaceA = shapes[s].surface;
         }
         if (found && g.depth > 9.99999975e-06f) {
             if (g.depth > deepest) deepest = g.depth;

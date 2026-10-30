@@ -9,8 +9,9 @@
 //     the separating axes of 0x5b9340, box / cylinder 0x5b4380 with those of
 //     0x5b49b0, box / sphere 0x5b71e0; the other order with the sides
 //     swapped);
-//   - the ground (0x5a9b80 -> 0x5b36f0): the box's eight corners probed in
-//     the GRTD heights, the deepest one below;
+//   - the ground (0x5a9b80 -> 0x5b36f0): eight points of each shape probed
+//     in the GRTD heights (a box's corners, a cylinder's rim points
+//     0x5b3010), the deepest one below;
 //   - response (0x5a9af0 -> 0x5a99d0 -> 0x5c5260): the surfaces' values
 //     (0x59b090), an impulse in the contact frame (0x5c2bc0, 0x5c3110) with
 //     restitution and the friction cone (0x5c49c0), then the depth pushed
@@ -21,8 +22,8 @@
 // contact's axes as columns, the point in the frame; BOOT_TO_MENU.md
 // section 76). Body / body: the car against a loose panel (Pair).
 // Not ported: cylinder / cylinder (0x5b9f00) and cylinder / sphere (0x5b7cf0)
-// (a cylinder is taken as its bounding box there), a cylinder's own ground
-// test (its bounding box's corners), body / body pairs other than the car's with
+// (a cylinder is taken as its bounding box there), the ground's bounding
+// pre-tests (0x5b3620, 0x5b28e0), body / body pairs other than the car's with
 // its loose parts, the push-out of a jointed group member (0x5ae5b0's
 // chain; hinged panels have no contacts), the smashable props: the contact
 // callback drops a contact with a placed object whose GEBI record breaks
@@ -62,6 +63,15 @@ bool BoxBoxContact(const float sizeA[3], const float* worldA, const float sizeB[
 // matrix; 0x5b4380). The normal points from the cylinder to the box.
 bool BoxCylinderContact(const float sizeA[3], const float* worldA, float radius, float halfHeight,
                         const float* worldB, BodyContact& c);
+
+// The points a cylinder (radius r, half height h, world matrix m: axis row
+// 1, centre row 3) asks the ground at (0x5b3010), and the heights its
+// depths are measured from: standing exactly up (|a.y - 1| < 1e-5,
+// 0x5b2a20) the top rim at 0, 90, 45 and 135 degrees and their opposites,
+// the depth from 2h lower; steep (|a.y| > 0.9, 0x5b1f00) the lower rim's
+// eight points; else both rims at +-P and +-Q (P = a x (0, 1, 0), Q = a x
+// P, times r).
+void CylinderGroundPoints(float r, float h, const float* m, float probe[8][3], float low[8]);
 
 // The vehicle's surface rename (0x4e9160, the world's contact callback
 // +0x204 before the impulse; BOOT_TO_MENU.md section 77): a side of the

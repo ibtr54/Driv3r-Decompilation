@@ -3545,7 +3545,7 @@ private:
         carGroup_.hinged = 0;
         carGroup_.torn.clear();
         panelDraw_.assign(damage_.records.size() * 17, 0.0f);
-        debrisLog_ = 0;
+        debrisLog_ = wheelLog_ = 0;
         panelLog_ = panelTicks_ = 0;
         carContacts_.onImpulse = [this](const BodyContact& c, const float J[3]) { CarImpact(c, J); };
         Log("Level 0x%02x: vehicle %d: %zu collision shapes (PDL entry of the part of type 4)", mission, id,
@@ -3921,6 +3921,14 @@ private:
                 if (lw.body.state == 0x78) continue;
                 lw.body.Integrate(1.0f / 120.0f);
                 lw.body.UpdateMatrix();
+                if (wheelLog_ < 20 && (++lw.ticks % 120) == 0) {
+                    ++wheelLog_;
+                    const RigidBody& b = lw.body;
+                    // the axle: the cylinder's axis, the body's x row
+                    Log("Loose wheel %d: at (%.3f %.3f %.3f), axle y %.3f, speed %.2f", lw.wheel, b.pos[0], b.pos[1],
+                        b.pos[2], b.matrix[0][1],
+                        std::sqrt(b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1] + b.vel[2] * b.vel[2]));
+                }
             }
             if (carGroup_.Active()) {
                 // 0x5a9880: the group's solver moves the car and its parts
@@ -4036,12 +4044,13 @@ private:
         std::vector<VehicleData::Shape> shapes;
         float drawRel[16] = {};
         int wheel = -1;  // index into carWheels_
+        int ticks = 0;   // steps since it came off (the log)
     };
     std::deque<LooseWheel> looseWheels_;
     Props props_;                  // the smashable props (props.h)
     int propLog_ = 0;
     std::vector<float> panelDraw_;  // per record: the part's draw matrix in its body (16), drawn so (1)
-    int debrisLog_ = 0;
+    int debrisLog_ = 0, wheelLog_ = 0;
     int panelLog_ = 0, panelTicks_ = 0;
     long contactCount_ = 0;
     int contactLog_ = 0;
