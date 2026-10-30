@@ -5,10 +5,11 @@
 // matrix +0x10, type byte +0x50, surface +0x51, bit 31 of +0x50 = off) and
 // the game's result (point A +0x00, point B +0x10, normal +0x20, depth
 // +0x30, contact +0x34, surfaces +0x40 / +0x44; the points relative to the
-// sides' positions). The port's box / box test (contact.h BoxBoxContact)
-// runs on the same shapes in the game's own space, the pairs as 0x5a3730
-// picks them (bounding shapes first, then every shape but the bounds, the
-// deepest kept).
+// sides' positions). The port's box / box and box / cylinder tests
+// (contact.h BoxBoxContact, BoxCylinderContact; 0x5a3ba0 swaps the sides of
+// a cylinder / box pair) run on the same shapes in the game's own space, the
+// pairs as 0x5a3730 picks them (bounding shapes first, then every shape but
+// the bounds, the deepest kept).
 //
 //   narrowreplay <phys.txt>
 #include <cmath>
@@ -17,6 +18,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../articulated.h"
@@ -64,6 +66,22 @@ struct Shape
     bool off;
 };
 
+// 0x5a3ba0 for boxes and cylinders (type 0 / 1; false for spheres).
+bool PairContact(const Shape& a, const float* wa, const Shape& b, const float* wb, BodyContact& k)
+{
+    if (a.type == 0 && b.type == 0) return BoxBoxContact(a.size, wa, b.size, wb, k);
+    if (a.type == 0 && b.type == 1) return BoxCylinderContact(a.size, wa, b.size[0], b.size[1], wb, k);
+    if (a.type == 1 && b.type == 0) {
+        if (!BoxCylinderContact(b.size, wb, a.size[0], a.size[1], wa, k)) return false;
+        for (int i = 0; i < 3; ++i) {
+            k.normal[i] = -k.normal[i];
+            std::swap(k.pointA[i], k.pointB[i]);
+        }
+        return true;
+    }
+    return false;
+}
+
 std::vector<Shape> Shapes(const std::vector<uint32_t>& h)
 {
     std::vector<Shape> out;
@@ -85,7 +103,7 @@ int main(int argc, char** argv)
 {
     if (argc < 2) { printf("narrowreplay <phys.txt>\n"); return 1; }
     Read(argv[1]);
-    int tested = 0, equal = 0, close = 0, skipped = 0, shown = 0;
+    int tested = 0, equal = 0, close = 0, skipped = 0, shown = 0, withCyl = 0, cylEqual = 0;
     float worst = 0;
     for (const auto& np : g_np) {
         const unsigned n = np.first;
@@ -96,8 +114,8 @@ int main(int argc, char** argv)
         if (r[0x34 / 4] == 0) continue;  // no contact (the fields are stale then)
         const std::vector<Shape> sa = Shapes(g_dumps["NPah"][n]), sb = Shapes(g_dumps["NPbh"][n]);
         bool boxes = !sa.empty() && !sb.empty();
-        for (const Shape& s : sa) boxes = boxes && s.type == 0;
-        for (const Shape& s : sb) boxes = boxes && s.type == 0;
+        for (const Shape& s : sa) boxes = boxes && s.type <= 1;
+        for (const Shape& s : sb) boxes = boxes && s.type <= 1;
         if (!boxes) { ++skipped; continue; }
         float ma[16], mb[16];
         for (int k = 0; k < 16; ++k) { ma[k] = F(a[4 + k]); mb[k] = F(b[4 + k]); }
@@ -116,11 +134,13 @@ int main(int argc, char** argv)
                 float wb[16];
                 Articulated::MatMul(sb[j].local, mb, wb);
                 BodyContact k;
-                if (!BoxBoxContact(sa[i].size, wa, sb[j].size, wb, k)) continue;
+                if (!PairContact(sa[i], wa, sb[j], wb, k)) continue;
                 if (!found || best.depth < k.depth) { best = k; found = true; bi = i; bj = j; }
             }
         }
         ++tested;
+        const bool cyl = found && (sa[bi].type == 1 || sb[bj].type == 1);  // the kept pair
+        if (cyl) ++withCyl;
         float traced[3][3];
         for (int k = 0; k < 3; ++k) {
             traced[0][k] = F(r[k]) + pa[k];
@@ -139,7 +159,7 @@ int main(int argc, char** argv)
             diff = std::fmax(diff, std::fabs(best.normal[k] - traced[2][k]));
         }
         worst = std::fmax(worst, diff);
-        if (diff == 0) ++equal;
+        if (diff == 0) ++equal, cylEqual += cyl;
         else if (diff < 1e-4f) ++close;
         if (diff >= 1e-4f && shown++ < 20)
             printf("NP %u: shapes %zu / %zu, depth %.5f (trace %.5f), normal (%.4f %.4f %.4f) trace (%.4f %.4f %.4f),\n"
@@ -148,7 +168,8 @@ int main(int argc, char** argv)
                    traced[2][2], best.pointA[0], best.pointA[1], best.pointA[2], traced[0][0], traced[0][1], traced[0][2],
                    best.pointB[0], best.pointB[1], best.pointB[2], traced[1][0], traced[1][1], traced[1][2]);
     }
-    printf("%d box pairs with a contact: %d equal, %d within 1e-4, worst difference %g (%d pairs with other shapes skipped)\n",
-           tested, equal, close, worst, skipped);
+    printf("%d box / cylinder pairs with a contact (%d kept a box / cylinder pair, %d of them equal): %d equal, %d within 1e-4, "
+           "worst difference %g (%d pairs with spheres skipped)\n",
+           tested, withCyl, cylEqual, equal, close, worst, skipped);
     return 0;
 }

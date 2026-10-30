@@ -116,11 +116,9 @@ int main(int argc, char** argv)
     if (part < 0) return 1;
     // the UPVH hardpoint is the wheel's centre (run 36: (-0.7539, -0.1774, 1.4416))
     const float local[3] = { wh->hardpoint[0], wh->hardpoint[1], wh->hardpoint[2] };
-    std::vector<VehicleData::Shape> shapes = v->parts[size_t(part)].collision;
-    // centred on the wheel already; a cylinder as its bounding box (as
-    // SpawnLooseWheel)
-    for (VehicleData::Shape& s : shapes)
-        if (s.type == 1) s.type = 0, s.size[2] = s.size[0];
+    // centred on the wheel already (as SpawnLooseWheel; a cylinder: box /
+    // cylinder for the city's boxes, its bounding box for the ground)
+    const std::vector<VehicleData::Shape> shapes = v->parts[size_t(part)].collision;
     printf("wheel part %d: %zu shapes, centre in the car (%.4f %.4f %.4f)\n", part, shapes.size(), local[0], local[1],
            local[2]);
     for (const VehicleData::Shape& s : shapes)

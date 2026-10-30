@@ -6,7 +6,9 @@
 //   - narrow phase (0x5a3730): the bounding shapes first (shape 0 of each
 //     side; no contact there: none at all), then every shape pair but the
 //     bounds, keeping the deepest contact (0x5a3ba0: box / box 0x5b8df0 with
-//     the separating axes of 0x5b9340, box / sphere 0x5b71e0);
+//     the separating axes of 0x5b9340, box / cylinder 0x5b4380 with those of
+//     0x5b49b0, box / sphere 0x5b71e0; the other order with the sides
+//     swapped);
 //   - the ground (0x5a9b80 -> 0x5b36f0): the box's eight corners probed in
 //     the GRTD heights, the deepest one below;
 //   - response (0x5a9af0 -> 0x5a99d0 -> 0x5c5260): the surfaces' values
@@ -18,8 +20,9 @@
 // articulated.h) answers through the group (0x5c3110 -> 0x5c67c0: the
 // contact's axes as columns, the point in the frame; BOOT_TO_MENU.md
 // section 76). Body / body: the car against a loose panel (Pair).
-// Not ported: box / cylinder (0x5b4380 and its helpers; a cylinder is taken
-// as its bounding box here), body / body pairs other than the car's with
+// Not ported: cylinder / cylinder (0x5b9f00) and cylinder / sphere (0x5b7cf0)
+// (a cylinder is taken as its bounding box there), a cylinder's own ground
+// test (its bounding box's corners), body / body pairs other than the car's with
 // its loose parts, the push-out of a jointed group member (0x5ae5b0's
 // chain; hinged panels have no contacts), the smashable props: the contact
 // callback drops a contact with a placed object whose GEBI record breaks
@@ -54,6 +57,11 @@ class Props;
 
 // Box A against box B (half sizes, world matrices; 0x5b8df0 / 0x5b9340).
 bool BoxBoxContact(const float sizeA[3], const float* worldA, const float sizeB[3], const float* worldB, BodyContact& c);
+
+// Box A against cylinder B (radius, half height; its axis is row 1 of its
+// matrix; 0x5b4380). The normal points from the cylinder to the box.
+bool BoxCylinderContact(const float sizeA[3], const float* worldA, float radius, float halfHeight,
+                        const float* worldB, BodyContact& c);
 
 // The vehicle's surface rename (0x4e9160, the world's contact callback
 // +0x204 before the impulse; BOOT_TO_MENU.md section 77): a side of the

@@ -3700,13 +3700,10 @@ private:
         b.SetSpin(W);
         b.UpdateMatrix();
         // its shapes: the wheel part's PDL entry, centred on the wheel (one
-        // cylinder, radius 0.3393, half width 0.1201 for vehicle 6). The
-        // contacts take a moving cylinder as its bounding box (r, h, r), as
-        // contact.cpp does for static ones (the game's cylinder tests, e.g.
-        // 0x5b4380, are not ported): it slides rather than rolls.
+        // cylinder, radius 0.3393, half width 0.1201 for vehicle 6), met by
+        // boxes through box / cylinder 0x5b4380 (contact.cpp; the ground and
+        // other cylinders still see its bounding box)
         lw.shapes = carVehicle_->parts[size_t(part)].collision;
-        for (VehicleData::Shape& s : lw.shapes)
-            if (s.type == 1) s.type = 0, s.size[2] = s.size[0];
         // drawn as the wheel was, relative to its body from now on
         float inv[16], drawn[16];
         InverseRows(&b.matrix[0][0], false, inv);

@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <utility>
 
 namespace {
 
@@ -78,6 +79,7 @@ struct Sat
     float a0[3] = {}, a1[3] = {}, b0[3] = {}, b1[3] = {};
     float best = 1000000.0f;
     bool found = false, edge = false;
+    bool local = false;  // +0x7c: in the cylinder's frame (box / cylinder)
 };
 
 // 0x5b9500: face i of box F against box O; sign +1 for A's faces (F = A),
@@ -170,6 +172,9 @@ bool EdgeAxis(const Box& A, const Box& B, int i, int j, Sat& r)
     return true;
 }
 
+// The dot product as 0x5b8ab0 sums it: (z + y) + x.
+float DotZYX(const float a[3], const float b[3]) { return (a[2] * b[2] + a[1] * b[1]) + a[0] * b[0]; }
+
 // 0x5b8ab0: the closest points of the two edges into out (and their
 // distance as the depth); false when they are parallel or meet outside.
 bool EdgeClosest(const Sat& t, Sat& out)
@@ -180,14 +185,14 @@ bool EdgeClosest(const Sat& t, Sat& out)
         v[k] = t.b1[k] - t.b0[k];
         u[k] = t.a1[k] - t.a0[k];
     }
-    const float vv = Dot(v, v);
+    const float vv = DotZYX(v, v);
     if (!(vv >= 9.99999944e-11f)) return false;
-    const float uu = Dot(u, u);
+    const float uu = DotZYX(u, u);
     if (!(uu >= 9.99999944e-11f)) return false;
-    const float vw = Dot(v, w), uv = Dot(u, v);
+    const float vw = DotZYX(v, w), uv = DotZYX(u, v);
     const float den = uu * vv - uv * uv;
     if (!(std::fabs(den) >= 9.99999975e-06f)) return false;
-    const float s = (uv * vw - Dot(u, w) * vv) / den;
+    const float s = (uv * vw - DotZYX(u, w) * vv) / den;
     const float tt = (s * uv + vw) / vv;
     if (!(s >= 0 && s <= 1 && tt >= 0 && tt <= 1)) return false;
     float d[3];
@@ -196,7 +201,7 @@ bool EdgeClosest(const Sat& t, Sat& out)
         out.p1[k] = t.b0[k] + v[k] * tt;
         d[k] = out.p0[k] - out.p1[k];
     }
-    out.best = std::sqrt(Dot(d, d));
+    out.best = std::sqrt(DotZYX(d, d));
     return true;
 }
 
@@ -280,19 +285,408 @@ bool BoxSphere(const Box& A, float radius, const float ctr[3], BodyContact& c)
     return true;
 }
 
-// 0x5a3ba0 for a box of the body against a static shape (a cylinder is
-// taken as its bounding box: box / cylinder 0x5b4380 is not ported).
-bool ShapePair(const float sizeA[3], const float* worldA, const CollisionWorld::Shape& B, BodyContact& c)
+// 0x41e990: v times 1 / sqrt((x x + y y) + z z).
+void Normalize(const float v[3], float out[3])
 {
-    Box a;
-    MakeBox(sizeA, worldA, a);
-    if (B.type == 2) return BoxSphere(a, B.size[0], B.world + 12, c);
-    float size[3] = { B.size[0], B.size[1], B.size[2] };
-    if (B.type == 1) size[2] = size[0];
-    if (B.type > 2) return false;
-    Box b;
-    MakeBox(size, B.world, b);
-    return BoxBox(a, b, c);
+    const float inv = 1.0f / std::sqrt((v[0] * v[0] + v[1] * v[1]) + v[2] * v[2]);
+    const float x = inv * v[0], y = inv * v[1], z = inv * v[2];
+    out[0] = x; out[1] = y; out[2] = z;
+}
+
+// The cylinder as 0x5b4380 builds it: its axis (matrix row 1), centre
+// (row 3), the axis times the half height, radius +0x30, half height +0x34.
+struct Cyl
+{
+    float axis[3], c[3], ah[3], r, h;
+};
+
+const float kCylEps = 9.99999975e-06f;   // [0x78e9b0]
+const float kCrossEps = 9.99999944e-11f; // [0x78eb28]
+
+// The separating-axis tests of 0x5b49b0 write R.local (+0x7c) when their
+// points and normal are in the cylinder's frame (L: the box's matrix in that
+// frame, 0x5b4120); the box face tests work in the world.
+
+// 0x5b4b60: face i of box B. The face normal against the cylinder: its
+// segment end and its rim point furthest along the normal.
+bool CylFaceAxis(const Box& B, const Cyl& C, int i, Sat& r)
+{
+    float n[3] = { B.axis[i][0], B.axis[i][1], B.axis[i][2] };
+    const float d[3] = { C.c[0] - B.c[0], C.c[1] - B.c[1], C.c[2] - B.c[2] };
+    float s = (d[2] * n[2] + d[1] * n[1]) + d[0] * n[0];
+    if (s < 0) {
+        for (float& v : n) v = -v;
+    } else {
+        s = -s;
+    }
+    s += B.half[i];
+    float q[3] = { C.c[0], C.c[1], C.c[2] };
+    const float t = (n[2] * C.ah[2] + n[1] * C.ah[1]) + n[0] * C.ah[0];
+    if (t < 0) {
+        s = s - t;
+        for (int k = 0; k < 3; ++k) q[k] = C.ah[k] + q[k];  // 0x41e4b0
+    } else {
+        s = s + t;
+        for (int k = 0; k < 3; ++k) q[k] = q[k] - C.ah[k];
+    }
+    const float e = -((n[0] * C.axis[0] + n[2] * C.axis[2]) + n[1] * C.axis[1]);
+    if (1.0f - std::fabs(e) > kCylEps) {
+        // the normal without its part along the axis, to the rim
+        float w[3];
+        for (int k = 0; k < 3; ++k) w[k] = e * C.axis[k] + n[k];
+        Normalize(w, w);
+        for (float& v : w) v = v * C.r;
+        const float f = (w[2] * n[2] + w[1] * n[1]) + w[0] * n[0];
+        if (f < 0) {
+            s = s - f;
+            for (int k = 0; k < 3; ++k) q[k] = w[k] + q[k];
+        } else {
+            s = f + s;
+            for (int k = 0; k < 3; ++k) q[k] = q[k] - w[k];
+        }
+    }
+    if (s < 0) return false;
+    if (s < r.best) {
+        r.best = s;
+        if (!(s < 0)) {
+            memcpy(r.p0, q, sizeof(q));
+            r.found = true;
+            for (int k = 0; k < 3; ++k) r.n[k] = -n[k];
+        }
+    }
+    return true;
+}
+
+// 0x5b4f90: the direction from the axis to the box's centre (in L). The
+// box's corner deepest along it; a contact only when that corner is inside
+// the cylinder. Nothing to test with the centre on the axis.
+bool CylRadialAxis(const float* L, const Box& B, const Cyl& C, Sat& r)
+{
+    const float cx = L[12], cz = L[14];
+    if (std::fabs(cx) < kCylEps && std::fabs(cz) < kCylEps) return true;
+    const float flat[3] = { cx, 0.0f, cz };
+    float u[3];
+    Normalize(flat, u);
+    float s = -std::sqrt(cz * cz + cx * cx) + C.r;
+    float p[3] = { cx, L[13], cz };
+    for (int j = 0; j < 3; ++j) {
+        float e[3];
+        for (int k = 0; k < 3; ++k) e[k] = B.half[j] * L[4 * j + k];
+        const float d = (u[2] * e[2] + u[1] * e[1]) + e[0] * u[0];
+        if (d < 0) {
+            s = s - d;
+            for (int k = 0; k < 3; ++k) p[k] = e[k] + p[k];
+        } else {
+            s = s + d;
+            for (int k = 0; k < 3; ++k) p[k] = p[k] - e[k];
+        }
+    }
+    if (s < 0) return false;
+    const float q2 = p[2] * p[2] + p[0] * p[0];
+    if (!(q2 < C.r * C.r)) return true;
+    const float ay = p[1] > 0 ? p[1] : -p[1];
+    if (!(ay < C.h)) return true;
+    const float dist = std::sqrt(q2);
+    const float depth = C.r - dist;
+    if (!(depth < r.best)) return true;
+    r.best = depth;
+    memcpy(r.p0, p, sizeof(p));
+    r.found = true;
+    if (!((dist > 0 ? dist : -dist) > kCylEps)) {
+        // on the axis: up, and the record keeps its frame flag
+        r.n[0] = 0; r.n[1] = 1; r.n[2] = 0;
+        return true;
+    }
+    const float radial[3] = { p[0], 0.0f, p[2] };
+    Normalize(radial, r.n);
+    r.local = true;
+    return true;
+}
+
+// 0x5b54f0: the cap facing the box's centre (in L).
+bool CylCapAxis(const float* L, const Box& B, const Cyl& C, Sat& r)
+{
+    const float cy = L[13];
+    float sign, s;
+    if (cy < 0) {
+        sign = -1.0f;
+        s = cy;
+    } else {
+        sign = 1.0f;
+        s = cy * -1.0f;
+    }
+    s = s + C.h;
+    float p[3] = { L[12], L[13], L[14] };
+    for (int j = 0; j < 3; ++j) {
+        float e[3];
+        for (int k = 0; k < 3; ++k) e[k] = L[4 * j + k] * B.half[j];
+        if (e[1] < 0) {
+            s = s - e[1];
+            for (int k = 0; k < 3; ++k) p[k] = e[k] + p[k];
+        } else {
+            s = s + e[1];
+            for (int k = 0; k < 3; ++k) p[k] = p[k] - e[k];
+        }
+    }
+    if (s < 0) return false;
+    if (!(s < r.best)) return true;
+    r.best = s;
+    memcpy(r.p0, p, sizeof(p));
+    r.found = true;
+    r.n[0] = 0; r.n[1] = sign; r.n[2] = 0;
+    r.local = true;
+    return true;
+}
+
+// 0x5b6160: box edge i across the cylinder's axis (in L). The point is the
+// rim point along the normal, then moved by that radius vector once more
+// (the cap's half height was meant: the game adds the same vector again).
+bool CylEdgeAxis(const float* L, const Box& B, const Cyl& C, int i, Sat& r)
+{
+    const float a[3] = { L[4 * i], L[4 * i + 1], L[4 * i + 2] };
+    const float up[3] = { 0.0f, 1.0f, 0.0f };
+    float c1[3];
+    Cross(up, a, c1);  // 0x407640 (b x a)
+    if ((c1[2] * c1[2] + c1[1] * c1[1]) + c1[0] * c1[0] < kCrossEps) return true;
+    float n[3];
+    Cross(c1, a, n);
+    Normalize(n, n);
+    float d = (L[14] * n[2] + L[13] * n[1]) + L[12] * n[0];
+    if (d < 0) {
+        for (float& v : n) v = -v;
+    } else {
+        d = -d;
+    }
+    float w[3];
+    Cross(up, c1, w);
+    Normalize(w, w);
+    for (float& v : w) v = v * C.r;
+    const float f = (w[0] * n[0] + w[2] * n[2]) + w[1] * n[1];
+    float q[3];
+    if (f < 0) {
+        d = d - f;
+        for (int k = 0; k < 3; ++k) q[k] = -w[k];
+    } else {
+        d = f + d;
+        for (int k = 0; k < 3; ++k) q[k] = w[k];
+    }
+    const float yh[3] = { 0.0f * C.h, 1.0f * C.h, 0.0f * C.h };
+    const float g = (yh[0] * n[0] + yh[2] * n[2]) + yh[1] * n[1];
+    if (g < 0) {
+        d = d - g;
+        for (int k = 0; k < 3; ++k) q[k] = q[k] - w[k];
+    } else {
+        d = d + g;
+        for (int k = 0; k < 3; ++k) q[k] = w[k] + q[k];
+    }
+    for (int j = 0; j < 3; ++j) {
+        if (j == i) continue;
+        float e[3];
+        for (int k = 0; k < 3; ++k) e[k] = B.half[j] * L[4 * j + k];
+        const float fj = (e[0] * n[0] + e[2] * n[2]) + e[1] * n[1];
+        d = fj < 0 ? d - fj : d + fj;
+    }
+    if (d < 0) return false;
+    if (!(d < r.best)) return true;
+    r.best = d;
+    if (!(d > 0)) return true;
+    r.found = true;
+    memcpy(r.p0, q, sizeof(q));
+    memcpy(r.p1, q, sizeof(q));
+    memcpy(r.n, n, sizeof(n));
+    r.local = true;
+    return true;
+}
+
+// 0x5b5950: box edge i against the cylinder's side line facing it (in L):
+// the two segments for the closest points 0x5b8ab0 (A: the side line at the
+// rim, B: the box edge).
+bool CylRimEdge(const float* L, const Box& B, const Cyl& C, int i, Sat& r)
+{
+    const float a[3] = { L[4 * i], L[4 * i + 1], L[4 * i + 2] };
+    if (std::fabs(a[(i + 1) % 3]) < kCylEps && std::fabs(a[(i + 2) % 3]) < kCylEps) return true;
+    const float up[3] = { 0.0f, 1.0f, 0.0f };
+    float n[3];
+    Cross(up, a, n);
+    if ((n[2] * n[2] + n[1] * n[1]) + n[0] * n[0] < kCrossEps) return true;
+    Normalize(n, n);
+    float e[3];
+    for (int k = 0; k < 3; ++k) e[k] = a[k] * B.half[i];
+    const float pc[3] = { L[12], L[13], L[14] };
+    float d = (n[2] * pc[2] + n[1] * pc[1]) + n[0] * pc[0];
+    if (d < 0) {
+        for (float& v : n) v = -v;
+    } else {
+        d = -d;
+    }
+    d = d + C.r;
+    float p[3] = { pc[0], pc[1], pc[2] };
+    for (int j = 0; j < 3; ++j) {
+        if (j == i) continue;
+        float ej[3];
+        for (int k = 0; k < 3; ++k) ej[k] = B.half[j] * L[4 * j + k];
+        const float f = (ej[0] * n[0] + ej[2] * n[2]) + ej[1] * n[1];
+        if (f < 0) {
+            d = d - f;
+            for (int k = 0; k < 3; ++k) p[k] = ej[k] + p[k];
+        } else {
+            d = d + f;
+            for (int k = 0; k < 3; ++k) p[k] = p[k] - ej[k];
+        }
+    }
+    if (d < 0) return false;
+    if (!(d < r.best)) return true;
+    r.best = d;
+    if (!(d > 0)) return true;
+    r.found = true;
+    float rn[3];
+    for (int k = 0; k < 3; ++k) rn[k] = n[k] * C.r;
+    r.a0[0] = rn[0]; r.a0[1] = C.h; r.a0[2] = rn[2];
+    r.a1[0] = rn[0]; r.a1[1] = -C.h; r.a1[2] = rn[2];
+    for (int k = 0; k < 3; ++k) {
+        r.b0[k] = e[k] + p[k];
+        r.b1[k] = p[k] - e[k];
+    }
+    memcpy(r.p0, rn, sizeof(rn));
+    memcpy(r.p1, p, sizeof(p));
+    memcpy(r.n, n, sizeof(n));
+    r.local = true;
+    return true;
+}
+
+// 0x5b4120: the box's matrix in the cylinder's frame: the cylinder's
+// rotation transposed (its column 3 kept), the offset -(r2 z + r1 y) + r0 x
+// per column, then box x that (0x66fc51).
+void CylFrame(const float* box, const float* cyl, float L[16])
+{
+    float inv[16];
+    for (int i = 0; i < 4; ++i)
+        for (int k = 0; k < 4; ++k) inv[i * 4 + k] = cyl[k * 4 + i];
+    for (int i = 0; i < 3; ++i) inv[i * 4 + 3] = cyl[i * 4 + 3];
+    const float px = cyl[12], py = cyl[13], pz = cyl[14];
+    for (int k = 0; k < 3; ++k) inv[12 + k] = -((inv[8 + k] * pz + inv[4 + k] * py) + inv[k] * px);
+    inv[15] = 1.0f;
+    Articulated::MatMul(box, inv, L);
+}
+
+// 0x605119 for (v, 1): (x m0 + y m1) + (z m2 + m3).
+void CylToWorld(const float v[3], const float* m, float out[3])
+{
+    float o[3];
+    for (int k = 0; k < 3; ++k) o[k] = (v[0] * m[k] + v[1] * m[4 + k]) + (v[2] * m[8 + k] + 1.0f * m[12 + k]);
+    memcpy(out, o, sizeof(o));
+}
+
+// 0x5b4380 / 0x5b49b0: box against cylinder (axis row 1 of its matrix). The
+// box's faces, the radial direction, the caps, the box's edges across the
+// axis, then its edges against the side lines (their closest points when
+// one was the least deep). Results in the cylinder's frame go back to the
+// world; the normal (from the cylinder to the box) as a point, less the
+// cylinder's centre.
+bool BoxCylinder(const Box& B, const float* boxWorld, float radius, float halfHeight, const float* cylWorld,
+                 BodyContact& c)
+{
+    Cyl C;
+    for (int k = 0; k < 3; ++k) {
+        C.axis[k] = cylWorld[4 + k];
+        C.c[k] = cylWorld[12 + k];
+        C.ah[k] = C.axis[k] * halfHeight;
+    }
+    C.r = radius;
+    C.h = halfHeight;
+    float L[16];
+    CylFrame(boxWorld, cylWorld, L);
+    Sat r;
+    for (int i = 0; i < 3; ++i)
+        if (!CylFaceAxis(B, C, i, r)) return false;
+    if (!CylRadialAxis(L, B, C, r)) return false;
+    if (!CylCapAxis(L, B, C, r)) return false;
+    for (int i = 0; i < 3; ++i)
+        if (!CylEdgeAxis(L, B, C, i, r)) return false;
+    Sat t;
+    t.best = r.found ? r.best : 1000000.0f;
+    bool edges = false;
+    for (int i = 0; i < 3; ++i) {
+        if (!CylRimEdge(L, B, C, i, t)) return false;
+        if (t.found) edges = true;
+    }
+    if (edges && EdgeClosest(t, r)) {
+        memcpy(r.n, t.n, sizeof(r.n));
+        r.edge = true;
+        r.local = true;
+    }
+    if (!edges && !r.found) return false;
+    c.depth = r.best;
+    if (!r.local) {
+        for (int k = 0; k < 3; ++k) {
+            c.normal[k] = r.n[k];
+            c.pointA[k] = c.pointB[k] = r.p0[k];
+        }
+        return true;
+    }
+    float n[3];
+    CylToWorld(r.n, cylWorld, n);
+    for (int k = 0; k < 3; ++k) c.normal[k] = n[k] - C.c[k];
+    CylToWorld(r.p0, cylWorld, c.pointA);
+    if (r.edge)
+        CylToWorld(r.p1, cylWorld, c.pointB);
+    else
+        memcpy(c.pointB, c.pointA, sizeof(c.pointA));
+    return true;
+}
+
+// 0x5a3ba0: shape A against shape B in the world (types 0 box, 1 cylinder
+// {radius, half height}, 2 sphere {radius}). Box / box, box / cylinder and
+// box / sphere are ported; cylinder / box and sphere / box run those with
+// the sides swapped (the normal turned, the points exchanged). Cylinder /
+// cylinder (0x5b9f00) and cylinder / sphere (0x5b7cf0) are not: there a
+// cylinder is taken as its bounding box (r, h, r).
+bool ShapePair(int typeA, const float sizeA[3], const float* worldA, int typeB, const float sizeB[3],
+               const float* worldB, BodyContact& c)
+{
+    if (typeA == 0) {
+        Box a;
+        MakeBox(sizeA, worldA, a);
+        if (typeB == 0) {
+            Box b;
+            MakeBox(sizeB, worldB, b);
+            return BoxBox(a, b, c);
+        }
+        if (typeB == 1) return BoxCylinder(a, worldA, sizeB[0], sizeB[1], worldB, c);
+        if (typeB == 2) return BoxSphere(a, sizeB[0], worldB + 12, c);
+        return false;
+    }
+    if (typeB == 0 && (typeA == 1 || typeA == 2)) {
+        if (!ShapePair(typeB, sizeB, worldB, typeA, sizeA, worldA, c)) return false;
+        for (int k = 0; k < 3; ++k) {
+            c.normal[k] = -c.normal[k];
+            std::swap(c.pointA[k], c.pointB[k]);
+        }
+        return true;
+    }
+    if (typeA == 1) {
+        const float box[3] = { sizeA[0], sizeA[1], sizeA[0] };
+        return ShapePair(0, box, worldA, typeB, sizeB, worldB, c);
+    }
+    if (typeB == 1) {
+        const float box[3] = { sizeB[0], sizeB[1], sizeB[0] };
+        return ShapePair(typeA, sizeA, worldA, 0, box, worldB, c);
+    }
+    return false;  // sphere / sphere (0x5b6fb0): no moving spheres
+}
+
+// A body's shape against a static one.
+bool ShapePair(const VehicleData::Shape& A, const float* worldA, const CollisionWorld::Shape& B, BodyContact& c)
+{
+    return ShapePair(A.type, A.size, worldA, B.type, B.size, B.world, c);
+}
+
+// A shape's bounding box half sizes (a cylinder (r, h, r), a sphere r).
+void BoundingHalf(const VehicleData::Shape& s, float h[3])
+{
+    h[0] = s.size[0];
+    h[1] = s.type == 2 ? s.size[0] : s.size[1];
+    h[2] = s.type == 0 ? s.size[2] : s.size[0];
 }
 
 // 0x5c2a30: the contact frame, rows (u, n x u, n) with u perpendicular to
@@ -695,6 +1089,14 @@ bool BoxBoxContact(const float sizeA[3], const float* worldA, const float sizeB[
     return BoxBox(a, b, c);
 }
 
+bool BoxCylinderContact(const float sizeA[3], const float* worldA, float radius, float halfHeight,
+                        const float* worldB, BodyContact& c)
+{
+    Box a;
+    MakeBox(sizeA, worldA, a);
+    return BoxCylinder(a, worldA, radius, halfHeight, worldB, c);
+}
+
 int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& shapes, const CollisionWorld& world,
                        const CityGround* groundData)
 {
@@ -704,12 +1106,12 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
     const float* bodyWorld = &body.matrix[0][0];
     auto shapeWorld = [&](size_t s, float out[16]) { Mul(shapes[s].local, bodyWorld, out); };
     // The body's bounding box (0x5a95b0): its bounding shape's.
-    float bw[16];
+    float bw[16], bh[3];
     shapeWorld(0, bw);
+    BoundingHalf(shapes[0], bh);
     float lo[3], hi[3];
     for (int k = 0; k < 3; ++k) {
-        const float e = std::fabs(bw[k]) * shapes[0].size[0] + std::fabs(bw[4 + k]) * shapes[0].size[1] +
-                        std::fabs(bw[8 + k]) * shapes[0].size[2];
+        const float e = std::fabs(bw[k]) * bh[0] + std::fabs(bw[4 + k]) * bh[1] + std::fabs(bw[8 + k]) * bh[2];
         lo[k] = bw[12 + k] - e;
         hi[k] = bw[12 + k] + e;
     }
@@ -721,7 +1123,7 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
         // 0x5a3730: the bounds first.
         BodyContact best;
         shapeWorld(0, bw);
-        if (!ShapePair(shapes[0].size, bw, world.ShapeAt(ob.first), best)) continue;
+        if (!ShapePair(shapes[0], bw, world.ShapeAt(ob.first), best)) continue;
         bool found = false;
         if (shapes.size() == 1 && ob.count == 1) {
             best.surfaceA = shapes[0].surface;
@@ -735,7 +1137,7 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
                 for (size_t j = firstB; j < ob.count; ++j) {
                     const CollisionWorld::Shape& sb = world.ShapeAt(ob.first + j);
                     BodyContact c;
-                    if (!ShapePair(shapes[i].size, sw, sb, c)) continue;
+                    if (!ShapePair(shapes[i], sw, sb, c)) continue;
                     if (!found || best.depth < c.depth) {
                         best = c;
                         best.surfaceA = shapes[i].surface;
@@ -761,15 +1163,17 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
         }
         bodyWorld = &body.matrix[0][0];
     }
-    // 0x5a9b80 -> 0x5b36f0: the ground under the boxes' corners.
+    // 0x5a9b80 -> 0x5b36f0: the ground under the boxes' corners (a cylinder's
+    // own ground test is not ported: its bounding box's corners).
     if (groundData) {
         BodyContact g;
         bool found = false;
         for (size_t s = first; s < shapes.size(); ++s) {
-            float sw[16];
+            float sw[16], sh[3];
             shapeWorld(s, sw);
+            BoundingHalf(shapes[s], sh);
             Box b;
-            MakeBox(shapes[s].size, sw, b);
+            MakeBox(sh, sw, b);
             for (int k = 0; k < 8; ++k) {
                 float p[3];
                 for (int m = 0; m < 3; ++m)
@@ -824,7 +1228,7 @@ int BodyContacts::Pair(RigidBody& a, const std::vector<VehicleData::Shape>& shap
     world(shapesA[0], a, wa);
     world(shapesB[0], b, wb);
     BodyContact best;
-    if (!BoxBoxContact(shapesA[0].size, wa, shapesB[0].size, wb, best)) return 0;
+    if (!ShapePair(shapesA[0].type, shapesA[0].size, wa, shapesB[0].type, shapesB[0].size, wb, best)) return 0;
     bool found = false;
     if (shapesA.size() == 1 && shapesB.size() == 1) {
         best.surfaceA = shapesA[0].surface;
@@ -836,7 +1240,7 @@ int BodyContacts::Pair(RigidBody& a, const std::vector<VehicleData::Shape>& shap
             for (size_t j = shapesB.size() > 1 ? 1 : 0; j < shapesB.size(); ++j) {
                 world(shapesB[j], b, wb);
                 BodyContact c;
-                if (!BoxBoxContact(shapesA[i].size, wa, shapesB[j].size, wb, c)) continue;
+                if (!ShapePair(shapesA[i].type, shapesA[i].size, wa, shapesB[j].type, shapesB[j].size, wb, c)) continue;
                 if (!found || best.depth < c.depth) {
                     best = c;
                     best.surfaceA = shapesA[i].surface;
