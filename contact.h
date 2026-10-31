@@ -64,6 +64,11 @@ bool BoxBoxContact(const float sizeA[3], const float* worldA, const float sizeB[
 bool BoxCylinderContact(const float sizeA[3], const float* worldA, float radius, float halfHeight,
                         const float* worldB, BodyContact& c);
 
+// Cylinder A against cylinder B (sizes {radius, half height}; axes row 1 of
+// their matrices; 0x5b9f00). The normal points from B to A.
+bool CylinderCylinderContact(const float sizeA[3], const float* worldA, const float sizeB[3], const float* worldB,
+                             BodyContact& c);
+
 // The points a cylinder (radius r, half height h, world matrix m: axis row
 // 1, centre row 3) asks the ground at (0x5b3010), and the heights its
 // depths are measured from: standing exactly up (|a.y - 1| < 1e-5,

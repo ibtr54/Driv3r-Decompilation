@@ -635,12 +635,229 @@ bool BoxCylinder(const Box& B, const float* boxWorld, float radius, float halfHe
     return true;
 }
 
+// Cylinder / cylinder (0x5b9f00 -> 0x5ba160), all in the world. The tests
+// run on two records: R (the axes' cross direction, then the edge closest
+// points) and T (the caps and the sides, each cylinder against the other).
+
+// 0x5ba340: the direction across both axes (ahA x ahB). Parallel axes only
+// separate when the axes lie further apart than the radii; otherwise the
+// rims facing each other give R its two side lines (for 0x5b8ab0).
+bool CylCrossAxis(const Cyl& A, const Cyl& B, Sat& r)
+{
+    float n[3];
+    Cross(A.ah, B.ah, n);
+    if (!((n[2] * n[2] + n[1] * n[1]) + n[0] * n[0] >= kCrossEps)) {
+        const float ta = (A.c[1] * A.axis[1] + A.c[2] * A.axis[2]) + A.axis[0] * A.c[0];
+        const float tb = (B.c[1] * B.axis[1] + B.c[2] * B.axis[2]) + B.axis[0] * B.c[0];
+        float d[3];
+        for (int k = 0; k < 3; ++k) d[k] = (A.c[k] - ta * A.axis[k]) - (B.c[k] - tb * B.axis[k]);
+        const float dist = std::sqrt((d[0] * d[0] + d[2] * d[2]) + d[1] * d[1]);
+        return A.r + B.r > dist;
+    }
+    Normalize(n, n);
+    const float d[3] = { B.c[0] - A.c[0], B.c[1] - A.c[1], B.c[2] - A.c[2] };
+    float s = (d[2] * n[2] + d[1] * n[1]) + d[0] * n[0];
+    if (s >= 0) {
+        s = -s;
+    } else {
+        for (float& v : n) v = -v;
+    }
+    s = (s + A.r) + B.r;
+    if (s < 0) return false;
+    if (!(s < r.best)) return true;
+    r.best = s;
+    r.found = r.edge = true;
+    float pa[3], pb[3];
+    for (int k = 0; k < 3; ++k) {
+        pa[k] = n[k] * A.r + A.c[k];
+        pb[k] = B.c[k] - n[k] * B.r;
+    }
+    for (int k = 0; k < 3; ++k) {
+        r.a0[k] = A.ah[k] + pa[k];
+        r.a1[k] = pa[k] - A.ah[k];
+        r.b0[k] = B.ah[k] + pb[k];
+        r.b1[k] = pb[k] - B.ah[k];
+    }
+    memcpy(r.p0, pa, sizeof(pa));
+    memcpy(r.p1, pb, sizeof(pb));
+    memcpy(r.n, n, sizeof(n));
+    return true;
+}
+
+// 0x5ba810: Y's cap facing X against X's point deepest along Y's axis (the
+// end of X's axis, then its rim). The normal is Y's axis towards X, turned
+// when X is B (flip) so that it points from B to A.
+bool CylCapTest(const Cyl& X, const Cyl& Y, bool flip, Sat& r)
+{
+    float d[3] = { X.c[0] - Y.c[0], X.c[1] - Y.c[1], X.c[2] - Y.c[2] };
+    float n[3] = { Y.axis[0], Y.axis[1], Y.axis[2] };
+    float q[3] = { X.c[0], X.c[1], X.c[2] };
+    float s = (d[2] * n[2] + d[1] * n[1]) + d[0] * n[0];
+    if (s >= 0) {
+        s = -s;
+    } else {
+        for (float& v : n) v = -v;
+    }
+    s = s + Y.h;
+    const float e = (n[2] * X.ah[2] + n[1] * X.ah[1]) + n[0] * X.ah[0];
+    if (e >= 0) {
+        s = e + s;
+        for (int k = 0; k < 3; ++k) q[k] = q[k] - X.ah[k];
+    } else {
+        s = s - e;
+        for (int k = 0; k < 3; ++k) q[k] = q[k] + X.ah[k];
+    }
+    // X's rim vector furthest along n
+    float w[3];
+    const float f = -((n[0] * X.axis[0] + n[2] * X.axis[2]) + n[1] * X.axis[1]);
+    if (1.0f - std::fabs(f) > kCylEps) {
+        for (int k = 0; k < 3; ++k) w[k] = f * X.axis[k] + n[k];
+        Normalize(w, w);
+        for (float& v : w) v = v * X.r;
+    } else {
+        // n along X's axis: the rim towards Y's centre line
+        const float t = (d[2] * X.axis[2] + d[1] * X.axis[1]) + d[0] * X.axis[0];
+        for (int k = 0; k < 3; ++k) w[k] = d[k] - t * X.axis[k];
+        if (!((w[2] * w[2] + w[1] * w[1]) + w[0] * w[0] >= kCrossEps)) {
+            w[0] = w[1] = w[2] = 0.0f;
+        } else {
+            Normalize(w, w);
+            for (float& v : w) v = v * X.r;
+        }
+    }
+    const float g = (n[0] * w[0] + w[2] * n[2]) + w[1] * n[1];
+    if (g < 0) {
+        s = s - g;
+        for (int k = 0; k < 3; ++k) q[k] = w[k] + q[k];
+    } else {
+        s = g + s;
+        for (int k = 0; k < 3; ++k) q[k] = q[k] - w[k];
+    }
+    if (s < 0) return false;
+    if (!(s < r.best)) return true;
+    r.best = s;
+    for (int k = 0; k < 3; ++k) r.n[k] = flip ? -n[k] : n[k];
+    memcpy(r.p0, q, sizeof(q));
+    r.edge = false;
+    r.found = true;
+    return true;
+}
+
+// 0x5bae10: Y's side facing X against X's point deepest towards Y's axis.
+// Skipped when X's centre lies in Y's middle plane. The depth kept is that
+// point's distance from Y's axis (taken only when inside Y's radius), not
+// the separation.
+bool CylSideTest(const Cyl& X, const Cyl& Y, bool flip, Sat& r)
+{
+    const float d[3] = { X.c[0] - Y.c[0], X.c[1] - Y.c[1], X.c[2] - Y.c[2] };
+    float q[3] = { X.c[0], X.c[1], X.c[2] };
+    const float t = (d[0] * Y.axis[0] + d[2] * Y.axis[2]) + d[1] * Y.axis[1];
+    float pa[3], u[3];
+    for (int k = 0; k < 3; ++k) {
+        pa[k] = t * Y.axis[k];
+        u[k] = d[k] - pa[k];
+    }
+    if (!((pa[2] * pa[2] + pa[1] * pa[1]) + pa[0] * pa[0] >= kCrossEps)) return true;
+    if ((u[2] * u[2] + u[1] * u[1]) + u[0] * u[0] >= kCrossEps) Normalize(u, u);
+    float s = (d[0] * u[0] + u[2] * d[2]) + u[1] * d[1];
+    if (s >= 0) {
+        s = -s;
+    } else {
+        for (float& v : u) v = -v;
+    }
+    s = s + Y.r;
+    const float e = (u[2] * X.ah[2] + u[1] * X.ah[1]) + u[0] * X.ah[0];
+    if (e >= 0) {
+        s = e + s;
+        for (int k = 0; k < 3; ++k) q[k] = q[k] - X.ah[k];
+    } else {
+        s = s - e;
+        for (int k = 0; k < 3; ++k) q[k] = q[k] + X.ah[k];
+    }
+    // X's rim vector away from its axis, in the direction of d
+    const float tx = (d[2] * X.axis[2] + d[1] * X.axis[1]) + d[0] * X.axis[0];
+    float w[3];
+    for (int k = 0; k < 3; ++k) w[k] = d[k] - tx * X.axis[k];
+    if ((w[2] * w[2] + w[1] * w[1]) + w[0] * w[0] >= kCrossEps) {
+        Normalize(w, w);
+        for (float& v : w) v = v * X.r;
+    } else {
+        w[0] = w[1] = w[2] = 0.0f;
+    }
+    const float g = (w[2] * u[2] + w[1] * u[1]) + w[0] * u[0];
+    if (g >= 0) {
+        s = g + s;
+        for (int k = 0; k < 3; ++k) q[k] = q[k] - w[k];
+    } else {
+        s = s - g;
+        for (int k = 0; k < 3; ++k) q[k] = w[k] + q[k];
+    }
+    if (s < 0) return false;
+    float v[3];
+    for (int k = 0; k < 3; ++k) v[k] = q[k] - Y.c[k];
+    const float ty = (v[0] * Y.axis[0] + v[2] * Y.axis[2]) + v[1] * Y.axis[1];
+    for (int k = 0; k < 3; ++k) v[k] = v[k] - ty * Y.axis[k];
+    const float dist = std::sqrt((v[2] * v[2] + v[1] * v[1]) + v[0] * v[0]);
+    if (!(dist <= Y.r)) return true;
+    if (!(dist < r.best)) return true;
+    r.best = dist;
+    for (int k = 0; k < 3; ++k) r.n[k] = flip ? -u[k] : u[k];
+    memcpy(r.p0, q, sizeof(q));
+    r.edge = false;
+    r.found = true;
+    return true;
+}
+
+// The cylinder record of 0x5b9f00: axis = matrix row 1, centre row 3.
+void MakeCyl(const float size[3], const float* world, Cyl& C)
+{
+    for (int k = 0; k < 3; ++k) {
+        C.axis[k] = world[4 + k];
+        C.c[k] = world[12 + k];
+        C.ah[k] = C.axis[k] * size[1];
+    }
+    C.r = size[0];
+    C.h = size[1];
+}
+
+// 0x5b9f00 / 0x5ba160: cylinder A against cylinder B, the normal from B to
+// A. R takes the cross direction; T (a copy started before it) the caps and
+// sides; the smaller wins. When R stays an edge contact, its normal is turned
+// and 0x5b8ab0 gives the closest points of the two side lines; when they
+// meet outside, T's answer is taken if it has one, else there is no contact.
+bool CylinderCylinder(const Cyl& A, const Cyl& B, BodyContact& c)
+{
+    Sat r, t;
+    if (!CylCrossAxis(A, B, r)) return false;
+    if (!CylCapTest(B, A, true, t)) return false;
+    if (!CylCapTest(A, B, false, t)) return false;
+    if (!CylSideTest(B, A, true, t)) return false;
+    if (!CylSideTest(A, B, false, t)) return false;
+    if (!(r.best <= t.best)) r = t;
+    if (r.edge) {
+        for (float& v : r.n) v = -v;
+        if (!EdgeClosest(r, r)) {
+            if (!t.found) return false;
+            r = t;
+        }
+    } else if (!r.found) {
+        return false;
+    }
+    for (int k = 0; k < 3; ++k) {
+        c.normal[k] = r.n[k];
+        c.pointA[k] = r.p0[k];
+        c.pointB[k] = r.edge ? r.p1[k] : r.p0[k];
+    }
+    c.depth = r.best;
+    return true;
+}
+
 // 0x5a3ba0: shape A against shape B in the world (types 0 box, 1 cylinder
-// {radius, half height}, 2 sphere {radius}). Box / box, box / cylinder and
-// box / sphere are ported; cylinder / box and sphere / box run those with
-// the sides swapped (the normal turned, the points exchanged). Cylinder /
-// cylinder (0x5b9f00) and cylinder / sphere (0x5b7cf0) are not: there a
-// cylinder is taken as its bounding box (r, h, r).
+// {radius, half height}, 2 sphere {radius}). Box / box, box / cylinder,
+// box / sphere and cylinder / cylinder are ported; cylinder / box and
+// sphere / box run those with the sides swapped (the normal turned, the
+// points exchanged). Cylinder / sphere (0x5b7cf0) is not: there the cylinder
+// is taken as its bounding box (r, h, r).
 bool ShapePair(int typeA, const float sizeA[3], const float* worldA, int typeB, const float sizeB[3],
                const float* worldB, BodyContact& c)
 {
@@ -663,6 +880,12 @@ bool ShapePair(int typeA, const float sizeA[3], const float* worldA, int typeB, 
             std::swap(c.pointA[k], c.pointB[k]);
         }
         return true;
+    }
+    if (typeA == 1 && typeB == 1) {
+        Cyl a, b;
+        MakeCyl(sizeA, worldA, a);
+        MakeCyl(sizeB, worldB, b);
+        return CylinderCylinder(a, b, c);
     }
     if (typeA == 1) {
         const float box[3] = { sizeA[0], sizeA[1], sizeA[0] };
@@ -1095,6 +1318,15 @@ bool BoxCylinderContact(const float sizeA[3], const float* worldA, float radius,
     Box a;
     MakeBox(sizeA, worldA, a);
     return BoxCylinder(a, worldA, radius, halfHeight, worldB, c);
+}
+
+bool CylinderCylinderContact(const float sizeA[3], const float* worldA, const float sizeB[3], const float* worldB,
+                             BodyContact& c)
+{
+    Cyl a, b;
+    MakeCyl(sizeA, worldA, a);
+    MakeCyl(sizeB, worldB, b);
+    return CylinderCylinder(a, b, c);
 }
 
 // 0x407640 (eax e, ecx c): c x e.

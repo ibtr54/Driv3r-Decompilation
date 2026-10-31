@@ -5,9 +5,9 @@
 // matrix +0x10, type byte +0x50, surface +0x51, bit 31 of +0x50 = off) and
 // the game's result (point A +0x00, point B +0x10, normal +0x20, depth
 // +0x30, contact +0x34, surfaces +0x40 / +0x44; the points relative to the
-// sides' positions). The port's box / box and box / cylinder tests
-// (contact.h BoxBoxContact, BoxCylinderContact; 0x5a3ba0 swaps the sides of
-// a cylinder / box pair) run on the same shapes in the game's own space, the
+// sides' positions). The port's box / box, box / cylinder and cylinder /
+// cylinder tests (contact.h BoxBoxContact, BoxCylinderContact,
+// CylinderCylinderContact; 0x5a3ba0 swaps the sides of a cylinder / box pair) run on the same shapes in the game's own space, the
 // pairs as 0x5a3730 picks them (bounding shapes first, then every shape but
 // the bounds, the deepest kept).
 //
@@ -79,6 +79,7 @@ bool PairContact(const Shape& a, const float* wa, const Shape& b, const float* w
         }
         return true;
     }
+    if (a.type == 1 && b.type == 1) return CylinderCylinderContact(a.size, wa, b.size, wb, k);
     return false;
 }
 
@@ -103,7 +104,7 @@ int main(int argc, char** argv)
 {
     if (argc < 2) { printf("narrowreplay <phys.txt>\n"); return 1; }
     Read(argv[1]);
-    int tested = 0, equal = 0, close = 0, skipped = 0, shown = 0, withCyl = 0, cylEqual = 0;
+    int tested = 0, equal = 0, close = 0, skipped = 0, shown = 0, withCyl = 0, cylEqual = 0, cylCyl = 0, cylCylEqual = 0;
     float worst = 0;
     for (const auto& np : g_np) {
         const unsigned n = np.first;
@@ -140,7 +141,9 @@ int main(int argc, char** argv)
         }
         ++tested;
         const bool cyl = found && (sa[bi].type == 1 || sb[bj].type == 1);  // the kept pair
+        const bool cc = found && sa[bi].type == 1 && sb[bj].type == 1;
         if (cyl) ++withCyl;
+        if (cc) ++cylCyl;
         float traced[3][3];
         for (int k = 0; k < 3; ++k) {
             traced[0][k] = F(r[k]) + pa[k];
@@ -159,7 +162,7 @@ int main(int argc, char** argv)
             diff = std::fmax(diff, std::fabs(best.normal[k] - traced[2][k]));
         }
         worst = std::fmax(worst, diff);
-        if (diff == 0) ++equal, cylEqual += cyl;
+        if (diff == 0) ++equal, cylEqual += cyl, cylCylEqual += cc;
         else if (diff < 1e-4f) ++close;
         if (diff >= 1e-4f && shown++ < 20)
             printf("NP %u: shapes %zu / %zu, depth %.5f (trace %.5f), normal (%.4f %.4f %.4f) trace (%.4f %.4f %.4f),\n"
@@ -171,5 +174,6 @@ int main(int argc, char** argv)
     printf("%d box / cylinder pairs with a contact (%d kept a box / cylinder pair, %d of them equal): %d equal, %d within 1e-4, "
            "worst difference %g (%d pairs with spheres skipped)\n",
            tested, withCyl, cylEqual, equal, close, worst, skipped);
+    printf("cylinder / cylinder kept: %d, %d equal\n", cylCyl, cylCylEqual);
     return 0;
 }
