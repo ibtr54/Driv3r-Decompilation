@@ -45,9 +45,9 @@
 // (VehicleDent).
 // Not ported: the loose wheel's body (0x506cd0), the explosion contacts
 // (contact +0xf8 bit 0), the effects and sounds (0x5063f0, 0x50b100, sparks
-// 0x567840.., the scrape 0x56ff10), the damage marks of the UPVH's dent
-// block (0x507bb0 / 0x50bd20 / 0x4f5890: small quads at preset points that
-// follow the dent).
+// 0x567840.., the impact sound 0x56ff10). The damage marks of the UPVH's
+// block (0x507bb0 / 0x50bd20 / 0x4f5890: bullet holes and glass cracks at
+// preset points that follow the dent; a crash makes none) are in marks.h.
 #pragma once
 
 #include <array>

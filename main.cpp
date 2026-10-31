@@ -40,6 +40,7 @@
 #include "collision.h"
 #include "contact.h"
 #include "damage.h"
+#include "marks.h"
 #include "panels.h"
 #include "props.h"
 #include "story.h"
@@ -3444,6 +3445,10 @@ public:
             Log("Level 0x%02x: free camera %s", mission, free_ ? "on" : "off (back to the start camera)");
             return;
         }
+        if (vk == 'B' && carOn_) {
+            DebugHit();
+            return;
+        }
         const char* msg = vk == VK_RETURN ? "complete" : vk == 'F' ? "fail" : vk == 'R' ? "restart"
                         : vk == VK_ESCAPE ? "frontend" : nullptr;
         if (msg && onMessage) onMessage(msg);
@@ -3529,6 +3534,13 @@ private:
             const float size[3] = { h[0] + h[0], h[2] + h[2], h[1] + h[1] };
             damage_ = VehicleDamage();
             damage_.Init(*v, size, carTable_);
+            // the damage marks (marks.h): the slot's marks object and the
+            // world's buffers, all free
+            carMarks_.Init(*v);
+            markPool_ = MarkPool();
+            markLog_ = 0;
+            Log("Level 0x%02x: vehicle %d: %zu damage mark points in %zu meshes (key B: a debug hit); %s", mission,
+                id, v->markPoints.size(), v->markFirst.size(), city_.markInfo.c_str());
             // the car's box that dents (0x5091b0; damage.h)
             damage_.InitDent(id, &carShapes_, carTable_);
             if (damage_.dentShape >= 0)
@@ -3626,6 +3638,15 @@ private:
                 damage_.lastSide, damage_.total, damage_.front[0], damage_.front[1], damage_.back[0], damage_.back[1]);
         }
         for (const DamageRequest& q : req) DamageState(q);
+        // 0x4f5890 per record of a body mesh (0x503fb0 at 0x504f71, once the
+        // slot has its marks object): the marks follow a dent that moved by
+        // more than 0.125.
+        if (carMarks_.active)
+            for (size_t k = 0; k < damage_.records.size() && k < carVehicle_->markFirst.size(); ++k) {
+                const int part = damage_.recordPart[k];
+                if (part < 0 || carVehicle_->parts[size_t(part)].type != 1) continue;
+                carMarks_.Replace(*carVehicle_, markPool_, int(k), damage_.records[k], &carBody_.matrix[0][0]);
+            }
         // the wheel hits (0x507980): a wheel at 1.5 comes off; the slot's
         // gone byte hides it (0x4fd7f0) and the car's tick takes the wheel
         // as off (vtbl+0x7c, flag 0x80)
@@ -3780,6 +3801,61 @@ private:
             q.state == 2 && ok ? "; the car's group has its part bodies"
             : q.state == 3 && !carGroup_.Active() ? "; the car's group ended" : "");
         if (ok) r.state = q.state;
+    }
+    // Key B (program addition, there is no gunfire here): a hit at the car
+    // as a bullet from the chase camera would make one. The ray aims at a
+    // random free mark point; where it enters the box around the car's mark
+    // points (vehicle space, the drawn body) is the hit point for 0x507bb0's
+    // marks share (CarMarks::Hit). No tyre bursts, sparks or sounds.
+    void DebugHit()
+    {
+        if (!carVehicle_ || carVehicle_->markPoints.empty() || damage_.records.empty()) return;
+        const VehicleData& v = *carVehicle_;
+        std::vector<int> freePoints;
+        for (size_t j = 0; j < v.markPoints.size() && j < size_t(CarMarks::kPoints); ++j)
+            if (carMarks_.region[j] == 0xff) freePoints.push_back(int(j));
+        if (freePoints.empty()) return;
+        markRng_ = markRng_ * 1103515245u + 12345u;
+        const int target = freePoints[(markRng_ >> 8) % freePoints.size()];
+        float lo[3] = { 1e9f, 1e9f, 1e9f }, hi[3] = { -1e9f, -1e9f, -1e9f }, aim[4];
+        for (const VehicleData::MarkPoint& q : v.markPoints) {
+            float p[4];
+            MarkPosition(q.rest, p);
+            for (int k = 0; k < 3; ++k) lo[k] = std::min(lo[k], p[k] - 0.02f), hi[k] = std::max(hi[k], p[k] + 0.02f);
+        }
+        MarkPosition(v.markPoints[size_t(target)].rest, aim);
+        // the camera's eye into the vehicle's space (the drawn body, rigid)
+        const float* b = carDrawBody_;
+        float eye[3], d[3];
+        for (int i = 0; i < 3; ++i) {
+            const float w = carCamera_[12] - b[12], y = carCamera_[13] - b[13], z = carCamera_[14] - b[14];
+            eye[i] = w * b[4 * i] + y * b[4 * i + 1] + z * b[4 * i + 2];
+        }
+        for (int k = 0; k < 3; ++k) d[k] = aim[k] - eye[k];
+        float t0 = 0, t1 = 1e9f;
+        for (int k = 0; k < 3; ++k) {
+            if (fabsf(d[k]) < 1e-9f) {
+                if (eye[k] < lo[k] || eye[k] > hi[k]) return;
+                continue;
+            }
+            float a = (lo[k] - eye[k]) / d[k], c = (hi[k] - eye[k]) / d[k];
+            if (a > c) std::swap(a, c);
+            t0 = std::max(t0, a), t1 = std::min(t1, c);
+        }
+        if (t0 > t1) return;
+        float hit[3];
+        for (int k = 0; k < 3; ++k) hit[k] = eye[k] + d[k] * t0;
+        const int placed = carMarks_.Hit(v, markPool_, damage_.records, damage_.recordPart, hit, carDrawBody_);
+        if (markLog_ < 60) {
+            ++markLog_;
+            if (placed >= 0)
+                Log("Car marks: hit at (%.3f %.3f %.3f) in the car (aim point %d): point %d placed, %s, region %u; "
+                    "buffers in use %u", hit[0], hit[1], hit[2], target, placed,
+                    v.markPoints[size_t(placed)].normal[3] ? "glass" : "hole", carMarks_.region[placed], carMarks_.used);
+            else
+                Log("Car marks: hit at (%.3f %.3f %.3f) in the car (aim point %d): no free point within 0.375 m",
+                    hit[0], hit[1], hit[2], target);
+        }
     }
     // The draw part (VehicleDraw::parts index) of record k's part: the body
     // models come first, in part order.
@@ -4012,6 +4088,23 @@ private:
             }
 
             city_.SetVehicleDamage(carDent_);
+            // the damage marks (0x4f5a80 per drawn part with a record)
+            std::vector<CityRenderer::MarkSet> sets;
+            if (carMarks_.active) {
+                std::vector<MarkDraw> draws;
+                carMarks_.Draws(*carVehicle_, markPool_, damage_.records, damage_.recordPart, draws);
+                for (const MarkDraw& d : draws) {
+                    const int dp = DrawPartOfRecord(d.record);
+                    if (dp < 0 || (size_t(dp) < carHidden_.size() && carHidden_[size_t(dp)])) continue;
+                    if (size_t(dp + 1) * 16 > carWorld_.size()) continue;
+                    CityRenderer::MarkSet s;
+                    memcpy(s.world, &carWorld_[size_t(dp) * 16], sizeof(s.world));
+                    s.side = d.side;
+                    s.quads.assign(d.buffer->v, d.buffer->v + d.buffer->count * 4);
+                    sets.push_back(std::move(s));
+                }
+            }
+            city_.SetVehicleMarks(std::move(sets));
         }
         // The skid marks' points (car vtbl+0x84 = 0x4b0830, every drawn
         // frame, BOOT_TO_MENU.md section 84): per rear wheel with a ribbon,
@@ -4049,6 +4142,10 @@ private:
     std::vector<VehicleData::Shape> carShapes_;
     const VehicleData* carVehicle_ = nullptr;
     VehicleDamage damage_;  // the slot's damage records (damage.h)
+    CarMarks carMarks_;     // the slot's damage marks (marks.h)
+    MarkPool markPool_;     // the world's mark buffers
+    int markLog_ = 0;
+    uint32_t markRng_ = 1;
     int damageLog_ = 0;
     CarGroup carGroup_;     // the car and its hinged parts (panels.h)
     BodyContacts debrisContacts_;  // the loose parts' contacts with the world

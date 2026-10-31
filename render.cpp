@@ -994,6 +994,9 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
     for (int k = 0; k < 2; ++k) skids_[k].Reset(), skidTaken_[k] = false;
     if (skidVb_) skidVb_->Release();
     skidVb_ = nullptr;
+    if (markVb_) markVb_->Release();
+    markVb_ = nullptr;
+    markSets_.clear();
     if (vehicle && sfx && sfx->uid == 0x1f) {
         int sfxPackage = -1;
         for (size_t i = 0; i < packages_.size(); ++i)
@@ -1016,6 +1019,22 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
             snprintf(buf, sizeof(buf), "not drawn (material 0x1f000d: effect %d, type %d)", skidGroup_.fx,
                      int(skidGroup_.type));
         skidInfo = buf;
+        // The damage marks' buffers (0x50e239: material 0x1f000a for the
+        // holes, 0x1f000c for the glass; drawn through 0x57ebc0 with render
+        // id 0x0a).
+        markGroup_[0] = GroupFor(0x1f000a, 0x0a, false, true, sfxUid);
+        markGroup_[1] = GroupFor(0x1f000c, 0x0a, false, true, sfxUid);
+        if (markGroup_[0].fx > 0 && markGroup_[1].fx > 0 &&
+            SUCCEEDED(device_->CreateVertexBuffer(kMarkVertices * UINT(sizeof(MarkVertex)), D3DUSAGE_WRITEONLY, 0,
+                                                  D3DPOOL_MANAGED, &markVb_, nullptr)))
+            snprintf(buf, sizeof(buf), "holes: material 0x1f000a, effect 0x%x, type 0x%x, preset 0x%02x; glass: "
+                     "material 0x1f000c, effect 0x%x, type 0x%x, preset 0x%02x", unsigned(markGroup_[0].fx),
+                     unsigned(markGroup_[0].type), unsigned(states_[markGroup_[0].state].base),
+                     unsigned(markGroup_[1].fx), unsigned(markGroup_[1].type),
+                     unsigned(states_[markGroup_[1].state].base));
+        else
+            snprintf(buf, sizeof(buf), "not drawn (effects %d / %d)", markGroup_[0].fx, markGroup_[1].fx);
+        markInfo = buf;
     }
     // Instances no quadtree reaches are not drawn (as in the game).
     std::vector<bool> reached(city.instances.size(), false);
@@ -1615,6 +1634,45 @@ void CityRenderer::DrawSkid(int& applied)
     e.fx->End();
 }
 
+// The damage marks (0x4f5a80 -> 0x4f37b0 -> 0x57ebc0): each buffer's count
+// x 4 vertices with the part's World and its side's group. Drawn here as two
+// triangles per quad (0 1 2, 2 1 3) right after the skid marks (the game's
+// request order among the car's draws was not traced).
+void CityRenderer::DrawMarks(int& applied)
+{
+    if (!markVb_ || markSets_.empty()) return;
+    UINT total = 0;
+    for (const MarkSet& s : markSets_) total += UINT(s.quads.size() / 4) * 6;
+    if (total == 0 || total > kMarkVertices) return;
+    void* p = nullptr;
+    if (FAILED(markVb_->Lock(0, total * UINT(sizeof(MarkVertex)), &p, 0)) || !p) return;
+    MarkVertex* o = static_cast<MarkVertex*>(p);
+    static const int kOrder[6] = { 0, 1, 2, 2, 1, 3 };
+    for (const MarkSet& s : markSets_)
+        for (size_t q = 0; q + 4 <= s.quads.size(); q += 4)
+            for (int k : kOrder) *o++ = s.quads[q + size_t(k)];
+    markVb_->Unlock();
+    UINT first = 0;
+    for (const MarkSet& s : markSets_) {
+        const UINT n = UINT(s.quads.size() / 4) * 6;
+        const Package::Group& g = markGroup_[s.side ? 1 : 0];
+        Effect& e = fx_[g.fx];
+        UINT passes = 0;
+        if (n && e.fx && SUCCEEDED(e.fx->Begin(&passes, D3DXFX_DONOTSAVESTATE)) && SUCCEEDED(e.fx->BeginPass(0))) {
+            float world[16];
+            Transpose(s.world, world);
+            BindGroup(g, g.state, world, applied, 1.0f, 0);
+            SetDecl(decl_);
+            device_->SetStreamSource(0, markVb_, 0, sizeof(MarkVertex));
+            device_->DrawPrimitive(D3DPT_TRIANGLELIST, first, n / 3);
+            ++frameDraws;
+            e.fx->EndPass();
+            e.fx->End();
+        }
+        first += n;
+    }
+}
+
 // 0x5616c0: each buffer object with vertices draws its list (D3DPT_TRIANGLELIST,
 // World identity) with its group's states (type 4 -> preset 0x27: stencil
 // REPLACE 1, colour writes alpha only, SRCALPHA / ONE). The game draws them
@@ -2152,6 +2210,7 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
     // particles: in the trace right after the tree shadows (the last draws
     // of the shadow pass), before the HUD.
     DrawSkid(applied);
+    DrawMarks(applied);
     DrawSmoke(fov, aspect, applied);
     drawList(late, false);  // list 2, mode 2
 }
@@ -2232,6 +2291,9 @@ void CityRenderer::Release()
     smokeVb_ = nullptr;
     if (skidVb_) skidVb_->Release();
     skidVb_ = nullptr;
+    if (markVb_) markVb_->Release();
+    markVb_ = nullptr;
+    markSets_.clear();
     smokeInfo.clear();
     cameraToScreen_ = timeAndConstants_ = compression_ = nullptr;
     currentDecl_ = nullptr;

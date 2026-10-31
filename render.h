@@ -71,6 +71,7 @@
 #include "collision.h"
 #include "mdpc.h"
 #include "mood.h"
+#include "marks.h"
 #include "skid.h"
 #include "smoke.h"
 #include "treeshadow.h"
@@ -236,6 +237,18 @@ public:
     SkidRibbon* Skid(int k) { return skidTaken_[k] ? &skids_[k] : nullptr; }
     const float* MoodParticle() const { return mood_.particle; }  // +0x210, the ribbons' colour
     std::string skidInfo;
+    // The car's damage marks (marks.h; 0x4f5a80 per part with a record): the
+    // quads of one buffer, drawn with the part's World (row vectors) and the
+    // group of sfx material 0x1f000a (holes) / 0x1f000c (glass), render id
+    // 0x0a (0x57ebc0). The frame hands the sets it wants drawn.
+    struct MarkSet
+    {
+        float world[16];
+        int side = 0;
+        std::vector<MarkVertex> quads;  // 4 vertices each
+    };
+    void SetVehicleMarks(std::vector<MarkSet> sets) { markSets_ = std::move(sets); }
+    std::string markInfo;
 
 private:
     struct Package
@@ -487,6 +500,13 @@ private:
     bool skidTaken_[2] = {};
     Package::Group skidGroup_;
     IDirect3DVertexBuffer9* skidVb_ = nullptr;
+    // Damage marks: two triangles per quad, at most the pool's 20 buffers x 16
+    // quads per frame.
+    static const UINT kMarkVertices = 20 * 16 * 6;
+    std::vector<MarkSet> markSets_;
+    Package::Group markGroup_[2];
+    IDirect3DVertexBuffer9* markVb_ = nullptr;
+    void DrawMarks(int& applied);
     LodTable tables_[2];           // mode 1 (0x4ddc50) and mode 3 (0x4dde20)
     std::vector<StateSet> states_;
     // What the device has (valid: set by ApplyState since the last reset).

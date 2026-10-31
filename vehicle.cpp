@@ -158,6 +158,28 @@ bool ReadUpvh(const std::vector<uint8_t>& d, size_t up, size_t size, VehicleData
         e.mass = F32(d, r + 0x4c);
         v.damage.push_back(e);
     }
+    // The damage marks' block (0x4f4d80: the points 16-byte aligned after
+    // the table of first points; UPVH version >= 6).
+    if (U32(d, up + 0xc) >= 6) {
+        const size_t blob = pdl + U32(d, up + 0x18);
+        if (blob + 8 <= up + size) {
+            const uint32_t total = U32(d, blob), count = U32(d, blob + 4);
+            const uint32_t a = (count * 4 - 8) & 0xf, pad = 0x10 - a < 0x10 ? 0x10 - a : 0;
+            const size_t data = blob + pad + size_t(count) * 4 + 8;
+            if (count <= 0x14 && total <= 800 && data + size_t(total) * 20 <= up + size) {
+                for (uint32_t i = 0; i < count; ++i) v.markFirst.push_back(U32(d, blob + 8 + 4 * i));
+                for (uint32_t i = 0; i < total; ++i) {
+                    VehicleData::MarkPoint m;
+                    const size_t q = data + size_t(i) * 20;
+                    m.rest = U32(d, q);
+                    m.dented = U32(d, q + 4);
+                    memcpy(m.normal, &d[q + 8], 8);
+                    m.weight = U16(d, q + 0x10);
+                    v.markPoints.push_back(m);
+                }
+            }
+        }
+    }
     // The body's shapes: the physics entry of the part of type 4.
     uint32_t bodyEntry = 0;
     for (size_t i = 0; i < nparts; ++i)

@@ -100,6 +100,22 @@ struct VehicleData
         float mass = 0;
     };
     std::vector<DamageEntry> damage;
+    // The damage marks' points (BOOT_TO_MENU.md section 92; vehicle +0x828 =
+    // PDL + UPVH +0x18, version >= 6): per mesh (= damage record) the index
+    // of its first point (the next mesh's, or the count, ends it), then
+    // 20-byte points: +0 the rest position and +4 the dented one, packed
+    // x 10 : y 10 : z 12 bits from the low end (0x4f4ca0 / 0x4f4d10), +8..+0xa
+    // / +0xc..+0xe the rest / dented normal bytes (0x4f4ba0 / 0x4f4c20),
+    // +0xb the side (0 hole, 1 glass), u16 +0x10 the weight between the
+    // record's halves. Empty: no block (the game makes no marks then).
+    struct MarkPoint
+    {
+        uint32_t rest = 0, dented = 0;
+        uint8_t normal[8] = {};  // bytes +8..+0xf (+0xb = the side)
+        uint16_t weight = 0;
+    };
+    std::vector<uint32_t> markFirst;
+    std::vector<MarkPoint> markPoints;
 };
 
 // Every vehicle entry of a .vvs file (false: not one).
