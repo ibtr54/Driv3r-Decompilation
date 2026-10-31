@@ -96,6 +96,24 @@ bool DamageMayHinge(int type, int id, uint32_t flags)
     return IsType1(type, id, { 4, 5, 0x1f, 0x34, 0x36, 0x38, 0x20, 0x35, 0x37, 0x39, 0x23, 0x24 });
 }
 
+bool DamageShowsDent(int type, int id, uint32_t flags)
+{
+    if (IsType1(type, id, { 0x42, 0x43, 0x44, 0x45, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x2d, 0x57, 0x59, 0x58 }))
+        return false;
+    if (type == 8 && id >= 0x48 && id <= 0x4d) return false;
+    return (flags & 1) != 0;
+}
+
+float VehicleDent(const VehicleData::Part& part, const DamageRecord& record)
+{
+    if (!DamageShowsDent(part.type, part.id, part.flags8)) return 0.0f;
+    // 0x4fe36b: 0 below 0, 1 above 1, else the value itself (-0 and NaN
+    // pass through).
+    const float h = record.half[0];
+    if (h < 0.0f) return 0.0f;
+    return h > 1.0f ? 1.0f : h;
+}
+
 void VehicleDamage::Init(const VehicleData& v, const float sz[3], const float handling[kHandlingKeys])
 {
     int count = 0;

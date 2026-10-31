@@ -3575,6 +3575,7 @@ private:
         Log("Level 0x%02x: chase camera at (%.3f, %.3f, %.3f), looking along (%.4f, %.4f, %.4f)", mission,
             carCamera_[12], carCamera_[13], carCamera_[14], -carCamera_[8], -carCamera_[9], -carCamera_[10]);
         carHidden_.assign(draw.parts.size(), 0);
+        carDent_.assign(draw.parts.size(), 0.0f);
         carClock_ = 0;
         driver_ = CarDriver();
         driverClock_ = 0;
@@ -3997,6 +3998,21 @@ private:
                 MatMul4(&panelDraw_[k * 17], &b->matrix[0][0], &carWorld_[dp * 16]);
             }
         city_.SetVehiclePose(carWorld_, &carHidden_);
+        // The dents (0x4fd7f0 per drawn part with a record: VehicleDent):
+        // the car shader moves the part's vertices by their damaged offset
+        // times its record's first half.
+        if (carVehicle_) {
+            for (size_t k = 0; k < damage_.records.size(); ++k) {
+                const int dp = DrawPartOfRecord(static_cast<int>(k)), part = damage_.recordPart[k];
+                if (dp < 0 || part < 0 || size_t(dp) >= carDent_.size()) continue;
+                const float d = VehicleDent(carVehicle_->parts[size_t(part)], damage_.records[k]);
+                if (d != carDent_[size_t(dp)])
+                    Log("Car dent: record %zu (part id 0x%x) %.4f", k, carVehicle_->parts[size_t(part)].id, d);
+                carDent_[size_t(dp)] = d;
+            }
+
+            city_.SetVehicleDamage(carDent_);
+        }
         // The skid marks' points (car vtbl+0x84 = 0x4b0830, every drawn
         // frame, BOOT_TO_MENU.md section 84): per rear wheel with a ribbon,
         // the wheel's rest contact (hardpoint + offset - radius, game vehicle
@@ -4071,6 +4087,7 @@ private:
     WheelTyres tyres_;                        // slot+0x1800: burst / gone (gone from the wheel hits)
     float wheelDamageSeen_[6] = {};           // the last logged wheel damage
     std::vector<uint8_t> carHidden_;          // per part, for SetVehiclePose
+    std::vector<float> carDent_;              // per part, for SetVehicleDamage
     float carDrawBody_[16] = {};              // the body's World for the draw (BlendBodyMatrix)
     ChaseCamera chase_;                       // the player's chase camera (camera.h)
     float carCamera_[16] = {};                // its matrix for the draw

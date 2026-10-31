@@ -40,10 +40,14 @@
 // box gives in where it was hit.
 // The wheel hits 0x507980 (section 87): s before the raise above, on the
 // nearest wheel; a wheel comes off at 1.5 (Wheel, WheelHit).
+// The drawn dent (section 91): each body part's models carry a damaged
+// offset per vertex, which the car shader adds times the part's record +4
+// (VehicleDent).
 // Not ported: the loose wheel's body (0x506cd0), the explosion contacts
 // (contact +0xf8 bit 0), the effects and sounds (0x5063f0, 0x50b100, sparks
-// 0x567840.., the scrape 0x56ff10), the visual dents 0x4f5890 (vertex
-// deformation).
+// 0x567840.., the scrape 0x56ff10), the damage marks of the UPVH's dent
+// block (0x507bb0 / 0x50bd20 / 0x4f5890: small quads at preset points that
+// follow the dent).
 #pragma once
 
 #include <array>
@@ -175,3 +179,10 @@ bool DamageFrontGroup(int type, int id, uint32_t flags);  // 0x4f4790
 bool DamageBackGroup(int type, int id, uint32_t flags);   // 0x4f4840
 bool DamageMayTear(int type, int id, uint32_t flags);     // 0x4f4570
 bool DamageMayHinge(int type, int id, uint32_t flags);    // 0x4f4620
+bool DamageShowsDent(int type, int id, uint32_t flags);   // 0x4f4510
+
+// The part's dent as drawn (0x4fd7f0 at 0x4fe32f: the draw request's +0x68,
+// the render object's +0x70, the car shader's g_DamageFactor): the record's
+// first half +4 clamped to [0, 1] when DamageShowsDent, else 0. The shader
+// adds the vertex's damaged offset (position 1, normal 1) times it.
+float VehicleDent(const VehicleData::Part& part, const DamageRecord& record);

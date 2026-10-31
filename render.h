@@ -93,7 +93,7 @@ struct ID3DXEffectPool;
 // shared vehicle materials (CarGlobals<City>.vgt, package uid 0x1d), the
 // models drawn with their World (row vector, applied to the vertices as
 // stored), and the object's colour (+0x50, g_colourWeightsVec of 0x5df200)
-// and damage (+0x70, g_DamageFactor of 0x5defb0).
+// and each part's damage (+0x70, g_DamageFactor of 0x5defb0: the dent).
 struct VehicleDraw
 {
     const MdpcPackage* package = nullptr;
@@ -103,10 +103,13 @@ struct VehicleDraw
         int model = 0;
         float world[16] = {};
         bool rim = false;  // a burst tyre's rim (hidden unless the tyre bursts)
+        // The dent (object +0x70, 0x4fd7f0 / 0x4fe36b): the car shader moves
+        // each vertex by its damaged offset (position 1 / normal 1) times
+        // this (VehicleDent).
+        float damage = 0;
     };
     std::vector<Part> parts;
     float colour[3] = {};
-    float damage = 0;
     // The body's World and the exhaust tips in the vehicle's space (x, y, z
     // per tip; VehicleData::exhausts): the exhaust smoke (smoke.h).
     float body[16] = {};
@@ -130,6 +133,9 @@ public:
     // nonzero leaves the part out (a burst tyre's wheel, an unused rim, a
     // missing wheel).
     void SetVehiclePose(const std::vector<float>& worlds, const std::vector<uint8_t>* hidden = nullptr);
+    // The parts' dents (VehicleDraw::parts order, one each), from the next
+    // Draw.
+    void SetVehicleDamage(const std::vector<float>& damage);
     // One 120 Hz world update of the car's smoke: the car's effects block's
     // decision when it ran this tick (CarSim::Effects, else null), then the
     // emitters' clock (half a tick). Once called, the smoke no longer
@@ -274,8 +280,10 @@ private:
         // of the substance its groups draw with (0x5d92b0; 0 for the city,
         // SEA_COLOUR - 1 for the sea's tiles).
         uint32_t substance = 0;
-        // A vehicle's part: its World (no city instance; in is nullptr).
+        // A vehicle's part: its World (no city instance; in is nullptr) and
+        // its dent (object +0x70).
         const float* world = nullptr;
+        const float* damage = nullptr;
     };
     struct Effect
     {
@@ -424,12 +432,14 @@ private:
         currentDecl_ = decl;
     }
     // The vehicle: its parts (indices into instances_, submitted every frame
-    // with mask 0x22: slot 0 and the shadow volume), Worlds, colour, damage.
+    // with mask 0x22: slot 0 and the shadow volume), Worlds, colour, dents.
     std::vector<int> vehicleParts_;
     std::vector<std::vector<float>> vehicleWorlds_;
     std::vector<size_t> vehicleWorldPart_;  // the VehicleDraw part of each vehicleWorlds_ entry
     std::vector<uint8_t> vehicleHidden_;    // per vehicleParts_ entry (SetVehiclePose)
-    float vehicleColour_[3] = {}, vehicleDamage_ = 0;
+    std::vector<float> vehicleDamage_;      // per vehicleWorlds_ entry (SetVehicleDamage)
+    float vehicleColour_[3] = {};
+    float drawDamage_ = 0;  // the drawn object's +0x70 (BindGroup)
     IDirect3DTexture9* white_ = nullptr;
     std::vector<Package> packages_;
     std::vector<Instance> instances_;

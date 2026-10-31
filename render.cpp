@@ -905,6 +905,7 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
     vehicleParts_.clear();
     vehicleWorlds_.clear();
     vehicleWorldPart_.clear();
+    vehicleDamage_.clear();
     vehicleInfo.clear();
     if (vehicle && vehicle->package) {
         std::map<uint32_t, int> carUid;
@@ -916,18 +917,20 @@ bool CityRenderer::Upload(const std::vector<MdpcPackage>& packages, size_t first
         AddPackage(*vehicle->package);
         ResolveGroups(packages_.back(), carUid, car, true);
         memcpy(vehicleColour_, vehicle->colour, sizeof(vehicleColour_));
-        vehicleDamage_ = vehicle->damage;
         std::map<int, size_t> perFx;
         vehicleWorlds_.reserve(vehicle->parts.size());
+        vehicleDamage_.reserve(vehicle->parts.size());
         for (size_t pi = 0; pi < vehicle->parts.size(); ++pi) {
             const VehicleDraw::Part& part = vehicle->parts[pi];
             if (part.model < 0 || size_t(part.model) >= vehicle->package->models.size()) continue;
             vehicleWorlds_.emplace_back(part.world, part.world + 16);
             vehicleWorldPart_.push_back(pi);
+            vehicleDamage_.push_back(part.damage);
             Instance inst;
             inst.package = car;
             inst.model = uint32_t(part.model);
             inst.world = vehicleWorlds_.back().data();
+            inst.damage = &vehicleDamage_.back();
             memcpy(inst.centre, part.world + 12, sizeof(inst.centre));
             for (const auto& sm : packages_[size_t(car)].groupOf[inst.model][0])
                 for (const Package::Group& g : sm) ++perFx[g.fx];
@@ -1192,9 +1195,11 @@ void CityRenderer::BindGroup(const Package::Group& info, int state, const float 
         if (e.clean) e.fx->SetTexture(e.clean, info.clean ? info.clean : white_);
         if (e.damageTex) e.fx->SetTexture(e.damageTex, info.damage ? info.damage : white_);
         if (e.mask) e.fx->SetTexture(e.mask, info.mask ? info.mask : white_);
-        // 0x5defb0: g_DamageFactor = (damage, damage, 0, 0) (object +0x70).
+        // 0x5defb0: g_DamageFactor = (damage, damage, 0, 0) (object +0x70;
+        // +0x74 is not used: the shader's blend by the vertex's tangent
+        // between the two halves gives the same value everywhere).
         if (e.damageFactor) {
-            const D3DXVECTOR4 d(vehicleDamage_, vehicleDamage_, 0, 0);
+            const D3DXVECTOR4 d(drawDamage_, drawDamage_, 0, 0);
             e.fx->SetVector(e.damageFactor, &d);
         }
         // 0x5df200 by the substance's +0x15: 0 (one texture only) (1, 1, 1,
@@ -1207,8 +1212,8 @@ void CityRenderer::BindGroup(const Package::Group& info, int state, const float 
             switch (info.colourMode) {
             case 0: w = D3DXVECTOR4(1, 1, 1, 0); set = info.textureCount == 1; break;
             case 4: w = D3DXVECTOR4(c[0], c[1], c[2], 0); break;
-            case 8: w = D3DXVECTOR4(0.5f, 0.5f, 0.5f, vehicleDamage_); break;
-            case 0x10: w = D3DXVECTOR4(c[0], c[1], c[2], vehicleDamage_); break;
+            case 8: w = D3DXVECTOR4(0.5f, 0.5f, 0.5f, drawDamage_); break;
+            case 0x10: w = D3DXVECTOR4(c[0], c[1], c[2], drawDamage_); break;
             default: set = false; break;
             }
             if (set) e.fx->SetVector(e.colourWeights, &w);
@@ -2081,8 +2086,10 @@ void CityRenderer::Draw(const float viewProj[16], const float eye[3], const floa
                 // g_ObjectToWorld with the vertices as stored).
                 if (o.inst->world) Transpose(o.world, world);
                 else worldOf(o.world, *it.sm, world);
+                drawDamage_ = o.inst->damage ? *o.inst->damage : 0.0f;
                 DrawGroup(p, p.data->models[o.inst->model], *it.g, *it.info, state, world, applied, o.alpha,
                           o.inst->substance);
+                drawDamage_ = 0;
                 if (redraw) ++frameRedraws;
             }
             e.fx->EndPass();
@@ -2231,6 +2238,7 @@ void CityRenderer::Release()
     vehicleParts_.clear();
     vehicleWorlds_.clear();
     vehicleWorldPart_.clear();
+    vehicleDamage_.clear();
     vehicleInfo.clear();
     if (white_) white_->Release();
     shared_ = nullptr;
@@ -2246,6 +2254,12 @@ void CityRenderer::Release()
     shadowInstances = lateGroups = hiddenGroups = 0;
     shadowState_[0] = shadowState_[1] = -1;
     textures = texturesSkipped = groupsUntextured = 0;
+}
+
+void CityRenderer::SetVehicleDamage(const std::vector<float>& damage)
+{
+    for (size_t i = 0; i < vehicleDamage_.size() && i < vehicleWorldPart_.size(); ++i)
+        if (vehicleWorldPart_[i] < damage.size()) vehicleDamage_[i] = damage[vehicleWorldPart_[i]];
 }
 
 void CityRenderer::SetVehiclePose(const std::vector<float>& worlds, const std::vector<uint8_t>* hidden)
