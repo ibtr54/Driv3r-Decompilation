@@ -66,7 +66,8 @@ struct Shape
     bool off;
 };
 
-// 0x5a3ba0 for boxes and cylinders (type 0 / 1; false for spheres).
+// 0x5a3ba0 for boxes, cylinders and cylinder / sphere (types 0 / 1 / 2;
+// false for box / sphere and sphere / sphere, which Covered leaves out).
 bool PairContact(const Shape& a, const float* wa, const Shape& b, const float* wb, BodyContact& k)
 {
     if (a.type == 0 && b.type == 0) return BoxBoxContact(a.size, wa, b.size, wb, k);
@@ -80,8 +81,18 @@ bool PairContact(const Shape& a, const float* wa, const Shape& b, const float* w
         return true;
     }
     if (a.type == 1 && b.type == 1) return CylinderCylinderContact(a.size, wa, b.size, wb, k);
+    if (a.type == 1 && b.type == 2) return CylinderSphereContact(a.size, wa, b.size[0], wb, k);
+    if (a.type == 2 && b.type == 1) {
+        if (!CylinderSphereContact(b.size, wb, a.size[0], wa, k)) return false;
+        for (int i = 0; i < 3; ++i) {
+            k.normal[i] = -k.normal[i];
+            std::swap(k.pointA[i], k.pointB[i]);
+        }
+        return true;
+    }
     return false;
 }
+bool Covered(int a, int b) { return (a <= 1 && b <= 1) || (a == 1 && b == 2) || (a == 2 && b == 1); }
 
 std::vector<Shape> Shapes(const std::vector<uint32_t>& h)
 {
@@ -105,6 +116,7 @@ int main(int argc, char** argv)
     if (argc < 2) { printf("narrowreplay <phys.txt>\n"); return 1; }
     Read(argv[1]);
     int tested = 0, equal = 0, close = 0, skipped = 0, shown = 0, withCyl = 0, cylEqual = 0, cylCyl = 0, cylCylEqual = 0;
+    int cylSph = 0, cylSphEqual = 0;
     float worst = 0;
     for (const auto& np : g_np) {
         const unsigned n = np.first;
@@ -115,8 +127,9 @@ int main(int argc, char** argv)
         if (r[0x34 / 4] == 0) continue;  // no contact (the fields are stale then)
         const std::vector<Shape> sa = Shapes(g_dumps["NPah"][n]), sb = Shapes(g_dumps["NPbh"][n]);
         bool boxes = !sa.empty() && !sb.empty();
-        for (const Shape& s : sa) boxes = boxes && s.type <= 1;
-        for (const Shape& s : sb) boxes = boxes && s.type <= 1;
+        for (size_t i = sa.size() > 1 ? 1 : 0; i < sa.size(); ++i)
+            for (size_t j = sb.size() > 1 ? 1 : 0; j < sb.size(); ++j)
+                if (!sa[i].off && !sb[j].off) boxes = boxes && Covered(sa[i].type, sb[j].type);
         if (!boxes) { ++skipped; continue; }
         float ma[16], mb[16];
         for (int k = 0; k < 16; ++k) { ma[k] = F(a[4 + k]); mb[k] = F(b[4 + k]); }
@@ -144,6 +157,8 @@ int main(int argc, char** argv)
         const bool cc = found && sa[bi].type == 1 && sb[bj].type == 1;
         if (cyl) ++withCyl;
         if (cc) ++cylCyl;
+        const bool cs = found && (sa[bi].type == 2 || sb[bj].type == 2);
+        if (cs) ++cylSph;
         float traced[3][3];
         for (int k = 0; k < 3; ++k) {
             traced[0][k] = F(r[k]) + pa[k];
@@ -162,7 +177,7 @@ int main(int argc, char** argv)
             diff = std::fmax(diff, std::fabs(best.normal[k] - traced[2][k]));
         }
         worst = std::fmax(worst, diff);
-        if (diff == 0) ++equal, cylEqual += cyl, cylCylEqual += cc;
+        if (diff == 0) ++equal, cylEqual += cyl, cylCylEqual += cc, cylSphEqual += cs;
         else if (diff < 1e-4f) ++close;
         if (diff >= 1e-4f && shown++ < 20)
             printf("NP %u: shapes %zu / %zu, depth %.5f (trace %.5f), normal (%.4f %.4f %.4f) trace (%.4f %.4f %.4f),\n"
@@ -172,8 +187,9 @@ int main(int argc, char** argv)
                    best.pointB[0], best.pointB[1], best.pointB[2], traced[1][0], traced[1][1], traced[1][2]);
     }
     printf("%d box / cylinder pairs with a contact (%d kept a box / cylinder pair, %d of them equal): %d equal, %d within 1e-4, "
-           "worst difference %g (%d pairs with spheres skipped)\n",
+           "worst difference %g (%d pairs with box / sphere or sphere / sphere skipped)\n",
            tested, withCyl, cylEqual, equal, close, worst, skipped);
     printf("cylinder / cylinder kept: %d, %d equal\n", cylCyl, cylCylEqual);
+    printf("cylinder / sphere kept: %d, %d equal\n", cylSph, cylSphEqual);
     return 0;
 }

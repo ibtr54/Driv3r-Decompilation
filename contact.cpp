@@ -852,12 +852,101 @@ bool CylinderCylinder(const Cyl& A, const Cyl& B, BodyContact& c)
     return true;
 }
 
+// 0x5b7cf0: cylinder A ({radius, half height}, axis row 1) against sphere B,
+// the normal from B to A. c: B's centre in A's frame (B x A's rigid inverse,
+// as CylFrame); s the sign of c.y, ay = s c.y, cap = (h + r) - ay. The
+// centre on the axis (x x + z z or its root at most 1e-5) always gives the
+// cap answer; beside the side (ay <= h) the side's depth (R + r) - |c.xz|
+// unless the cap is shallower; beyond a cap the cap face (|c.xz| <= R) or
+// the rim circle (nearest rim point q, depth r - |c - q|). The point is B's
+// centre + n r, both points alike.
+bool CylinderSphere(float radius, float halfHeight, const float* cylWorld, float sr, const float* sphereWorld,
+                    BodyContact& c)
+{
+    const float kEps = 9.999999747378752e-06f;  // 0x78e9b0
+    float L[16];
+    CylFrame(sphereWorld, cylWorld, L);
+    const float cx = L[12], cy = L[13], cz = L[14];
+    const float* r0 = cylWorld;
+    const float* r1 = cylWorld + 4;
+    const float* r2 = cylWorld + 8;
+    const float s = cy < 0 ? -1.0f : 1.0f;
+    const float ay = s * cy;
+    const float cap = (halfHeight + sr) - ay;
+    const float d2 = cx * cx + cz * cz;
+    float n[3], depth;
+    // the normal along the axis, away from the sphere's side: row 1 x -s
+    auto axisNormal = [&]() {
+        const float k = s * -1.0f;
+        for (int i = 0; i < 3; ++i) n[i] = k * r1[i];
+    };
+    // a local normal v to the world, (r1 y + r2 z) + r0 x (the side's order)
+    auto sideWorld = [&](const float v[3]) {
+        for (int i = 0; i < 3; ++i) n[i] = (r1[i] * v[1] + r2[i] * v[2]) + r0[i] * v[0];
+    };
+    // (r0 x + r1 y) + r2 z (the rim's order)
+    auto rimWorld = [&](const float v[3]) {
+        for (int i = 0; i < 3; ++i) n[i] = (r0[i] * v[0] + r1[i] * v[1]) + r2[i] * v[2];
+    };
+    float dr = 0;
+    bool onAxis = !(d2 > kEps);
+    if (!onAxis) {
+        dr = sqrtf(d2);
+        onAxis = !(dr > kEps);
+    }
+    if (onAxis) {
+        depth = cap;
+        axisNormal();
+    } else if (!(ay > halfHeight)) {
+        const float side = (radius + sr) - dr;
+        if (!(side > 0)) return false;
+        if (side <= cap) {
+            depth = side;
+            const float k = 1.0f / (dr * -1.0f);
+            const float v[3] = { k * cx, k * 0.0f, k * cz };
+            sideWorld(v);
+        } else {
+            depth = cap;
+            axisNormal();
+        }
+    } else if (!(dr > radius)) {
+        if (!(cap > 0)) return false;
+        depth = cap;
+        axisNormal();
+    } else {
+        const float ex = dr - radius, ey = ay - halfHeight;
+        const float e2 = ey * ey + ex * ex;
+        if (!(e2 < sr * sr)) return false;
+        const float el = sqrtf(e2);
+        if (!(el > kEps)) {
+            // the centre on the rim: along c itself
+            depth = sr;
+            const float k = 1.0f / (sqrtf(ay * ay + d2) * -1.0f);
+            const float v[3] = { k * cx, k * cy, k * cz };
+            rimWorld(v);
+        } else {
+            if (!(el < sr)) return false;
+            depth = sr - el;
+            const float kq = 1.0f / dr;
+            const float q[3] = { radius * cx * kq, s * halfHeight, radius * cz * kq };
+            const float k = 1.0f / (el * -1.0f);
+            const float v[3] = { k * (cx - q[0]), k * (cy - q[1]), k * (cz - q[2]) };
+            rimWorld(v);
+        }
+    }
+    for (int i = 0; i < 3; ++i) {
+        c.normal[i] = n[i];
+        c.pointA[i] = c.pointB[i] = sr * n[i] + sphereWorld[12 + i];
+    }
+    c.depth = depth;
+    return true;
+}
+
 // 0x5a3ba0: shape A against shape B in the world (types 0 box, 1 cylinder
 // {radius, half height}, 2 sphere {radius}). Box / box, box / cylinder,
-// box / sphere and cylinder / cylinder are ported; cylinder / box and
-// sphere / box run those with the sides swapped (the normal turned, the
-// points exchanged). Cylinder / sphere (0x5b7cf0) is not: there the cylinder
-// is taken as its bounding box (r, h, r).
+// box / sphere, cylinder / cylinder and cylinder / sphere (0x5b7cf0) are
+// ported; cylinder / box, sphere / box and sphere / cylinder run those with
+// the sides swapped (the normal turned, the points exchanged).
 bool ShapePair(int typeA, const float sizeA[3], const float* worldA, int typeB, const float sizeB[3],
                const float* worldB, BodyContact& c)
 {
@@ -887,13 +976,15 @@ bool ShapePair(int typeA, const float sizeA[3], const float* worldA, int typeB, 
         MakeCyl(sizeB, worldB, b);
         return CylinderCylinder(a, b, c);
     }
-    if (typeA == 1) {
-        const float box[3] = { sizeA[0], sizeA[1], sizeA[0] };
-        return ShapePair(0, box, worldA, typeB, sizeB, worldB, c);
-    }
-    if (typeB == 1) {
-        const float box[3] = { sizeB[0], sizeB[1], sizeB[0] };
-        return ShapePair(typeA, sizeA, worldA, 0, box, worldB, c);
+    if (typeA == 1 && typeB == 2) return CylinderSphere(sizeA[0], sizeA[1], worldA, sizeB[0], worldB, c);
+    if (typeA == 2 && typeB == 1) {
+        // 0x5a3c18: the same routine, the normal turned
+        if (!CylinderSphere(sizeB[0], sizeB[1], worldB, sizeA[0], worldA, c)) return false;
+        for (int k = 0; k < 3; ++k) {
+            c.normal[k] = -c.normal[k];
+            std::swap(c.pointA[k], c.pointB[k]);
+        }
+        return true;
     }
     return false;  // sphere / sphere (0x5b6fb0): no moving spheres
 }
@@ -1327,6 +1418,11 @@ bool CylinderCylinderContact(const float sizeA[3], const float* worldA, const fl
     MakeCyl(sizeA, worldA, a);
     MakeCyl(sizeB, worldB, b);
     return CylinderCylinder(a, b, c);
+}
+
+bool CylinderSphereContact(const float sizeA[3], const float* worldA, float radius, const float* worldB, BodyContact& c)
+{
+    return CylinderSphere(sizeA[0], sizeA[1], worldA, radius, worldB, c);
 }
 
 // 0x407640 (eax e, ecx c): c x e.
