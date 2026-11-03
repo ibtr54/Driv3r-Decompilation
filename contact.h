@@ -52,6 +52,10 @@ struct BodyContact
     float depth = 0;                       // +0x30
     int surfaceA = 0, surfaceB = 0;        // +0x40 / +0x44
     int propInstance = -1;                 // B is this smashable prop (props.h)
+    // the narrow phase's points relative to the bodies (0x5a3730 keeps
+    // them so; tests set them from traces), used when relative is true
+    float relA[3] = {}, relB[3] = {};
+    bool relative = false;
 };
 
 class Props;

@@ -1003,21 +1003,32 @@ void BoundingHalf(const VehicleData::Shape& s, float h[3])
     h[2] = s.type == 0 ? s.size[2] : s.size[0];
 }
 
-// 0x5c2a30: the contact frame, rows (u, n x u, n) with u perpendicular to
-// n from its largest component.
-void ContactFrame(const float n[3], float R[3][3])
+// 0x41e990: v times 1 / |v| (the length as ((x x + y y) + z z)).
+void Normalise(const float v[3], float out[3])
 {
+    const float s = 1.0f / std::sqrt((v[0] * v[0] + v[1] * v[1]) + v[2] * v[2]);
+    out[0] = s * v[0];
+    out[1] = s * v[1];
+    out[2] = s * v[2];
+}
+
+// 0x5c2a30: the contact frame, rows (u, n x u, n) with n normalised first
+// (0x41e990) and u perpendicular to it from its largest component, also
+// normalised by the reciprocal of its length.
+void ContactFrame(const float normal[3], float R[3][3])
+{
+    float n[3];
+    Normalise(normal, n);
     int i = 0;
     float m = std::fabs(n[0]);
     if (m < std::fabs(n[1])) i = 1, m = std::fabs(n[1]);
     if (m < std::fabs(n[2])) i = 2;
     const int j = (i + 1) % 3, k = (i + 2) % 3;
-    float u[3];
-    u[j] = 1.0f;
-    u[k] = 1.0f;
-    u[i] = -((n[j] + n[k]) / n[i]);
-    const float l = std::sqrt(Dot(u, u));
-    for (float& v : u) v /= l;
+    float u0[3], u[3];
+    u0[j] = 1.0f;
+    u0[k] = 1.0f;
+    u0[i] = -((n[k] + n[j]) / n[i]);
+    Normalise(u0, u);
     float t[3];
     Cross(n, u, t);
     for (int c = 0; c < 3; ++c) {
@@ -1240,7 +1251,11 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr, Rig
     // separating (z >= 0): nothing (no push-out either).
     float R[3][3];
     ContactFrame(c.normal, R);
-    const float r[3] = { c.pointA[0] - body.pos[0], c.pointA[1] - body.pos[1], c.pointA[2] - body.pos[2] };
+    float r[3], rb[3] = {};
+    for (int k = 0; k < 3; ++k) {
+        r[k] = c.relative ? c.relA[k] : c.pointA[k] - body.pos[k];
+        if (other) rb[k] = c.relative ? c.relB[k] : c.pointB[k] - other->pos[k];
+    }
     // A grouped body (0x5c5260's branches): a jointed member keeps its
     // velocities in its own frame (0x5c1040), turned into the world by q
     // (0x58c1f0); the root's are world ones.
@@ -1250,19 +1265,26 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr, Rig
         Articulated::QuatRotate(body.q, body.vel, bv);
         Articulated::QuatRotate(body.q, body.w, bw);
     }
-    float wr[3];
-    Cross(bw, r, wr);
-    float vp[3] = { bv[0] + wr[0], bv[1] + wr[1], bv[2] + wr[2] };
-    float rb[3] = {};
-    if (other) {
-        for (int k = 0; k < 3; ++k) rb[k] = c.pointB[k] - other->pos[k];
-        float wrb[3];
-        Cross(other->w, rb, wrb);
-        for (int k = 0; k < 3; ++k) vp[k] = vp[k] - (other->vel[k] + wrb[k]);
+    // every vector into the frame first (0x41e510 with the record's R':
+    // ((x R[i].x + y R[i].y) + z R[i].z)), then v = ((wA x rA - wB x rB) +
+    // vA) - vB there (0x407640); a static B passes zero vectors
+    float vA[3], wA[3], rA[3], vB[3] = {}, wB[3] = {}, rB[3] = {};
+    for (int i = 0; i < 3; ++i) {
+        vA[i] = Dot(bv, R[i]);
+        wA[i] = Dot(bw, R[i]);
+        rA[i] = Dot(r, R[i]);
+        if (other) {
+            vB[i] = Dot(other->vel, R[i]);
+            wB[i] = Dot(other->w, R[i]);
+            rB[i] = Dot(rb, R[i]);
+        }
     }
+    float cA[3], cB[3];
+    Cross(wA, rA, cA);
+    Cross(wB, rB, cB);
     float v[3];
-    for (int i = 0; i < 3; ++i) v[i] = Dot(R[i], vp);
-    if (v[2] >= 0) return false;
+    for (int i = 0; i < 3; ++i) v[i] = ((cA[i] - cB[i]) + vA[i]) - vB[i];
+    if (!(v[2] < 0.0f)) return false;
     // 0x4e9160 -> 0x4e8f70 (BOOT_TO_MENU.md section 81): a smashable prop
     // broken before, or broken by this hit (the momentum of the body, a
     // grouped one's root), drops the contact: no impulse, no push-out
@@ -1270,27 +1292,40 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr, Rig
         const RigidBody& root = group ? *group->members[0].body : body;
         if (props->Hit(c.propInstance, Props::Momentum(root.vel, root.mass))) return false;
     }
-    // 0x5c3110: K (velocity change per impulse) in the frame.
-    float Kw[3][3];
-    for (int k = 0; k < 3; ++k) {
-        float ek[3] = {}, a[3], wa[3], dv[3];
-        ek[k] = 1.0f;
-        Cross(r, ek, a);
-        VecMat3(a, body.invI, wa);
-        Cross(wa, r, dv);
-        for (int m = 0; m < 3; ++m) Kw[m][k] = ek[m] / body.mass + dv[m];
+    // 0x5c3110 (symx87 on the listing, BOOT_TO_MENU.md section 95): K in
+    // the frame, each side as 1/m d - d_a . W_b with the inverse inertia
+    // turned into the frame (F = R invI R'), c_b = e_b x r, W = F c_b and
+    // d_a = r x e_a; K = (B's share) + (A's share). A static B is a body of
+    // A's mass x 1e6 with no inverse inertia: its share is 1 / (m_A 1e6) on
+    // the diagonal.
+    auto share = [&R](const float invI[3][4], const float rf[3], float inv, float S[3][3]) {
+        float M1[3][3], F[3][3];
+        for (int i = 0; i < 3; ++i)
+            for (int k = 0; k < 3; ++k) M1[i][k] = (R[i][0] * invI[0][k] + R[i][1] * invI[1][k]) + R[i][2] * invI[2][k];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) F[i][j] = (M1[i][0] * R[j][0] + M1[i][1] * R[j][1]) + M1[i][2] * R[j][2];
+        const float cs[3][3] = { { 0.0f, -rf[2], rf[1] }, { rf[2], 0.0f, -rf[0] }, { -rf[1], rf[0], 0.0f } };
+        float W[3][3];  // W[i][b] = F[i] . c_b
+        for (int i = 0; i < 3; ++i)
+            for (int b = 0; b < 3; ++b) W[i][b] = (F[i][0] * cs[b][0] + F[i][1] * cs[b][1]) + F[i][2] * cs[b][2];
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) {
+                // d_a = -c_a
+                const float d = ((-cs[a][0]) * W[0][b] + (-cs[a][1]) * W[1][b]) + (-cs[a][2]) * W[2][b];
+                S[a][b] = inv * (a == b ? 1.0f : 0.0f) - d;
+            }
+    };
+    float K[3][3], SA[3][3], SB[3][3] = {};
+    if (other) {
+        share(other->invI, rB, 1.0f / other->mass, SB);
+    } else {
+        const float inv = 1.0f / (body.mass * 1000000.0f);
+        for (int a = 0; a < 3; ++a) SB[a][a] = inv;
     }
-    float K[3][3], Ki[3][3];
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) {
-            float s = 0;
-            for (int a = 0; a < 3; ++a)
-                for (int b = 0; b < 3; ++b) s += R[i][a] * Kw[a][b] * R[j][b];
-            K[i][j] = s;
-        }
     // A grouped body's K through its group (0x5c3110 -> 0x5c67c0: test
     // impulses along the frame's axes), in the contact frame.
     Articulated::SMat x1;
+    if (!group) share(body.invI, rA, 1.0f / body.mass, SA);
     if (group) {
         // (BOOT_TO_MENU.md section 76) the contact record's +0x00 holds the
         // frame's axes as COLUMNS (R'; +0x30 is R) and its point +0x80 is
@@ -1300,53 +1335,69 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr, Rig
         // car gained speed into walls
         const float rows[3][4] = { { R[0][0], R[1][0], R[2][0], 0 }, { R[0][1], R[1][1], R[2][1], 0 },
                                    { R[0][2], R[1][2], R[2][2], 0 } };
-        float pf[3];
-        VecMat3(r, rows, pf);
         float Kg[3][4];
-        group->ContactInertia(body.member, rows, pf, Kg, x1);
+        group->ContactInertia(body.member, rows, rA, Kg, x1);
         for (int i = 0; i < 3; ++i)
-            for (int j = 0; j < 3; ++j) K[i][j] = Kg[i][j];
+            for (int j = 0; j < 3; ++j) SA[i][j] = Kg[i][j];
+    }
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) K[i][j] = SB[i][j] + SA[i][j];
+    // the inverse by cofactors over the determinant, in 0x5c3110's order;
+    // |det| <= 1e-17 ([0x78f070], double) or K22 <= 1e-5 ([0x78e9b0]): P = 0
+    // (the impulse is still "applied")
+    const float A1 = K[1][0] * K[0][2] - K[1][2] * K[0][0];
+    const float A2 = K[1][1] * K[0][0] - K[1][0] * K[0][1];
+    const float A3 = K[1][2] * K[0][1] - K[1][1] * K[0][2];
+    const float det = ((K[2][1] * A1) + (K[2][2] * A2)) + (K[2][0] * A3);
+    float P[3] = {};
+    if (std::fabs(static_cast<double>(det)) > 1e-17 && K[2][2] > 9.99999975e-06f) {
+        const float id = 1.0f / det;
+        // 0x5c49c0: f stops the normal velocity alone, g = -K^-1 v all of
+        // it; P = f (1 + e) + (g - f) grip, kept in the friction cone along
+        // the same line
+        const float f[3] = { 0, 0, -(v[2] / K[2][2]) };
+        float g[3];
+        g[2] = -((v[0] * (id * A3) + v[1] * (id * A1)) + v[2] * (id * A2));
+        g[1] = -((v[0] * (id * (K[0][2] * K[2][1] - K[0][1] * K[2][2])) +
+                  v[1] * (id * (K[0][0] * K[2][2] - K[0][2] * K[2][0]))) +
+                 v[2] * (id * (K[0][1] * K[2][0] - K[0][0] * K[2][1])));
+        g[0] = -((v[0] * ((K[2][2] * K[1][1] - K[2][1] * K[1][2]) * id) +
+                  v[1] * ((K[2][0] * K[1][2] - K[2][2] * K[1][0]) * id)) +
+                 v[2] * ((K[2][1] * K[1][0] - K[2][0] * K[1][1]) * id));
+        const float e1 = e + 1.0f;
+        for (int i = 0; i < 3; ++i) P[i] = (g[i] - f[i]) * grip + f[i] * e1;
+        if (P[2] * mu * P[2] * mu < (P[1] * P[1] + P[0] * P[0])) {
+            const float d = std::sqrt(g[1] * g[1] + g[0] * g[0]) - (g[2] - f[2]) * mu;
+            if (std::fabs(d) <= 9.99999975e-06f) {
+                P[0] = P[1] = P[2] = 0;
+            } else {
+                const float s = (e1 * f[2] * mu) / d;
+                for (int i = 0; i < 3; ++i) P[i] = (g[i] - f[i]) * s + f[i] * e1;
+            }
+        }
+    }
+    // 0x5c3110's outputs, turned back by R' ((x u + y t) + z n): J = R' P,
+    // A's dv = R' (P / m_A) and dL = R' (rA x P), B's with -1 / m_B and
+    // rB x -P (the frame's offsets)
+    auto back = [&R](const float x[3], float out[3]) {
+        for (int k = 0; k < 3; ++k) out[k] = (x[0] * R[0][k] + x[1] * R[1][k]) + x[2] * R[2][k];
+    };
+    float J[3], dvA[3], dLA[3], dvB[3], dLB[3];
+    back(P, J);
+    {
+        const float inv = 1.0f / body.mass;
+        const float pm[3] = { inv * P[0], inv * P[1], inv * P[2] };
+        const float rp[3] = { P[2] * rA[1] - P[1] * rA[2], P[0] * rA[2] - P[2] * rA[0], P[1] * rA[0] - P[0] * rA[1] };
+        back(pm, dvA);
+        back(rp, dLA);
     }
     if (other) {
-        // B's share (free: 1/m and [rb]x invI [rb]x), in the frame
-        float Kb[3][3];
-        for (int k = 0; k < 3; ++k) {
-            float ek[3] = {}, a[3], wa[3], dv[3];
-            ek[k] = 1.0f;
-            Cross(rb, ek, a);
-            VecMat3(a, other->invI, wa);
-            Cross(wa, rb, dv);
-            for (int m = 0; m < 3; ++m) Kb[m][k] = ek[m] / other->mass + dv[m];
-        }
-        for (int i = 0; i < 3; ++i)
-            for (int j = 0; j < 3; ++j) {
-                float s = 0;
-                for (int a = 0; a < 3; ++a)
-                    for (int b = 0; b < 3; ++b) s += R[i][a] * Kb[a][b] * R[j][b];
-                K[i][j] = K[i][j] + s;
-            }
+        const float inv = -1.0f / other->mass;
+        const float pm[3] = { inv * P[0], inv * P[1], inv * P[2] };
+        const float rp[3] = { rB[2] * P[1] - rB[1] * P[2], rB[0] * P[2] - rB[2] * P[0], rB[1] * P[0] - rB[0] * P[1] };
+        back(pm, dvB);
+        back(rp, dLB);
     }
-    if (!Invert3(K, Ki)) return false;
-    // 0x5c49c0: f stops the normal velocity alone, g all of it; P = f (1 +
-    // e) + (g - f) grip, kept in the friction cone along the same line.
-    const float f[3] = { 0, 0, -(v[2] / K[2][2]) };
-    float g[3];
-    for (int i = 0; i < 3; ++i) g[i] = -(Ki[i][0] * v[0] + Ki[i][1] * v[1] + Ki[i][2] * v[2]);
-    const float e1 = e + 1.0f;
-    float P[3];
-    for (int i = 0; i < 3; ++i) P[i] = (g[i] - f[i]) * grip + f[i] * e1;
-    if (P[2] * mu * P[2] * mu < P[0] * P[0] + P[1] * P[1]) {
-        const float d = std::sqrt(g[0] * g[0] + g[1] * g[1]) - (g[2] - f[2]) * mu;
-        if (std::fabs(d) <= 9.99999975e-06f) {
-            P[0] = P[1] = P[2] = 0;
-        } else {
-            const float s = (e1 * f[2] * mu) / d;
-            for (int i = 0; i < 3; ++i) P[i] = (g[i] - f[i]) * s + f[i] * e1;
-        }
-    }
-    float J[3], ang[3];
-    for (int k = 0; k < 3; ++k) J[k] = R[0][k] * P[0] + R[1][k] * P[1] + R[2][k] * P[2];
-    Cross(r, J, ang);
     // 0x5c3110's start: a resting contact (normal speed above -kRestSpeed)
     // between light bodies (mass <= 1000, [0x78e8cc]) wakes nobody (else
     // 0x5a9230); a body still asleep then gets no impulse.
@@ -1363,14 +1414,12 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr, Rig
     if (vv < kRestSpeed * kRestSpeed) {
         const bool jointed = group && group->members[body.member].parent >= 0;
         if (!jointed && body.state == 0x65) {
-            const float inv = 1.0f / body.mass;
             // a grouped root takes -1 ([0x78e904]): always opposing
-            const float s = group ? -1.0f : (J[0] * inv) * body.vel[0] + (J[2] * inv) * body.vel[2];
+            const float s = group ? -1.0f : dvA[0] * body.vel[0] + dvA[2] * body.vel[2];
             if (s < 0.0f && Speed(body.vel) < kRestSpeed && J[1] > 0.0f) RestingContact(body, r, other);
         }
         if (other && other->state == 0x65) {
-            const float inv = -1.0f / other->mass;
-            const float s = (J[0] * inv) * other->vel[0] + (J[2] * inv) * other->vel[2];
+            const float s = dvB[0] * other->vel[0] + dvB[2] * other->vel[2];
             if (s < 0.0f && Speed(other->vel) < kRestSpeed && J[1] < 0.0f) RestingContact(*other, rb, &body);
         }
     } else {
@@ -1378,10 +1427,18 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr, Rig
         if (other) ClearRestUnlessAsleep(*other);
     }
     // the impulse reaches awake bodies only (0x5c3110 gives a sleeping one
-    // nothing)
+    // nothing): v = dv + v, L = dL + L (0x4076e0), then w (0x5aee00)
+    auto apply = [](RigidBody& b, const float dv[3], const float dL[3]) {
+        for (int k = 0; k < 3; ++k) b.vel[k] = dv[k] + b.vel[k];
+        b.vel[3] = 0;
+        for (int k = 0; k < 3; ++k) b.L[k] = dL[k] + b.L[k];
+        b.L[3] = 0;
+        b.UpdateSpin();
+    };
     if (group) group->ContactImpulse(body.member, x1, P, false);  // 0x5a9da0, 0x5be2b0, 0x5c7390
-    else if (body.state == 0x65) body.ApplyImpulse(J, ang);
-    if (other && other->state == 0x65) {
+    else if (body.state == 0x65) apply(body, dvA, dLA);
+    if (other && other->state == 0x65 && !other->group) apply(*other, dvB, dLB);
+    else if (other && other->state == 0x65) {
         const float nj[3] = { -J[0], -J[1], -J[2] };
         float angB[3];
         Cross(rb, nj, angB);

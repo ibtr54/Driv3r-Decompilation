@@ -279,7 +279,10 @@ int main(int argc, char** argv)
             c.pointA[i] = A.pos[i] + F(r[i]);
             c.pointB[i] = (bodyB ? B.pos[i] : 0.0f) + F(r[4 + i]);
             c.normal[i] = F(r[8 + i]);
+            c.relA[i] = F(r[i]);
+            c.relB[i] = F(r[4 + i]);
         }
+        c.relative = true;
         c.depth = F(r[0x30 / 4]);
         const bool applied = g_dumps["RP"].count(n) != 0 && g_dumps["RP"][n].size() >= 0x100 / 4;
         c.surfaceA = static_cast<int>(applied ? g_dumps["RP"][n][0x90 / 4] : d[2]);

@@ -37,6 +37,7 @@
 #include "mec.h"
 #include "camera.h"
 #include "carsim.h"
+#include "carworld.h"
 #include "collision.h"
 #include "contact.h"
 #include "damage.h"
@@ -3083,34 +3084,6 @@ static float RideLift(int id)
     return c + o;
 }
 
-// The wheel rays (0x5a0820) against the city's static collision (the
-// placed instances' PDL shapes) and its GRTD ground (collision.h). The
-// dynamic props are not in the world yet (no bodies), so the car passes
-// through them.
-class WorldRays : public WheelRayCaster
-{
-public:
-    const CollisionWorld* world = nullptr;
-    const CityGround* ground = nullptr;
-    void Cast(WheelRay* rays, WheelHit* hits, int count) override
-    {
-        for (int i = 0; i < count; ++i) {
-            const WheelRay& r = rays[i];
-            hits[i] = WheelHit();
-            CollisionWorld::Hit h;
-            if (!world || !world->Cast(ground, r.start, r.dir, r.length, h)) continue;
-            hits[i].type = 2;
-            hits[i].distance = h.distance;
-            hits[i].f8 = -1;
-            hits[i].surface = h.surface;
-            hits[i].normal[0] = h.normal[0];
-            hits[i].normal[1] = h.normal[1];
-            hits[i].normal[2] = h.normal[2];
-            hits[i].normal[3] = 0;
-        }
-    }
-};
-
 // 4 x 4 row-vector product a b.
 static void MatMul4(const float* a, const float* b, float* out)
 {
@@ -3496,70 +3469,32 @@ private:
             Log("Level 0x%02x: vehicle %d: no physics (no model data or handling)", mission, id);
             return;
         }
-        car_ = CarSim();
-        car_.table = carTable_;
-        car_.vehicleId = id;
-        const float offset = WheelOffset(carTable_, HandlingClass(id));  // 0x511780: every slot's +0x92c
-        for (int s = 0; s < 6; ++s) car_.wheelOffset[s][1] = offset;
-        for (const VehicleWheel& w : v->wheels) {
-            if (w.slot < 0 || w.slot > 5) continue;
-            car_.slots[w.slot] = 1;
-            for (int k = 0; k < 3; ++k) car_.hardpoint[w.slot][k] = w.hardpoint[k];
-            car_.hardpoint[w.slot][3] = 1.0f;
-            car_.radius[w.slot] = w.radius;
-            car_.width[w.slot] = w.width;
-        }
-        car_.altDrop = 0;  // model +0x98c (0.241211 for vehicle 6, source not decoded; only wheels with flag 8 use it)
+        // The car's physics (carworld.h): the model's wheel data, Create,
+        // the rays, the shapes, the slot's damage records, marks and dent
+        world_.collision = &collision_;
+        world_.ground = &loader_.City().ground;
+        world_.props = &props_;
+        world_.log = &::Log;
         const float pos[3] = { draw.body[12], draw.body[13], draw.body[14] };
-        car_.Create(&carBody_, pos, pose[3]);
-        car_.SetAutomatic(true);
-        carRays_.world = &collision_;
-        carRays_.ground = &loader_.City().ground;
-        carShapes_ = v->collision;
-        carContacts_.vehicle = !carShapes_.empty();  // the surface rename 0x4e9160
-        carContacts_.vehicleBottom = carShapes_.empty() ? 0.0f : VehicleBottom(carShapes_[0]);
-        contactCount_ = 0;
-        contactLog_ = 0;
+        world_.Init(*v, id, carTable_, WheelOffset(carTable_, HandlingClass(id)), pos, pose[3]);
+        world_.onPartBody = [this](const DamageRequest& q) { PartBodyDrawn(q); };
+        world_.onWheelOff = [this](CarWorld::LooseWheel& lw) { WheelOffDrawn(lw); };
+        world_.onEffects = [this](bool ran, const CarSmokeState& smoke) { CarEffects(ran, smoke); };
         smokeLog_ = 0;
         tyreSmoke_[0] = tyreSmoke_[1] = false;
         skidLog_ = 0;
         sprayLog_ = 0;
         sprayOn_[0] = sprayOn_[1] = 0;
         skidOn_[0] = skidOn_[1] = false;
-        // The slot's damage records (damage.h): the slot's sizes are twice
-        // the bounding shape's half sizes (PDL z-up: x, z, y).
-        carVehicle_ = v;
         if (!carShapes_.empty()) {
-            const float* h = carShapes_[0].size;
-            const float size[3] = { h[0] + h[0], h[2] + h[2], h[1] + h[1] };
-            damage_ = VehicleDamage();
-            damage_.Init(*v, size, carTable_);
-            // the damage marks (marks.h): the slot's marks object and the
-            // world's buffers, all free
-            carMarks_.Init(*v);
-            markPool_ = MarkPool();
             markLog_ = 0;
             Log("Level 0x%02x: vehicle %d: %zu damage mark points in %zu meshes (key B: a debug hit); %s", mission,
                 id, v->markPoints.size(), v->markFirst.size(), city_.markInfo.c_str());
-            // the car's box that dents (0x5091b0; damage.h)
-            damage_.InitDent(id, &carShapes_, carTable_);
             if (damage_.dentShape >= 0)
                 Log("Level 0x%02x: vehicle %d: shape %d dents along axis %d (scales %g / %g)", mission, id,
                     damage_.dentShape, damage_.dentAxis, damage_.dentScale[0], damage_.dentScale[1]);
         }
-        damageLog_ = 0;
-        carBody_.group = nullptr;
-        carBody_.member = -1;
-        carGroup_.group.members.clear();
-        carGroup_.bodies.clear();
-        carGroup_.recs.clear();
-        carGroup_.records.clear();
-        carGroup_.hinged = 0;
-        carGroup_.torn.clear();
         panelDraw_.assign(damage_.records.size() * 17, 0.0f);
-        debrisLog_ = wheelLog_ = 0;
-        panelLog_ = panelTicks_ = 0;
-        carContacts_.onImpulse = [this](const BodyContact& c, const float J[3]) { CarImpact(c, J); };
         Log("Level 0x%02x: vehicle %d: %zu collision shapes (PDL entry of the part of type 4)", mission, id,
             carShapes_.size());
         // The parts relative to the body (the body's World is rigid).
@@ -3576,12 +3511,6 @@ private:
         carRimPart0_ = v->rim >= 0 ? carWheelPart0_ + v->wheels.size() : 0;
         carPackage_ = draw.package;
         carClass_ = HandlingClass(id);
-        wheelVis_ = WheelVisuals();
-        wheelVis_.Update(car_);  // the slot's set-up (0x4fadc0 / 0x4fba70 run 0x503e00 too)
-        wheelPrev_ = wheelVis_;
-        tyres_ = WheelTyres();
-        for (float& x : wheelDamageSeen_) x = 0;
-        looseWheels_.clear();
         chase_.Init(&carBody_.matrix[0][0], carBody_.vel, &collision_, &loader_.City().ground);
         chase_.Matrix(1.0f, carCamera_);
         Log("Level 0x%02x: chase camera at (%.3f, %.3f, %.3f), looking along (%.4f, %.4f, %.4f)", mission,
@@ -3620,187 +3549,70 @@ private:
         keys.control27 = down(0x27);
         driver_.Update(keys, car_.vehicleId, car_.F(0x54c), controls_, handbrake_);
     }
-    // The vehicle slot's contact listener (0x503fb0, damage.h) for one of the
-    // car body's contacts (a static object or a loose part). The parts the
-    // hit frees get their new state (DamageState: hinged in the car's group,
-    // or torn off as free bodies, drawn with their bodies).
-    void CarImpact(const BodyContact& c, const float J[3])
+    // CarWorld::onPartBody: a damage record's part got a body of its own;
+    // it is drawn with its body from now on: its place relative to the body
+    // as 0x4f8ef0 makes it (the part still in place; a hinged body's matrix
+    // is at the joint's 0 until the group's next step, the joint's start
+    // -pi/4 being the closed part).
+    void PartBodyDrawn(const DamageRequest& q)
     {
-        if (!carVehicle_ || damage_.records.empty()) return;
-        SyncPanels();
-        std::vector<DamageRequest> req;
-        damage_.Impact(*carVehicle_, &carBody_.matrix[0][0], carBody_.mass, -1, carBody_.mass, J, c.pointA,
-                       c.surfaceB, req);
-        if (damage_.lastPassed && damageLog_ < 40) {
-            ++damageLog_;
-            Log("Car hit: strength %.3f at (%.3f %.3f %.3f) in the car, side %.4f; slot total %.4f, front %.4f / %.4f, "
-                "back %.4f / %.4f", damage_.lastS, damage_.lastPoint[0], damage_.lastPoint[1], damage_.lastPoint[2],
-                damage_.lastSide, damage_.total, damage_.front[0], damage_.front[1], damage_.back[0], damage_.back[1]);
-        }
-        for (const DamageRequest& q : req) DamageState(q);
-        // 0x4f5890 per record of a body mesh (0x503fb0 at 0x504f71, once the
-        // slot has its marks object): the marks follow a dent that moved by
-        // more than 0.125.
-        if (carMarks_.active)
-            for (size_t k = 0; k < damage_.records.size() && k < carVehicle_->markFirst.size(); ++k) {
-                const int part = damage_.recordPart[k];
-                if (part < 0 || carVehicle_->parts[size_t(part)].type != 1) continue;
-                carMarks_.Replace(*carVehicle_, markPool_, int(k), damage_.records[k], &carBody_.matrix[0][0]);
+        const int dp = DrawPartOfRecord(q.record);
+        if (dp < 0) return;
+        RigidBody placed;
+        PanelBody(carVehicle_->damage[q.record], q.matrix, &carBody_.matrix[0][0], carBody_, placed);
+        float inv[16], rel[16];
+        Articulated::RigidInverse(&placed.matrix[0][0], inv);
+        MatMul4(&carLocal_[dp * 16], &carBody_.matrix[0][0], rel);
+        MatMul4(rel, inv, &panelDraw_[q.record * 17]);
+        panelDraw_[q.record * 17 + 16] = 1.0f;
+    }
+    // CarWorld::onWheelOff: a wheel that came off is drawn as it was,
+    // relative to its body from now on.
+    void WheelOffDrawn(CarWorld::LooseWheel& lw)
+    {
+        float inv[16], drawn[16];
+        InverseRows(&lw.body.matrix[0][0], false, inv);
+        MatMul4(&carLocal_[(carWheelPart0_ + size_t(lw.wheel)) * 16], &carBody_.matrix[0][0], drawn);
+        MatMul4(drawn, inv, lw.drawRel);
+    }
+    // CarWorld::onEffects: the car tick's effects block (every 1/60 s): the
+    // exhausts on while slower than 5 mph, the rear tyres' smoke while
+    // slipping, the spray and the skid marks (smoke.h)
+    void CarEffects(bool ran, const CarSmokeState& smoke)
+    {
+        city_.StepSmoke(ran ? &smoke : nullptr);
+        if (ran) {
+            city_.ApplySkid(smoke);
+            for (int k = 0; k < 2; ++k) {
+                const int on = int(smoke.sprayOn[k][0]) | int(smoke.sprayOn[k][1]) << 1 | int(smoke.sprayOn[k][2]) << 2;
+                if (on != sprayOn_[k] && sprayLog_ < 40) {
+                    ++sprayLog_;
+                    Log("Spray: wheel %d emitters %d%d%d on (surface %u, rear wheels %.2f) at (%.2f %.2f %.2f)",
+                        k ? 3 : 1, on & 1, (on >> 1) & 1, (on >> 2) & 1, car_.OU(0x78 + (k ? 3 : 1) * 0xd0),
+                        smoke.spraySpeed, smoke.tyrePos[k][0], smoke.tyrePos[k][1], smoke.tyrePos[k][2]);
+                }
+                sprayOn_[k] = on;
             }
-        // the wheel hits (0x507980): a wheel at 1.5 comes off; the slot's
-        // gone byte hides it (0x4fd7f0) and the car's tick takes the wheel
-        // as off (vtbl+0x7c, flag 0x80)
-        for (int k = 0; k < 6; ++k)
-            if (damage_.wheels[k].damage != wheelDamageSeen_[k]) {
-                wheelDamageSeen_[k] = damage_.wheels[k].damage;
-                if (damageLog_ < 60) {
-                    ++damageLog_;
-                    Log("Wheel hit: wheel %d damage %.4f%s", k, damage_.wheels[k].damage,
-                        damage_.wheels[k].gone ? ", comes off" : "");
+            for (int k = 0; k < 2; ++k)
+                if (smoke.skidRan && smoke.skidOn[k] != skidOn_[k]) {
+                    skidOn_[k] = smoke.skidOn[k];
+                    if (skidLog_ < 40) {
+                        ++skidLog_;
+                        Log("Skid marks: wheel %d %s (slip %.3f, intensity %.3f)", k ? 3 : 1,
+                            skidOn_[k] ? "on" : "off", car_.slip, smoke.skidIntensity[k]);
+                    }
+                }
+        }
+        for (int k = 0; ran && k < 2; ++k)
+            if (smoke.tyreOn[k] != tyreSmoke_[k]) {
+                tyreSmoke_[k] = smoke.tyreOn[k];
+                if (smokeLog_ < 40) {
+                    ++smokeLog_;
+                    Log("Tyre smoke: wheel %d %s (slip %.3f, alpha %.4f) at (%.2f %.2f %.2f); %d particles so far",
+                        k ? 3 : 1, smoke.tyreOn[k] ? "on" : "off", car_.slip, smoke.tyreAlpha[k],
+                        smoke.tyrePos[k][0], smoke.tyrePos[k][1], smoke.tyrePos[k][2], city_.SmokeSpawned());
                 }
             }
-        if (damage_.wheelOff >= 0) SpawnLooseWheel(damage_.wheelOff);
-        for (int k = 0; k < 6; ++k) {
-            tyres_.gone[k] = damage_.wheels[k].gone ? 1 : 0;
-            car_.wheelOff[k] = damage_.wheels[k].gone ? 1 : 0;
-        }
-    }
-    // 0x506cd0 (BOOT_TO_MENU.md section 87, run 36): the wheel that came off
-    // becomes a free body of mass 10 and inertia 1 from its part's PDL entry,
-    // at the wheel's centre (the UPVH hardpoint: run 36 (-0.7539, -0.1774,
-    // 1.4416) for wheel 0) with gravity (accel -10) and
-    // the car's rotation; its velocity the car's at that point (v + w x the
-    // offset with the part along w removed) plus 2.5 along the car's x
-    // (wheels 2, 3, 5: +, the others -: 0x48aeb0); its spin the car's plus
-    // the car's x times the front (wheels 0, 2) or rear wheel speed
-    // (vtbl+0x58 / +0x54; run 36: 18.7213 in all three components).
-    void SpawnLooseWheel(int slot)
-    {
-        if (!carVehicle_) return;
-        int part = -1, nth = 0, wheel = -1;
-        for (size_t i = 0; i < carVehicle_->parts.size(); ++i) {
-            if (carVehicle_->parts[i].type != 2) continue;
-            if (nth < int(carWheels_.size()) && carWheels_[size_t(nth)].slot == slot) part = int(i), wheel = nth;
-            ++nth;
-        }
-        if (part < 0) return;
-        const VehicleWheel& wh = carWheels_[size_t(wheel)];
-        const bool plus = slot == 3 || slot == 5 || slot == 2;
-        const float local[3] = { wh.hardpoint[0], wh.hardpoint[1], wh.hardpoint[2] };  // the UPVH hardpoint
-        const float* M = &carBody_.matrix[0][0];
-        LooseWheel lw;
-        lw.wheel = wheel;
-        RigidBody& b = lw.body;
-        for (int k = 0; k < 3; ++k) b.pos[k] = ((local[0] * M[k] + local[1] * M[4 + k]) + local[2] * M[8 + k]) + M[12 + k];
-        b.pos[3] = 1.0f;
-        memcpy(b.q, carBody_.q, sizeof(b.q));
-        b.mass = 10.0f;
-        b.inertia[0] = b.inertia[1] = b.inertia[2] = 1.0f;
-        b.accel[1] = -10.0f;  // the world's gravity (+0xe0, as the loose panels)
-        b.state = 0x65;
-        b.UpdateDerived();
-        float v[3], W[3];
-        const float* w = carBody_.w;
-        float d[3] = { b.pos[0] - carBody_.pos[0], b.pos[1] - carBody_.pos[1], b.pos[2] - carBody_.pos[2] };
-        float cross[3] = {};
-        if (!((w[0] * w[0] + w[1] * w[1]) + w[2] * w[2] < 9.99999944e-11f)) {
-            const float inv = 1.0f / std::sqrt((w[0] * w[0] + w[1] * w[1]) + w[2] * w[2]);
-            const float n[3] = { inv * w[0], inv * w[1], inv * w[2] };
-            const float along = (d[0] * n[0] + d[1] * n[1]) + d[2] * n[2];
-            for (int k = 0; k < 3; ++k) d[k] = d[k] - n[k] * along;
-            cross[0] = w[1] * d[2] - w[2] * d[1];
-            cross[1] = w[2] * d[0] - w[0] * d[2];
-            cross[2] = w[0] * d[1] - w[1] * d[0];
-        }
-        const float push = plus ? 2.5f : -2.5f;
-        const float spin = (slot == 0 || slot == 2) ? car_.FrontWheelSpeed() : car_.RearWheelSpeed();
-        for (int k = 0; k < 3; ++k) {
-            v[k] = (carBody_.vel[k] + cross[k]) + M[k] * push;
-            W[k] = w[k] + M[k] * spin;
-        }
-        b.SetVelocity(v);
-        b.SetSpin(W);
-        b.UpdateMatrix();
-        // its shapes: the wheel part's PDL entry, centred on the wheel (one
-        // cylinder, radius 0.3393, half width 0.1201 for vehicle 6), met by
-        // boxes through box / cylinder 0x5b4380 (contact.cpp; the ground and
-        // other cylinders still see its bounding box)
-        lw.shapes = carVehicle_->parts[size_t(part)].collision;
-        // drawn as the wheel was, relative to its body from now on
-        float inv[16], drawn[16];
-        InverseRows(&b.matrix[0][0], false, inv);
-        MatMul4(&carLocal_[(carWheelPart0_ + size_t(wheel)) * 16], M, drawn);
-        MatMul4(drawn, inv, lw.drawRel);
-        looseWheels_.push_back(lw);
-        Log("Wheel %d came off: body at (%.3f %.3f %.3f), v (%.3f %.3f %.3f), spin (%.3f %.3f %.3f)", slot, b.pos[0],
-            b.pos[1], b.pos[2], b.vel[0], b.vel[1], b.vel[2], b.w[0], b.w[1], b.w[2]);
-    }
-    // The hinged parts' matrices and joint values for the damage's tests
-    // (the record's body +0x10, the group list's +0x20).
-    void SyncPanels()
-    {
-        for (size_t k = 0; k < damage_.records.size(); ++k) {
-            const int m = carGroup_.MemberOfRecord(static_cast<int>(k));
-            if (m < 0) continue;
-            memcpy(damage_.records[k].bodyMatrix, &carGroup_.group.members[m].body->matrix[0][0], 64);
-            damage_.records[k].jointQ = carGroup_.group.q[m];
-        }
-    }
-    // 0x4f98b0 for a state the damage asks for: hinged (state 2) parts get
-    // their body in the car's group (panels.h); a part torn off (state 3,
-    // BOOT_TO_MENU.md section 76) leaves the group (the last one out ends
-    // it), takes its loose motion and stays a free body (the game's debris
-    // manager [0x8ac450]); one torn off the car directly gets its body now.
-    // timer: the bonnet timer's request (its push follows, 0x4fc1bc).
-    void DamageState(const DamageRequest& q, bool timer = false)
-    {
-        DamageRecord& r = damage_.records[q.record];
-        const VehicleData::Part& p = carVehicle_->parts[damage_.recordPart[q.record]];
-        bool ok = true;
-        RigidBody* made = nullptr;
-        if (q.state == 2 && !r.body) {
-            ok = carGroup_.Hinge(*carVehicle_, p, carBody_, &carBody_.matrix[0][0], q.matrix, r.half, damage_.size[0]);
-            if (ok) {
-                r.body = 1;
-                r.f18 = 20.0f;
-                r.f28 = (r.half[0] + r.half[1]) * 0.5f;
-                r.flags |= 4;
-                made = carGroup_.BodyOfRecord(q.record);
-            }
-        } else if (q.state == 3 && r.state < 3) {
-            RigidBody* b = nullptr;
-            if (r.state == 2 && r.body) {
-                b = carGroup_.Tear(q.record, carBody_, damage_.prevVel, damage_.prevW);  // 0x505c90 .. 0x5a1000
-            } else if (!r.body && !(r.flags & 1)) {
-                b = carGroup_.Loose(*carVehicle_, p, carBody_, &carBody_.matrix[0][0], q.matrix);  // 0x4f8ef0
-                made = b;
-            }
-            damage_.TearShare(q.record);  // 0x4f9810
-            if (b && timer) TornPanelKick(*b, carBody_);
-            r.body = 0;
-        }
-        if (made) {
-            // the part drawn with its body from now on: its place relative
-            // to the body as 0x4f8ef0 makes it (the part still in place; a
-            // hinged body's matrix is at the joint's 0 until the group's
-            // next step, the joint's start -pi/4 being the closed part)
-            const int dp = DrawPartOfRecord(q.record);
-            if (dp >= 0) {
-                RigidBody placed;
-                PanelBody(carVehicle_->damage[q.record], q.matrix, &carBody_.matrix[0][0], carBody_, placed);
-                float inv[16], rel[16];
-                Articulated::RigidInverse(&placed.matrix[0][0], inv);
-                MatMul4(&carLocal_[dp * 16], &carBody_.matrix[0][0], rel);
-                MatMul4(rel, inv, &panelDraw_[q.record * 17]);
-                panelDraw_[q.record * 17 + 16] = 1.0f;
-            }
-        }
-        Log("Car damage: record %d (part type %d id 0x%x) %s%s (+4 %.4f +8 %.4f, dent %.4f, impact %.4f)%s", q.record,
-            p.type, p.id, q.state == 2 ? "hinged" : timer ? "torn off by the bonnet timer" : "torn off",
-            ok ? "" : " - refused", r.half[0], r.half[1], r.dent, r.impact,
-            q.state == 2 && ok ? "; the car's group has its part bodies"
-            : q.state == 3 && !carGroup_.Active() ? "; the car's group ended" : "");
-        if (ok) r.state = q.state;
     }
     // Key B (program addition, there is no gunfire here): a hit at the car
     // as a bullet from the chase camera would make one. The ray aims at a
@@ -3866,9 +3678,8 @@ private:
             if (carVehicle_->bodyParts[i] == part && (i + 1) * 16 <= carLocal_.size()) return static_cast<int>(i);
         return -1;
     }
-    // The world tick's order (0x4a7410): the vehicles' controls and car tick
-    // (0x50e5f0), then the physics step (one 1/120 s sub-step: 0x5af710 and
-    // the matrix 0x5a9bf0; a sleeping body is not integrated).
+    // The fixed 120 Hz loop: the driver's controls every 0.04 s, the car's
+    // tick (CarWorld::Step), the chase camera.
     void StepCar(float dt)
     {
         if (!carOn_) return;
@@ -3881,100 +3692,10 @@ private:
                 driverClock_ = driverClock_ - 0.0399999991f;
                 DriverControls();
             }
-            if (carVehicle_) {
-                // the slot's pre-tick 0x4fbcc0: the records' cool-downs, the
-                // bonnet's timer (open beyond 0.687 for 4 s: torn off)
-                SyncPanels();
-                std::vector<DamageRequest> due;
-                damage_.Tick(*carVehicle_, &carBody_.matrix[0][0], due);
-                for (const DamageRequest& q : due) DamageState(q, true);
-            }
-            wheelPrev_ = wheelVis_;  // 0x503e00, in the slot's pre-tick before the car's tick
-            wheelVis_.Update(car_);
-            // 0x503e00 also keeps the car's velocity and spin (slot +0x1f80 /
-            // +0x1f90) for the next tear-off
-            memcpy(damage_.prevVel, carBody_.vel, sizeof(damage_.prevVel));
-            memcpy(damage_.prevW, carBody_.w, sizeof(damage_.prevW));
-            car_.Tick(carRays_);
-            // The controls reach the car after its tick (BOOT_TO_MENU.md
-            // section 70: run 9 replays exactly only so; before the tick a
-            // change shows one 0.04 s step early).
-            car_.SetControls(controls_, handbrake_);
-            // the car tick's effects block (every 1/60 s): the exhausts on
-            // while slower than 5 mph, the rear tyres' smoke while slipping
-            // (smoke.h)
-            {
-                CarSmokeState smoke;
-                const bool ran = car_.Effects(carBody_.vel, smoke);
-                city_.StepSmoke(ran ? &smoke : nullptr);
-                if (ran) {
-                    city_.ApplySkid(smoke);
-                    for (int k = 0; k < 2; ++k) {
-                        const int on = int(smoke.sprayOn[k][0]) | int(smoke.sprayOn[k][1]) << 1 | int(smoke.sprayOn[k][2]) << 2;
-                        if (on != sprayOn_[k] && sprayLog_ < 40) {
-                            ++sprayLog_;
-                            Log("Spray: wheel %d emitters %d%d%d on (surface %u, rear wheels %.2f) at (%.2f %.2f %.2f)",
-                                k ? 3 : 1, on & 1, (on >> 1) & 1, (on >> 2) & 1, car_.OU(0x78 + (k ? 3 : 1) * 0xd0),
-                                smoke.spraySpeed, smoke.tyrePos[k][0], smoke.tyrePos[k][1], smoke.tyrePos[k][2]);
-                        }
-                        sprayOn_[k] = on;
-                    }
-                    for (int k = 0; k < 2; ++k)
-                        if (smoke.skidRan && smoke.skidOn[k] != skidOn_[k]) {
-                            skidOn_[k] = smoke.skidOn[k];
-                            if (skidLog_ < 40) {
-                                ++skidLog_;
-                                Log("Skid marks: wheel %d %s (slip %.3f, intensity %.3f)", k ? 3 : 1,
-                                    skidOn_[k] ? "on" : "off", car_.slip, smoke.skidIntensity[k]);
-                            }
-                        }
-                }
-                for (int k = 0; ran && k < 2; ++k)
-                    if (smoke.tyreOn[k] != tyreSmoke_[k]) {
-                        tyreSmoke_[k] = smoke.tyreOn[k];
-                        if (smokeLog_ < 40) {
-                            ++smokeLog_;
-                            Log("Tyre smoke: wheel %d %s (slip %.3f, alpha %.4f) at (%.2f %.2f %.2f); %d particles so far",
-                                k ? 3 : 1, smoke.tyreOn[k] ? "on" : "off", car_.slip, smoke.tyreAlpha[k],
-                                smoke.tyrePos[k][0], smoke.tyrePos[k][1], smoke.tyrePos[k][2], city_.SmokeSpawned());
-                        }
-                    }
-            }
-            // The physics step's contacts (0x5a31f0, 0x5a0020), then the
-            // integration (0x5a9880).
-            const int touched = carContacts_.Step(carBody_, carShapes_, collision_, &loader_.City().ground);
-            contactCount_ += touched;
-            if (touched && contactLog_ < 40) {
-                ++contactLog_;
-                Log("Car contact: %d with objects, %d with the ground (%d pairs), deepest %.4f, at (%.2f %.2f %.2f), "
-                    "speed %.2f", carContacts_.contacts, carContacts_.ground, carContacts_.pairs, carContacts_.deepest,
-                    carBody_.pos[0], carBody_.pos[1], carBody_.pos[2],
-                    std::sqrt(carBody_.vel[0] * carBody_.vel[0] + carBody_.vel[1] * carBody_.vel[1] +
-                              carBody_.vel[2] * carBody_.vel[2]));
-            }
-            // the loose parts (free bodies: the game's debris): their pairs
-            // with the world and the ground, and with the car (whose damage
-            // listener hears those too)
-            for (size_t t = 0; t < carGroup_.torn.size(); ++t) {  // (a hit can tear off another part)
-                const int i = carGroup_.torn[t];
-                RigidBody& b = carGroup_.bodies[i];
-                const int rec = carGroup_.records[i];
-                const std::vector<VehicleData::Shape>& shapes =
-                    carVehicle_->parts[damage_.recordPart[rec]].collision;
-                if (b.state != 0x78) debrisContacts_.Step(b, shapes, collision_, &loader_.City().ground);
-                const int hit = carContacts_.Pair(carBody_, carShapes_, b, shapes);
-                if ((hit || debrisContacts_.contacts) && debrisLog_ < 30) {
-                    ++debrisLog_;
-                    Log("Loose part (record %d): %d world / %d ground contacts, %d with the car; at (%.2f %.2f %.2f), "
-                        "speed %.2f", rec, debrisContacts_.contacts, debrisContacts_.ground, hit, b.pos[0], b.pos[1],
-                        b.pos[2], std::sqrt(b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1] + b.vel[2] * b.vel[2]));
-                }
-            }
-            // the loose wheels (0x506cd0): as the loose parts
-            for (LooseWheel& lw : looseWheels_) {
-                if (lw.body.state != 0x78) debrisContacts_.Step(lw.body, lw.shapes, collision_, &loader_.City().ground);
-                carContacts_.Pair(carBody_, carShapes_, lw.body, lw.shapes);
-            }
+            // the car's tick (carworld.h): the slot's pre-tick, the car's
+            // tick and controls, the contacts (and the damage they cause),
+            // the free bodies, the integration or the group's solver
+            world_.Step(controls_, handbrake_);
             // props broken by this step's contacts disappear (stage 1: no
             // debris yet, BOOT_TO_MENU.md section 81)
             for (int inst : props_.TakeBroken()) {
@@ -3987,43 +3708,6 @@ private:
                         std::sqrt(carBody_.vel[0] * carBody_.vel[0] + carBody_.vel[1] * carBody_.vel[1] +
                                   carBody_.vel[2] * carBody_.vel[2]));
                 }
-            }
-            for (int i : carGroup_.torn) {
-                RigidBody& b = carGroup_.bodies[i];
-                if (b.state == 0x78) continue;
-                b.Integrate(1.0f / 120.0f);  // 0x5af710 (the debris' sleep test 0x5af3f0 is not ported)
-                b.UpdateMatrix();
-            }
-            for (LooseWheel& lw : looseWheels_) {
-                if (lw.body.state == 0x78) continue;
-                lw.body.Integrate(1.0f / 120.0f);
-                lw.body.UpdateMatrix();
-                if (wheelLog_ < 20 && (++lw.ticks % 120) == 0) {
-                    ++wheelLog_;
-                    const RigidBody& b = lw.body;
-                    // the axle: the cylinder's axis, the body's x row
-                    Log("Loose wheel %d: at (%.3f %.3f %.3f), axle y %.3f, speed %.2f", lw.wheel, b.pos[0], b.pos[1],
-                        b.pos[2], b.matrix[0][1],
-                        std::sqrt(b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1] + b.vel[2] * b.vel[2]));
-                }
-            }
-            if (carGroup_.Active()) {
-                // 0x5a9880: the group's solver moves the car and its parts
-                carGroup_.Step(1.0f / 120.0f);
-                if (panelLog_ < 20 && (++panelTicks_ % 30) == 0) {
-                    ++panelLog_;
-                    std::string qs;
-                    for (size_t k = 1; k < carGroup_.group.q.size(); ++k) {
-                        char t[32];
-                        snprintf(t, sizeof(t), " %.3f/%.3f", carGroup_.group.q[k], carGroup_.group.qd[k]);
-                        qs += t;
-                    }
-                    Log("Car group: %zu members, joints (q/qd):%s; car at (%.2f %.2f %.2f)", carGroup_.group.members.size(),
-                        qs.c_str(), carBody_.pos[0], carBody_.pos[1], carBody_.pos[2]);
-                }
-            } else if (carBody_.state != 0x78) {
-                carBody_.Integrate(1.0f / 120.0f);
-                carBody_.UpdateMatrix();
             }
             chase_.Tick(&carBody_.matrix[0][0], carBody_.vel);  // the chase camera (0x5e19e0)
         }
@@ -4058,7 +3742,7 @@ private:
         for (size_t i = 0; i * 16 < carLocal_.size(); ++i)
             MatMul4(&carLocal_[i * 16], carDrawBody_, &carWorld_[i * 16]);
         // a wheel that came off follows its loose body (0x506cd0)
-        for (const LooseWheel& lw : looseWheels_) {
+        for (const CarWorld::LooseWheel& lw : looseWheels_) {
             const size_t part = carWheelPart0_ + size_t(lw.wheel);
             if ((part + 1) * 16 > carWorld_.size()) continue;
             MatMul4(lw.drawRel, &lw.body.matrix[0][0], &carWorld_[part * 16]);
@@ -4133,40 +3817,25 @@ private:
         }
     }
 
-    CarSim car_;
-    RigidBody carBody_;
     float carTable_[kHandlingKeys] = {};
     CollisionWorld collision_;
-    WorldRays carRays_;
-    BodyContacts carContacts_;
-    std::vector<VehicleData::Shape> carShapes_;
-    const VehicleData* carVehicle_ = nullptr;
-    VehicleDamage damage_;  // the slot's damage records (damage.h)
-    CarMarks carMarks_;     // the slot's damage marks (marks.h)
-    MarkPool markPool_;     // the world's mark buffers
+    CarWorld world_;  // the car's physics (carworld.h); the names below are its members
+    CarSim& car_ = world_.car;
+    RigidBody& carBody_ = world_.body;
+    BodyContacts& carContacts_ = world_.contacts;
+    BodyContacts& debrisContacts_ = world_.debrisContacts;  // the loose parts' contacts with the world
+    std::vector<VehicleData::Shape>& carShapes_ = world_.shapes;
+    const VehicleData*& carVehicle_ = world_.vehicle;
+    VehicleDamage& damage_ = world_.damage;      // the slot's damage records (damage.h)
+    CarMarks& carMarks_ = world_.marks;          // the slot's damage marks (marks.h)
+    MarkPool& markPool_ = world_.markPool;       // the world's mark buffers
+    CarGroup& carGroup_ = world_.group;          // the car and its hinged parts (panels.h)
+    std::deque<CarWorld::LooseWheel>& looseWheels_ = world_.looseWheels;  // the wheels that came off
     int markLog_ = 0;
     uint32_t markRng_ = 1;
-    int damageLog_ = 0;
-    CarGroup carGroup_;     // the car and its hinged parts (panels.h)
-    BodyContacts debrisContacts_;  // the loose parts' contacts with the world
-    // The wheels that came off (0x506cd0): free bodies, their shapes about
-    // their centre, the wheel's draw matrix relative to the body.
-    struct LooseWheel
-    {
-        RigidBody body;
-        std::vector<VehicleData::Shape> shapes;
-        float drawRel[16] = {};
-        int wheel = -1;  // index into carWheels_
-        int ticks = 0;   // steps since it came off (the log)
-    };
-    std::deque<LooseWheel> looseWheels_;
     Props props_;                  // the smashable props (props.h)
     int propLog_ = 0;
     std::vector<float> panelDraw_;  // per record: the part's draw matrix in its body (16), drawn so (1)
-    int debrisLog_ = 0, wheelLog_ = 0;
-    int panelLog_ = 0, panelTicks_ = 0;
-    long contactCount_ = 0;
-    int contactLog_ = 0;
     int smokeLog_ = 0;
     bool tyreSmoke_[2] = {};
     int skidLog_ = 0;
@@ -4180,9 +3849,9 @@ private:
     float controls_[5] = {};
     bool handbrake_ = false;
     std::vector<float> carLocal_, carWorld_;  // the parts relative to the body, and in the world
-    WheelVisuals wheelVis_, wheelPrev_;       // the slot's wheel block (slot+0x554) and the previous (+0x578)
-    WheelTyres tyres_;                        // slot+0x1800: burst / gone (gone from the wheel hits)
-    float wheelDamageSeen_[6] = {};           // the last logged wheel damage
+    WheelVisuals& wheelVis_ = world_.wheelVis;   // the slot's wheel block (slot+0x554)
+    WheelVisuals& wheelPrev_ = world_.wheelPrev; // and the previous (+0x578)
+    WheelTyres& tyres_ = world_.tyres;           // slot+0x1800: burst / gone (gone from the wheel hits)
     std::vector<uint8_t> carHidden_;          // per part, for SetVehiclePose
     std::vector<float> carDent_;              // per part, for SetVehicleDamage
     float carDrawBody_[16] = {};              // the body's World for the draw (BlendBodyMatrix)
