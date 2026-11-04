@@ -20,12 +20,20 @@ float F32(const std::vector<uint8_t>& d, size_t o)
     return v;
 }
 
-// Row-vector 4 x 4 product a b.
+// Row-vector 4 x 4 product a b in D3DX's order (0x605392, path 2; the
+// narrow phase 0x5a3730 builds a shape's world as local x object with it):
+// rows 0 and 3 as (p0 + p1) + (p2 + p3), rows 1 and 2 as ((p0 + p1) + p2) +
+// p3 (as articulated.cpp MatMul; BOOT_TO_MENU.md section 96).
 void Mul(const float* a, const float* b, float* out)
 {
+    float o[16];
     for (int r = 0; r < 4; ++r)
-        for (int k = 0; k < 4; ++k)
-            out[r * 4 + k] = a[r * 4] * b[k] + a[r * 4 + 1] * b[4 + k] + a[r * 4 + 2] * b[8 + k] + a[r * 4 + 3] * b[12 + k];
+        for (int k = 0; k < 4; ++k) {
+            const float p0 = a[r * 4] * b[k], p1 = a[r * 4 + 1] * b[4 + k], p2 = a[r * 4 + 2] * b[8 + k],
+                        p3 = a[r * 4 + 3] * b[12 + k];
+            o[r * 4 + k] = (r == 0 || r == 3) ? (p0 + p1) + (p2 + p3) : ((p0 + p1) + p2) + p3;
+        }
+    memcpy(out, o, sizeof(o));
 }
 
 // The ray in the shape's frame (rows 0..2 of m are its axes in the world,

@@ -176,6 +176,27 @@ int main(int argc, char** argv)
             diff = std::fmax(diff, std::fabs(best.pointB[k] - traced[1][k]));
             diff = std::fmax(diff, std::fabs(best.normal[k] - traced[2][k]));
         }
+        // NARROW_BITS=1: the fields as the game keeps them (points relative
+        // to the sides' positions, 0x5a3730), bit for bit, per kept pair type
+        if (getenv("NARROW_BITS")) {
+            auto bits = [](float x) { uint32_t u; memcpy(&u, &x, 4); return u; };
+            int badN = 0, badD = 0, badA = 0, badB = 0;
+            for (int k = 0; k < 3; ++k) {
+                badN += bits(best.normal[k]) != r[8 + k];
+                badA += bits(best.pointA[k] - pa[k]) != r[k];
+                badB += bits(best.pointB[k] - pb[k]) != r[4 + k];
+            }
+            badD = bits(best.depth) != r[0x30 / 4];
+            static int s2 = 0;
+            const bool edgeLike = std::memcmp(best.pointA, best.pointB, sizeof(best.pointA)) != 0;
+            if ((badN || badD || badA || badB) && s2++ < 40)
+                printf("NP %u %s%s: normal %d depth %d A %d B %d | A %08x %08x %08x trace %08x %08x %08x | n %08x %08x %08x "
+                       "trace %08x %08x %08x | d %08x trace %08x\n",
+                       n, cyl ? "cyl" : "box", edgeLike ? " edge" : " face", badN, badD, badA, badB,
+                       bits(best.pointA[0] - pa[0]), bits(best.pointA[1] - pa[1]), bits(best.pointA[2] - pa[2]), r[0], r[1],
+                       r[2], bits(best.normal[0]), bits(best.normal[1]), bits(best.normal[2]), r[8], r[9], r[10],
+                       bits(best.depth), r[12]);
+        }
         worst = std::fmax(worst, diff);
         if (diff == 0) ++equal, cylEqual += cyl, cylCylEqual += cc, cylSphEqual += cs;
         else if (diff < 1e-4f) ++close;

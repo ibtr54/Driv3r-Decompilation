@@ -36,18 +36,39 @@ void SurfaceValues(int s, float t[3])
 }
 
 float Dot(const float a[3], const float b[3]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+// The dot products as the game's x87 code sums them (BOOT_TO_MENU.md
+// section 96): (z + y) + x and (x + z) + y.
+float DotZYX(const float a[3], const float b[3]) { return (a[2] * b[2] + a[1] * b[1]) + a[0] * b[0]; }
+float DotXZY(const float a[3], const float b[3]) { return (a[0] * b[0] + a[2] * b[2]) + a[1] * b[1]; }
+// 0x41e990: v times 1 / |v| (the length as ((x x + y y) + z z)).
+void Normalise(const float v[3], float out[3])
+{
+    const float s = 1.0f / std::sqrt((v[0] * v[0] + v[1] * v[1]) + v[2] * v[2]);
+    out[0] = s * v[0];
+    out[1] = s * v[1];
+    out[2] = s * v[2];
+}
+
 void Cross(const float a[3], const float b[3], float out[3])
 {
     const float x = a[1] * b[2] - a[2] * b[1], y = a[2] * b[0] - a[0] * b[2], z = a[0] * b[1] - a[1] * b[0];
     out[0] = x; out[1] = y; out[2] = z;
 }
 
-// Row-vector 4 x 4 product a b.
+// Row-vector 4 x 4 product a b in D3DX's order (0x605392, path 2; the
+// narrow phase 0x5a3730 builds a shape's world as local x object with it):
+// rows 0 and 3 as (p0 + p1) + (p2 + p3), rows 1 and 2 as ((p0 + p1) + p2) +
+// p3 (as articulated.cpp MatMul; BOOT_TO_MENU.md section 96).
 void Mul(const float* a, const float* b, float* out)
 {
+    float o[16];
     for (int r = 0; r < 4; ++r)
-        for (int k = 0; k < 4; ++k)
-            out[r * 4 + k] = a[r * 4] * b[k] + a[r * 4 + 1] * b[4 + k] + a[r * 4 + 2] * b[8 + k] + a[r * 4 + 3] * b[12 + k];
+        for (int k = 0; k < 4; ++k) {
+            const float p0 = a[r * 4] * b[k], p1 = a[r * 4 + 1] * b[4 + k], p2 = a[r * 4 + 2] * b[8 + k],
+                        p3 = a[r * 4 + 3] * b[12 + k];
+            o[r * 4 + k] = (r == 0 || r == 3) ? (p0 + p1) + (p2 + p3) : ((p0 + p1) + p2) + p3;
+        }
+    memcpy(out, o, sizeof(o));
 }
 
 // A box as 0x5b8df0 builds it (0x80 bytes): the three axis rows of its
@@ -83,12 +104,13 @@ struct Sat
 };
 
 // 0x5b9500: face i of box F against box O; sign +1 for A's faces (F = A),
-// -1 for B's (F = B). False: separated on this axis.
+// -1 for B's (F = B). False: separated on this axis. Both dot products sum
+// (z + y) + x (REA, section 96).
 bool FaceAxis(const Box& F, const Box& O, int i, int sign, Sat& r)
 {
     float n[3] = { F.axis[i][0], F.axis[i][1], F.axis[i][2] };
     const float d[3] = { O.c[0] - F.c[0], O.c[1] - F.c[1], O.c[2] - F.c[2] };
-    float s = Dot(d, n);
+    float s = DotZYX(d, n);
     if (s >= 0) {
         s = -s;
     } else {
@@ -97,7 +119,7 @@ bool FaceAxis(const Box& F, const Box& O, int i, int sign, Sat& r)
     s += F.half[i];
     float p[3] = { O.c[0], O.c[1], O.c[2] };
     for (int j = 0; j < 3; ++j) {
-        const float e = Dot(n, O.sa[j]);
+        const float e = DotZYX(n, O.sa[j]);
         if (e >= 0) {
             s += e;
             for (int k = 0; k < 3; ++k) p[k] -= O.sa[j][k];
@@ -117,16 +139,21 @@ bool FaceAxis(const Box& F, const Box& O, int i, int sign, Sat& r)
 }
 
 // 0x5b9930: edge i of A against edge j of B (normal oriented from A to B).
+// REA (section 96): the axis normalised by 0x41e990 (times 1 / length); the
+// sums d . n (x + z) + y, A's extents (z + y) + x, B's (x + z) + y; the best
+// depth is stored even when it is 0, the contact only above 0.
 bool EdgeAxis(const Box& A, const Box& B, int i, int j, Sat& r)
 {
-    float n[3];
-    Cross(B.axis[j], A.axis[i], n);  // 0x407640 (b x a)
-    const float l2 = Dot(n, n);
+    // 0x407640 with ecx = A's axis, eax = B's: a x b as e2 c1 - e1 c2, ...
+    // (b x a would differ only in the sign of a zero component)
+    const float* ea = A.axis[i];
+    const float* eb = B.axis[j];
+    float n0[3] = { eb[2] * ea[1] - eb[1] * ea[2], eb[0] * ea[2] - eb[2] * ea[0], eb[1] * ea[0] - eb[0] * ea[1] }, n[3];
+    const float l2 = (n0[0] * n0[0] + n0[2] * n0[2]) + n0[1] * n0[1];
     if (!(l2 >= 9.99999944e-11f)) return true;
-    const float l = std::sqrt(l2);
-    for (float& v : n) v /= l;
+    Normalise(n0, n);
     const float d[3] = { B.c[0] - A.c[0], B.c[1] - A.c[1], B.c[2] - A.c[2] };
-    float s = Dot(d, n);
+    float s = DotXZY(d, n);
     if (s >= 0) {
         s = -s;
     } else {
@@ -135,7 +162,7 @@ bool EdgeAxis(const Box& A, const Box& B, int i, int j, Sat& r)
     float pa[3] = { A.c[0], A.c[1], A.c[2] }, pb[3] = { B.c[0], B.c[1], B.c[2] };
     for (int k = 0; k < 3; ++k) {
         if (k != i) {
-            const float e = Dot(n, A.sa[k]);
+            const float e = DotZYX(n, A.sa[k]);
             if (e >= 0) {
                 s += e;
                 for (int m = 0; m < 3; ++m) pa[m] += A.sa[k][m];
@@ -145,7 +172,7 @@ bool EdgeAxis(const Box& A, const Box& B, int i, int j, Sat& r)
             }
         }
         if (k != j) {
-            const float e = Dot(n, B.sa[k]);
+            const float e = DotXZY(n, B.sa[k]);
             if (e >= 0) {
                 s += e;
                 for (int m = 0; m < 3; ++m) pb[m] -= B.sa[k][m];
@@ -156,8 +183,9 @@ bool EdgeAxis(const Box& A, const Box& B, int i, int j, Sat& r)
         }
     }
     if (s < 0) return false;
-    if (s < r.best && s > 0) {
+    if (s < r.best) {
         r.best = s;
+        if (!(s > 0)) return true;
         r.found = true;
         for (int m = 0; m < 3; ++m) {
             r.a0[m] = pa[m] + A.sa[i][m];
@@ -172,8 +200,6 @@ bool EdgeAxis(const Box& A, const Box& B, int i, int j, Sat& r)
     return true;
 }
 
-// The dot product as 0x5b8ab0 sums it: (z + y) + x.
-float DotZYX(const float a[3], const float b[3]) { return (a[2] * b[2] + a[1] * b[1]) + a[0] * b[0]; }
 
 // 0x5b8ab0: the closest points of the two edges into out (and their
 // distance as the depth); false when they are parallel or meet outside.
@@ -1001,15 +1027,6 @@ void BoundingHalf(const VehicleData::Shape& s, float h[3])
     h[0] = s.size[0];
     h[1] = s.type == 2 ? s.size[0] : s.size[1];
     h[2] = s.type == 0 ? s.size[2] : s.size[0];
-}
-
-// 0x41e990: v times 1 / |v| (the length as ((x x + y y) + z z)).
-void Normalise(const float v[3], float out[3])
-{
-    const float s = 1.0f / std::sqrt((v[0] * v[0] + v[1] * v[1]) + v[2] * v[2]);
-    out[0] = s * v[0];
-    out[1] = s * v[1];
-    out[2] = s * v[2];
 }
 
 // 0x5c2a30: the contact frame, rows (u, n x u, n) with n normalised first

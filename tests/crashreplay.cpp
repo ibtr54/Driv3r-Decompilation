@@ -16,7 +16,9 @@
 // "RSag" in the window) are marked, the program's group is its own.
 // CRASH_UPVH=1: the old hardpoints. CRASH_ALL=1: every call printed. CRASH_EVENTS=0: no event lines.
 // CRASH_J=1: every applied impulse, its contact and the body after it as bits
-// (BOOT_TO_MENU.md section 95; not with CRASH_WHEELFAST).
+// (BOOT_TO_MENU.md section 95; not with CRASH_WHEELFAST). CRASH_M=n: the
+// body's matrix and position as bits before each tick of the window after
+// call n (against a traced "NPa"; section 96).
 // The proxy's forcing switches of the traced run must be given again:
 // CRASH_TEAR=q,t (D3PROXY_TEARFAST: the bonnet timer's limits; tracetear.ps1's
 // default -Fast "-10,1", runs 19..25) and CRASH_WHEELFAST=x
@@ -353,6 +355,16 @@ int main(int argc, char** argv)
             for (int k = 0; k < 5; ++k) c[k] = Fl(ct->second.w[k]);
             hb = (ct->second.w[5] & 0xff) != 0;
         }
+        // CRASH_M=n: the body's matrix and position as bits before each tick
+        // of the window after call n (to compare with a traced "NPa")
+        if (const char* e = getenv("CRASH_M"))
+            if (atoi(e) == call - 1) {
+                auto b = [](float x) { unsigned u; memcpy(&u, &x, 4); return u; };
+                printf("      tick %d M", tick);
+                for (int r = 0; r < 4; ++r)
+                    for (int k = 0; k < 3; ++k) printf(" %08x", b(cw.body.matrix[r][k]));
+                printf(" pos %08x %08x %08x\n", b(cw.body.pos[0]), b(cw.body.pos[1]), b(cw.body.pos[2]));
+            }
         contacts += cw.Step(c, hb);
         props.TakeBroken();
     }
