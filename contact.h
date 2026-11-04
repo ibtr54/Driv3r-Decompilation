@@ -24,8 +24,10 @@
 // Cylinder / cylinder (0x5b9f00) and cylinder / sphere (0x5b7cf0) are
 // ported too (BOOT_TO_MENU.md sections 90 and 93). Not ported: sphere /
 // sphere (0x5b6fb0), the ground's bounding pre-tests (0x5b3620, 0x5b28e0), body / body pairs other than the car's with
-// its loose parts, the push-out of a jointed group member (0x5ae5b0's
-// chain; hinged panels have no contacts), the smashable props: the contact
+// its loose parts, the push-out of a member deeper than one joint below the
+// root (0x5ae5b0's chain; a hinged panel against the world is answered
+// through the group and pushed out by Articulated::Group::PushOut,
+// BOOT_TO_MENU.md section 97), the smashable props: the contact
 // callback drops a contact with a placed object whose GEBI record breaks
 // under the hit's momentum (0x4e9160 -> 0x4e8f70; BOOT_TO_MENU.md section
 // 80).

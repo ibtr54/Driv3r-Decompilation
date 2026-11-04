@@ -86,8 +86,10 @@ public:
     int Step(const float controls[5], bool handbrake);
 
     // The slot's contact listener (0x503fb0, damage.h) for one of the car
-    // body's contacts (BodyContacts::onImpulse).
-    void Impact(const BodyContact& c, const float J[3]);
+    // body's contacts (BodyContacts::onImpulse); hitRecord >= 0: A is the
+    // body of that record's hinged part, of mass massA (its contacts with
+    // the world reach the slot's listener too: BOOT_TO_MENU.md section 97).
+    void Impact(const BodyContact& c, const float J[3], int hitRecord = -1, float massA = 0);
     // The hinged parts' matrices and joint values for the damage's tests.
     void SyncPanels();
     // 0x4f98b0 for a state the damage asks for (timer: the bonnet timer's).
@@ -113,5 +115,5 @@ public:
 
     // log counters (as main.cpp had them)
     long contactCount = 0;
-    int contactLog = 0, damageLog = 0, debrisLog = 0, wheelLog = 0, panelLog = 0, panelTicks = 0;
+    int contactLog = 0, damageLog = 0, debrisLog = 0, wheelLog = 0, panelLog = 0, panelTicks = 0, panelHitLog = 0;
 };

@@ -6,6 +6,7 @@
 #include "props.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <utility>
 
@@ -1123,14 +1124,15 @@ void PushOut(RigidBody& a, RigidBody* b, const BodyContact& c)
     const float shareA = inv * wB, shareB = inv * wA;
     // a grouped body goes through 0x5ae5b0 instead of 0x5c5ed0: the group's
     // root (joint type 0) only moves (0x41e4b0, no vertical speed rule); a
-    // jointed member is moved along its chain (not ported: hinged panels
-    // have no contacts, BOOT_TO_MENU.md section 75)
+    // jointed member (a hinged panel against the world) moves the root by
+    // half, its joint and itself (Articulated::Group::PushOut,
+    // BOOT_TO_MENU.md section 97)
     auto move = [](RigidBody& body, const float m[3]) {
         if (!body.group) {
             Shift(body, m);
             return;
         }
-        for (int k = 0; k < 3; ++k) body.pos[k] = m[k] + body.pos[k];
+        static_cast<Articulated::Group*>(body.group)->PushOut(body.member, m);
     };
     if (shareA > 9.99999975e-06f) {
         const float m[3] = { corr[0] * shareA, corr[1] * shareA, corr[2] * shareA };

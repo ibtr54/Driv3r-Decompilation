@@ -168,6 +168,17 @@ public:
     // The grouped side of 0x5c3110's impulse: (P, 0) (0x5a9da0; times -1
     // for body B, 0x5be0b0) times X1 (0x5be2b0), then BodyImpulse.
     void ContactImpulse(int k, const SMat& x1, const float P[3], bool negate);
+    // 0x5ae5b0 (flag 0, the push-out 0x5c5c50 of a grouped body) for member
+    // k by the world move m: the root (joint type 0) moves by m; a jointed
+    // member moves the free root by m / 2, then turns m into its own frame
+    // (0x41e510 with its matrix's rows) and 0x5ae470 moves its joint value
+    // by (a . m') / |a| (a: the hinge point's direction of motion, axis x
+    // -point, or the slide axis; a normalised first) and gives f = |a . m'|
+    // / |m'|; f above 0.8 ends it, else a member hanging from the root
+    // moves by (1 - f) m itself (BOOT_TO_MENU.md section 97). Members
+    // deeper down (the chain through rec +0x100 and 0x605119) are not
+    // ported: the car's panels all hang from the root.
+    void PushOut(int k, const float m[3]);
 
 private:
     void Velocities(int k);         // 0x5c1040

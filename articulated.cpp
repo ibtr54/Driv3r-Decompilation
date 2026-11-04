@@ -981,6 +981,60 @@ void Group::ContactImpulse(int k, const SMat& x1, const float P[3], bool negate)
     BodyImpulse(k, p);
 }
 
+// 0x5ae5b0 with flag 0 (the x87 order of its listing; FPU at single
+// precision) and 0x5ae470 for the first link.
+void Group::PushOut(int k, const float m[3])
+{
+    Member& me = members[k];
+    RigidBody& b = *me.body;
+    const float* rec = me.rec;
+    // the root: pos += m (0x41e4b0: m + pos)
+    if (!Int(rec, 0x330)) {
+        for (int i = 0; i < 3; ++i) b.pos[i] = m[i] + b.pos[i];
+        b.pos[3] = 0;
+        return;
+    }
+    // a free root takes half (0x78e864)
+    RigidBody& root = *members[0].body;
+    if (!Int(members[0].rec, 0x330)) {
+        for (int i = 0; i < 3; ++i) root.pos[i] = m[i] * 0.5f + root.pos[i];
+        root.pos[3] = 0;
+    }
+    // m in the member's frame: 0x406ce0 transposes the matrix's rows,
+    // 0x41e510 then gives ((z R[i].z + y R[i].y) + x R[i].x)
+    float v[3];
+    for (int i = 0; i < 3; ++i) v[i] = (m[2] * b.matrix[i][2] + m[1] * b.matrix[i][1]) + m[0] * b.matrix[i][0];
+    // 0x5ae470 at the point 0 (0x407780(0, 0, 0)): a = axis x (0 - point)
+    // for a revolute joint (0x407640, ecx = the axis), the axis for a
+    // prismatic one
+    const float* point = rec;
+    const float* axis = rec + 0x10 / 4;
+    float a[3];
+    if (Int(rec, 0x330) == 1) {
+        const float d[3] = { 0.0f - point[0], 0.0f - point[1], 0.0f - point[2] };
+        a[0] = d[2] * axis[1] - d[1] * axis[2];
+        a[1] = d[0] * axis[2] - d[2] * axis[0];
+        a[2] = d[1] * axis[0] - d[0] * axis[1];
+    } else {
+        a[0] = axis[0]; a[1] = axis[1]; a[2] = axis[2];
+    }
+    const float len = std::sqrt((a[2] * a[2] + a[1] * a[1]) + a[0] * a[0]);
+    const float inv = 1.0f / len;  // 0x487780
+    for (float& x : a) x = inv * x;
+    const float dot = (a[0] * v[0] + a[2] * v[2]) + a[1] * v[1];
+    const float vlen = std::sqrt((v[0] * v[0] + v[1] * v[1]) + v[2] * v[2]);
+    float f = dot / vlen;
+    if (f <= 0.0f) f = -f;
+    q[k] = dot / len + q[k];
+    if (f > 0.800000012f || !(f == f)) return;  // [0x78e8ec]
+    if (me.parent < 0) return;
+    if (Int(members[me.parent].rec, 0x330)) return;  // a deeper chain: not ported
+    // hanging from the root: the member moves by (1 - f) m (0x41e460, 0x41e4b0)
+    const float s = 1.0f - f;
+    for (int i = 0; i < 3; ++i) b.pos[i] = s * m[i] + b.pos[i];
+    b.pos[3] = 0;
+}
+
 namespace
 {
 // RigidBody::ApplyImpulse's route for a grouped body (0x5b11c0 reads both

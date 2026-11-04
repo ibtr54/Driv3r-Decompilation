@@ -28,6 +28,7 @@ namespace
 {
 std::map<std::string, std::map<unsigned, std::vector<uint32_t>>> g_dumps;
 std::map<unsigned, std::vector<uint32_t>> g_np;
+int g_none = 0, g_noneBad = 0;  // NARROW_NONE
 
 void Read(const char* path)
 {
@@ -124,8 +125,48 @@ int main(int argc, char** argv)
         const std::vector<uint32_t>& a = g_dumps["NPa"][n];
         const std::vector<uint32_t>& b = g_dumps["NPb"][n];
         if (r.size() < 0x58 / 4 || a.size() < 0x90 / 4 || b.size() < 0x90 / 4) continue;
-        if (r[0x34 / 4] == 0) continue;  // no contact (the fields are stale then)
         const std::vector<Shape> sa = Shapes(g_dumps["NPah"][n]), sb = Shapes(g_dumps["NPbh"][n]);
+        if (r[0x34 / 4] == 0) {
+            // no contact (the fields are stale then). NARROW_NONE=1: the
+            // port on such a pair (bounds first, then every shape but the
+            // bounds) must find none either (BOOT_TO_MENU.md section 97)
+            if (getenv("NARROW_NONE") && !sa.empty() && !sb.empty()) {
+                float ma[16], mb[16];
+                for (int k = 0; k < 16; ++k) { ma[k] = F(a[4 + k]); mb[k] = F(b[4 + k]); }
+                int& none = g_none; int& noneBad = g_noneBad;
+                ++none;
+                float wa[16], wb[16];
+                Articulated::MatMul(sa[0].local, ma, wa);
+                Articulated::MatMul(sb[0].local, mb, wb);
+                BodyContact k;
+                bool bound = PairContact(sa[0], wa, sb[0], wb, k);
+                bool any = false;
+                float deep = 0;
+                std::string which;
+                if (bound)
+                    for (size_t i = sa.size() > 1 ? 1 : 0; i < sa.size(); ++i) {
+                        if (sa[i].off) continue;
+                        Articulated::MatMul(sa[i].local, ma, wa);
+                        for (size_t j = sb.size() > 1 ? 1 : 0; j < sb.size(); ++j) {
+                            if (sb[j].off) continue;
+                            Articulated::MatMul(sb[j].local, mb, wb);
+                            if (PairContact(sa[i], wa, sb[j], wb, k) && (!any || k.depth > deep)) {
+                                any = true;
+                                deep = k.depth;
+                                which = std::to_string(i) + "/" + std::to_string(j) + " types " +
+                                        std::to_string(sa[i].type) + "/" + std::to_string(sb[j].type);
+                            }
+                        }
+                    }
+                if (any) {
+                    ++noneBad;
+                    if (noneBad <= 20)
+                        printf("NP %u: game no contact, port contact depth %.6f (shapes %s; %zu / %zu shapes)\n", n, deep,
+                               which.c_str(), sa.size(), sb.size());
+                }
+            }
+            continue;
+        }
         bool boxes = !sa.empty() && !sb.empty();
         for (size_t i = sa.size() > 1 ? 1 : 0; i < sa.size(); ++i)
             for (size_t j = sb.size() > 1 ? 1 : 0; j < sb.size(); ++j)
@@ -212,5 +253,6 @@ int main(int argc, char** argv)
            tested, withCyl, cylEqual, equal, close, worst, skipped);
     printf("cylinder / cylinder kept: %d, %d equal\n", cylCyl, cylCylEqual);
     printf("cylinder / sphere kept: %d, %d equal\n", cylSph, cylSphEqual);
+    if (getenv("NARROW_NONE")) printf("no-contact pairs: %d, port contact on %d\n", g_none, g_noneBad);
     return 0;
 }

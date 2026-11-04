@@ -15,6 +15,8 @@
 // alone; windows in which the original's car is in a group (hinged panels:
 // "RSag" in the window) are marked, the program's group is its own.
 // CRASH_UPVH=1: the old hardpoints. CRASH_ALL=1: every call printed. CRASH_EVENTS=0: no event lines.
+// CRASH_OBJ=x,z,r: the static objects near (x, z) with their shapes as bits.
+// CRASH_SHAPES=t: the car's shapes before tick t (section 97).
 // CRASH_J=1: every applied impulse, its contact and the body after it as bits
 // (BOOT_TO_MENU.md section 95; not with CRASH_WHEELFAST). CRASH_M=n: the
 // body's matrix and position as bits before each tick of the window after
@@ -88,13 +90,14 @@ void LoadBody(const std::vector<unsigned>& w, RigidBody& b)
 }
 
 int g_call = 0;       // the 25 Hz call the program is in
+int g_tick = 0;       // the 1/120 s tick
 bool g_events = true;
 void EventLog(const char* fmt, ...)
 {
     if (!g_events) return;
     // only the damage events (the contact / group / smoke lines are many)
     if (strncmp(fmt, "Car damage", 10) != 0 && strncmp(fmt, "Wheel ", 6) != 0 && strncmp(fmt, "Car hit", 7) != 0 &&
-        strncmp(fmt, "Loose part", 10) != 0)
+        strncmp(fmt, "Loose part", 10) != 0 && strncmp(fmt, "Hinged part", 11) != 0)
         return;
     char buf[512];
     va_list a;
@@ -217,7 +220,7 @@ int main(int argc, char** argv)
     if (getenv("CRASH_J") && !getenv("CRASH_WHEELFAST")) {
         cw.contacts.onImpulse = [](const BodyContact& c, const float J[3]) {
             auto b = [](float x) { unsigned u; memcpy(&u, &x, 4); return u; };
-            printf("      [program, call %d] J %08x %08x %08x n %08x %08x %08x d %08x pA %.7f %.7f %.7f body %08x %08x %08x v %08x %08x %08x\n", g_call,
+            printf("      [program, call %d tick %d] J %08x %08x %08x n %08x %08x %08x d %08x pA %.7f %.7f %.7f body %08x %08x %08x v %08x %08x %08x\n", g_call, g_tick,
                    b(J[0]), b(J[1]), b(J[2]), b(c.normal[0]), b(c.normal[1]), b(c.normal[2]), b(c.depth), c.pointA[0], c.pointA[1],
                    c.pointA[2], b(cw.body.pos[0]), b(cw.body.pos[1]), b(cw.body.pos[2]), b(cw.body.vel[0]), b(cw.body.vel[1]), b(cw.body.vel[2]));
             cw.Impact(c, J);
@@ -293,6 +296,31 @@ int main(int argc, char** argv)
         }
     }
 
+    // CRASH_OBJ=x,z,r: the program's static objects whose box centre lies
+    // within r of (x, z), every shape's type, half size and world matrix as
+    // bits (to set against a traced "NPbh" through its object's "NPb";
+    // BOOT_TO_MENU.md section 97)
+    if (const char* e = getenv("CRASH_OBJ")) {
+        float x = 0, z = 0, r = 1;
+        sscanf(e, "%f,%f,%f", &x, &z, &r);
+        const float lo[3] = { x - r, -1000, z - r }, hi[3] = { x + r, 1000, z + r };
+        std::vector<uint32_t> near;
+        world.Overlapping(lo, hi, near);
+        auto b = [](float v) { unsigned u; memcpy(&u, &v, 4); return u; };
+        for (uint32_t o : near) {
+            const CollisionWorld::Object& ob = world.ObjectAt(o);
+            printf("object %u instance %d prop %d bounded %d box %.3f %.3f %.3f .. %.3f %.3f %.3f\n", o, ob.instance,
+                   ob.prop, ob.bounded, ob.lo[0], ob.lo[1], ob.lo[2], ob.hi[0], ob.hi[1], ob.hi[2]);
+            for (size_t s = 0; s < ob.count; ++s) {
+                const CollisionWorld::Shape& sh = world.ShapeAt(ob.first + s);
+                printf("  shape %zu type %d surface %d half %08x %08x %08x world", s, sh.type, sh.surface, b(sh.size[0]),
+                       b(sh.size[1]), b(sh.size[2]));
+                for (int k = 0; k < 16; ++k)
+                    if (k % 4 != 3) printf(" %08x", b(sh.world[k]));
+                printf("\n");
+            }
+        }
+    }
     const auto& C = g_recs["C"];
     int call = 0, firstOff = -1, compared = 0, shown = 0;
     float worst = 0;
@@ -365,6 +393,18 @@ int main(int argc, char** argv)
                     for (int k = 0; k < 3; ++k) printf(" %08x", b(cw.body.matrix[r][k]));
                 printf(" pos %08x %08x %08x\n", b(cw.body.pos[0]), b(cw.body.pos[1]), b(cw.body.pos[2]));
             }
+        g_tick = tick;
+        // CRASH_SHAPES=t: the car's shapes (half sizes, local offsets) before
+        // tick t (the dent shortens box 1; against a traced "NPah")
+        {
+            if (getenv("CRASH_SHAPES") && atoi(getenv("CRASH_SHAPES")) == tick)
+                for (size_t s = 0; s < cw.shapes.size(); ++s) {
+                    auto b = [](float v) { unsigned u; memcpy(&u, &v, 4); return u; };
+                    const auto& sh = cw.shapes[s];
+                    printf("car shape %zu half %08x %08x %08x local t %08x %08x %08x\n", s, b(sh.size[0]), b(sh.size[1]),
+                           b(sh.size[2]), b(sh.local[12]), b(sh.local[13]), b(sh.local[14]));
+                }
+        }
         contacts += cw.Step(c, hb);
         props.TakeBroken();
     }

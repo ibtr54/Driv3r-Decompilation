@@ -87,7 +87,7 @@ void CarWorld::Init(const VehicleData& v, int id, const float* T, float wheelOff
     group.hinged = 0;
     group.torn.clear();
     debrisLog = wheelLog = 0;
-    panelLog = panelTicks = 0;
+    panelLog = panelTicks = panelHitLog = 0;
     contacts.onImpulse = [this](const BodyContact& c, const float J[3]) { Impact(c, J); };
     wheelVis = WheelVisuals();
     wheelVis.Update(car);  // the slot's set-up (0x4fadc0 / 0x4fba70 run 0x503e00 too)
@@ -127,6 +127,31 @@ int CarWorld::Step(const float controls[5], bool handbrake)
         CarSmokeState smoke;
         const bool ran = car.Effects(body.vel, smoke);
         if (onEffects) onEffects(ran, smoke);
+    }
+    // the hinged parts (the car's group members) against the world and the
+    // ground: their pairs with the car are skipped (one group, 0x5a31f0),
+    // not those with the world (BOOT_TO_MENU.md section 97: run 21's bonnet
+    // against a wall box, answered through the group and pushed out by
+    // 0x5ae5b0)
+    for (size_t k = 1; k < group.group.members.size(); ++k) {
+        RigidBody* b = group.group.members[k].body;
+        int rec = -1;
+        for (size_t i = 0; i < group.bodies.size(); ++i)
+            if (&group.bodies[i] == b) rec = group.records[i];
+        if (rec < 0 || b->state == 0x78) continue;
+        const std::vector<VehicleData::Shape>& partShapes = vehicle->parts[damage.recordPart[rec]].collision;
+        // the slot's listener hears them with A the part's body (0x503fb0
+        // finds the record whose body it is)
+        const float massA = b->mass;
+        debrisContacts.onImpulse = [this, rec, massA](const BodyContact& c, const float J[3]) { Impact(c, J, rec, massA); };
+        const int hit = debrisContacts.Step(*b, partShapes, *collision, ground);
+        debrisContacts.onImpulse = nullptr;
+        if (hit && panelHitLog < 30 && log) {
+            ++panelHitLog;
+            log("Hinged part (record %d): %d world / %d ground contacts, deepest %.4f; car at (%.4f %.4f %.4f)", rec,
+                debrisContacts.contacts, debrisContacts.ground, debrisContacts.deepest, body.pos[0], body.pos[1],
+                body.pos[2]);
+        }
     }
     // The physics step's contacts (0x5a31f0, 0x5a0020), then the
     // integration (0x5a9880).
@@ -203,12 +228,13 @@ int CarWorld::Step(const float controls[5], bool handbrake)
 // car body's contacts (a static object or a loose part). The parts the
 // hit frees get their new state (DamageState: hinged in the car's group,
 // or torn off as free bodies, drawn with their bodies).
-void CarWorld::Impact(const BodyContact& c, const float J[3])
+void CarWorld::Impact(const BodyContact& c, const float J[3], int hitRecord, float massA)
 {
     if (!vehicle || damage.records.empty()) return;
     SyncPanels();
     std::vector<DamageRequest> req;
-    damage.Impact(*vehicle, &body.matrix[0][0], body.mass, -1, body.mass, J, c.pointA, c.surfaceB, req);
+    damage.Impact(*vehicle, &body.matrix[0][0], body.mass, hitRecord, hitRecord >= 0 ? massA : body.mass, J, c.pointA,
+                  c.surfaceB, req);
     if (damage.lastPassed && damageLog < 40 && log) {
         ++damageLog;
         log("Car hit: strength %.3f at (%.3f %.3f %.3f) in the car, side %.4f; slot total %.4f, front %.4f / %.4f, "
