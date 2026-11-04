@@ -1258,7 +1258,8 @@ void RestingContact(RigidBody& b, const float p[3], RigidBody* other)
 // -J on B, the push-out shared by the masses): true when an impulse was
 // applied.
 bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr, RigidBody* other = nullptr,
-             Props* props = nullptr)
+             Props* props = nullptr,
+             const std::function<void(const BodyContact&, const float J[3])>* listener = nullptr)
 {
     float tA[3], tB[3];
     SurfaceValues(c.surfaceA, tA);
@@ -1465,6 +1466,10 @@ bool Respond(RigidBody& body, const BodyContact& c, float Jout[3] = nullptr, Rig
     }
     if (Jout)
         for (int k = 0; k < 3; ++k) Jout[k] = J[k];
+    // the world's listener (+0x208, 0x44a890: the slot's 0x503fb0) hears
+    // the impulse before the push-out (0x5c5bf7 / 0x5c5c19; BOOT_TO_MENU.md
+    // section 98: a wheel knocked off starts from the car not yet pushed)
+    if (listener && *listener) (*listener)(c, J);
     PushOut(body, other, c);
     return true;
 }
@@ -1613,7 +1618,8 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
         hi[k] = bw[12 + k] + e;
     }
     const size_t first = shapes.size() > 1 ? 1 : 0;
-    world.Overlapping(lo, hi, near_);
+    if (mode != 2) world.Overlapping(lo, hi, near_);
+    else near_.clear();
     for (uint32_t o : near_) {
         ++pairs;
         const CollisionWorld::Object& ob = world.ObjectAt(o);
@@ -1654,9 +1660,8 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
                                            best.normal, false);
         best.propInstance = ob.prop ? ob.instance : -1;
         float J[3];
-        if (Respond(body, best, J, nullptr, props)) {
+        if (Respond(body, best, J, nullptr, props, &onImpulse)) {
             ++contacts;
-            if (onImpulse) onImpulse(best, J);
         }
         bodyWorld = &body.matrix[0][0];
     }
@@ -1665,7 +1670,7 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
     // CylinderGroundPoints), the deepest one below. The contact takes the
     // surface of the last shape tested once one was found (0x5b3570 stamps
     // the best record with every shape that returns 5).
-    if (groundData) {
+    if (groundData && mode != 1) {
         BodyContact g;
         bool found = false;
         for (size_t s = first; s < shapes.size(); ++s) {
@@ -1713,9 +1718,9 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
             if (vehicle && !(g.surfaceA == 0xb && g.surfaceB == 0xb))
                 g.surfaceA = VehicleSurface(g.surfaceA, 0, g.pointA, &body.matrix[0][0], vehicleBottom, g.normal, true);
             float J[3];
-            if (Respond(body, g, J)) {
+            if (Respond(body, g, J, nullptr, nullptr, &onImpulse)) {
                 ++ground;
-                if (onImpulse) onImpulse(g, J);
+                lastGround = g;
             }
         }
     }
@@ -1765,8 +1770,7 @@ int BodyContacts::Pair(RigidBody& a, const std::vector<VehicleData::Shape>& shap
         best.surfaceA = VehicleSurface(best.surfaceA, 0, best.pointA, &a.matrix[0][0], vehicleBottom, best.normal,
                                        false);
     float J[3];
-    if (!Respond(a, best, J, &b)) return 0;
-    if (onImpulse) onImpulse(best, J);
+    if (!Respond(a, best, J, &b, nullptr, &onImpulse)) return 0;
     return 1;
 }
 

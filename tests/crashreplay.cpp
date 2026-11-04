@@ -235,6 +235,11 @@ int main(int argc, char** argv)
                 for (int k = 0; k < 6; ++k) cw.damage.wheels[k].damage = wheelFast;
                 wheelFast = -1;
             }
+            if (getenv("CRASH_J")) {
+                auto b = [](float x) { unsigned u; memcpy(&u, &x, 4); return u; };
+                printf("      [program, call %d tick %d] J %08x %08x %08x n %08x %08x %08x d %08x\n", g_call, g_tick, b(J[0]),
+                       b(J[1]), b(J[2]), b(c.normal[0]), b(c.normal[1]), b(c.normal[2]), b(c.depth));
+            }
             cw.Impact(c, J);
         };
     }
@@ -321,6 +326,40 @@ int main(int argc, char** argv)
             }
         }
     }
+    // CRASH_G=n: in the window after call n, every group member's body
+    // (pos, vel, q, L, w) and the joint values / rates as bits before ("B")
+    // and after ("A") each solver call, to set against the traced "GBb" /
+    // "GAb" / "GB20" / "GB24" (BOOT_TO_MENU.md section 98)
+    static int groupWindow = getenv("CRASH_G") ? atoi(getenv("CRASH_G")) : -1000;
+    if (groupWindow > -1000)
+        cw.onGroupStep = [](bool after) {
+            if (g_call != groupWindow) return;
+            auto b = [](float v) { unsigned u; memcpy(&u, &v, 4); return u; };
+            const Articulated::Group& g = cw.group.group;
+            for (size_t k = 0; k < g.members.size(); ++k) {
+                const RigidBody& r = *g.members[k].body;
+                printf("      G%c tick %d m%zu pos %08x %08x %08x vel %08x %08x %08x q %08x %08x %08x %08x L %08x %08x %08x w %08x %08x %08x",
+                       after ? 'A' : 'B', g_tick, k, b(r.pos[0]), b(r.pos[1]), b(r.pos[2]), b(r.vel[0]), b(r.vel[1]),
+                       b(r.vel[2]), b(r.q[0]), b(r.q[1]), b(r.q[2]), b(r.q[3]), b(r.L[0]), b(r.L[1]), b(r.L[2]),
+                       b(r.w[0]), b(r.w[1]), b(r.w[2]));
+                if (k) printf(" jq %08x jqd %08x", b(g.q[k]), b(g.qd[k]));
+                printf("\n");
+            }
+        };
+    // ... and the loose wheels before their integration ("GW", against the
+    // traced "WI": 0x5af710's entry)
+    if (groupWindow > -1000)
+        cw.onLooseStep = []() {
+            if (g_call != groupWindow) return;
+            auto b = [](float v) { unsigned u; memcpy(&u, &v, 4); return u; };
+            for (const auto& lw : cw.looseWheels) {
+                const RigidBody& r = lw.body;
+                printf("      GW tick %d w%d pos %08x %08x %08x vel %08x %08x %08x q %08x %08x %08x %08x L %08x %08x %08x w %08x %08x %08x\n",
+                       g_tick, lw.wheel, b(r.pos[0]), b(r.pos[1]), b(r.pos[2]), b(r.vel[0]), b(r.vel[1]), b(r.vel[2]),
+                       b(r.q[0]), b(r.q[1]), b(r.q[2]), b(r.q[3]), b(r.L[0]), b(r.L[1]), b(r.L[2]), b(r.w[0]), b(r.w[1]),
+                       b(r.w[2]));
+            }
+        };
     const auto& C = g_recs["C"];
     int call = 0, firstOff = -1, compared = 0, shown = 0;
     float worst = 0;

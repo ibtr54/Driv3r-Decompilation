@@ -128,63 +128,103 @@ int CarWorld::Step(const float controls[5], bool handbrake)
         const bool ran = car.Effects(body.vel, smoke);
         if (onEffects) onEffects(ran, smoke);
     }
-    // the hinged parts (the car's group members) against the world and the
-    // ground: their pairs with the car are skipped (one group, 0x5a31f0),
-    // not those with the world (BOOT_TO_MENU.md section 97: run 21's bonnet
-    // against a wall box, answered through the group and pushed out by
-    // 0x5ae5b0)
-    for (size_t k = 1; k < group.group.members.size(); ++k) {
-        RigidBody* b = group.group.members[k].body;
-        int rec = -1;
-        for (size_t i = 0; i < group.bodies.size(); ++i)
-            if (&group.bodies[i] == b) rec = group.records[i];
-        if (rec < 0 || b->state == 0x78) continue;
-        const std::vector<VehicleData::Shape>& partShapes = vehicle->parts[damage.recordPart[rec]].collision;
-        // the slot's listener hears them with A the part's body (0x503fb0
-        // finds the record whose body it is)
-        const float massA = b->mass;
-        debrisContacts.onImpulse = [this, rec, massA](const BodyContact& c, const float J[3]) { Impact(c, J, rec, massA); };
-        const int hit = debrisContacts.Step(*b, partShapes, *collision, ground);
-        debrisContacts.onImpulse = nullptr;
-        if (hit && panelHitLog < 30 && log) {
-            ++panelHitLog;
-            log("Hinged part (record %d): %d world / %d ground contacts, deepest %.4f; car at (%.4f %.4f %.4f)", rec,
-                debrisContacts.contacts, debrisContacts.ground, debrisContacts.deepest, body.pos[0], body.pos[1],
-                body.pos[2]);
+    // The physics step's contacts, then the integration (0x5a9880): every
+    // body's pairs first (0x5a31f0), then every body's ground (0x5a0020;
+    // BOOT_TO_MENU.md section 98: run 36's car met its loose wheel before
+    // the wheel met the ground). Within a phase: the hinged parts (the
+    // car's group members; their pairs with the car are skipped, one
+    // group, 0x5a31f0, not those with the world, section 97), the car, the
+    // loose parts and wheels (with their pairs with the car in the first
+    // phase).
+    int touched = 0, panelHits = 0, carGround = 0, carPairs = 0;
+    float carDeepest = 0;
+    std::vector<int> debrisHits(group.bodies.size(), 0), debrisWorld(group.bodies.size(), 0);
+    // the hinged parts as the step begins (one hinged by a hit in this
+    // step waits for the next: run 36's hit, call 157)
+    std::vector<RigidBody*> hingedNow;
+    for (size_t k = 1; k < group.group.members.size(); ++k) hingedNow.push_back(group.group.members[k].body);
+    for (int phase = 1; phase <= 2; ++phase) {
+        debrisContacts.mode = contacts.mode = phase;
+        for (RigidBody* b : hingedNow) {
+            if (!b->group) continue;  // torn off in this step
+            int rec = -1;
+            for (size_t i = 0; i < group.bodies.size(); ++i)
+                if (&group.bodies[i] == b) rec = group.records[i];
+            if (rec < 0 || b->state == 0x78) continue;
+            const std::vector<VehicleData::Shape>& partShapes = vehicle->parts[damage.recordPart[rec]].collision;
+            // the slot's listener hears them with A the part's body (0x503fb0
+            // finds the record whose body it is)
+            const float massA = b->mass;
+            debrisContacts.onImpulse = [this, rec, massA](const BodyContact& c, const float J[3]) { Impact(c, J, rec, massA); };
+            const int hit = debrisContacts.Step(*b, partShapes, *collision, ground);
+            debrisContacts.onImpulse = nullptr;
+            if (hit && panelHitLog < 30 && log) {
+                ++panelHitLog;
+                log("Hinged part (record %d): %d world / %d ground contacts, deepest %.4f; car at (%.4f %.4f %.4f)", rec,
+                    debrisContacts.contacts, debrisContacts.ground, debrisContacts.deepest, body.pos[0], body.pos[1],
+                    body.pos[2]);
+            }
+            panelHits += hit;
+        }
+        const int carHits = contacts.Step(body, shapes, *collision, ground);
+        touched += carHits;
+        if (phase == 1) carPairs = contacts.pairs;
+        else carGround = contacts.ground;
+        carDeepest = std::fmax(carDeepest, contacts.deepest);
+        // the loose parts (free bodies: the game's debris): their pairs
+        // with the world and with the car (whose damage listener hears
+        // those too), then their ground
+        for (size_t t = 0; t < group.torn.size(); ++t) {  // (a hit can tear off another part)
+            const int i = group.torn[t];
+            RigidBody& b = group.bodies[i];
+            const int rec = group.records[i];
+            const std::vector<VehicleData::Shape>& partShapes = vehicle->parts[damage.recordPart[rec]].collision;
+            if (b.state != 0x78) debrisWorld[i] += debrisContacts.Step(b, partShapes, *collision, ground);
+            if (phase == 1) debrisHits[i] = contacts.Pair(body, shapes, b, partShapes);
+            if (phase == 2 && (debrisHits[i] || debrisWorld[i]) && debrisLog < 30 && log) {
+                ++debrisLog;
+                log("Loose part (record %d): %d world / ground contacts, %d with the car; at (%.2f %.2f %.2f), "
+                    "speed %.2f", rec, debrisWorld[i], debrisHits[i], b.pos[0], b.pos[1], b.pos[2],
+                    std::sqrt(b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1] + b.vel[2] * b.vel[2]));
+            }
+        }
+        // the loose wheels (0x506cd0): as the loose parts
+        for (LooseWheel& lw : looseWheels) {
+            if (lw.body.state != 0x78) debrisContacts.Step(lw.body, lw.shapes, *collision, ground);
+            if (phase == 1) contacts.Pair(body, shapes, lw.body, lw.shapes);
         }
     }
-    // The physics step's contacts (0x5a31f0, 0x5a0020), then the
-    // integration (0x5a9880).
-    const int touched = contacts.Step(body, shapes, *collision, ground);
+    debrisContacts.mode = contacts.mode = 0;
+    (void)panelHits;
     contactCount += touched;
     if (touched && contactLog < 40 && log) {
         ++contactLog;
-        log("Car contact: %d with objects, %d with the ground (%d pairs), deepest %.4f, at (%.2f %.2f %.2f), "
-            "speed %.2f", contacts.contacts, contacts.ground, contacts.pairs, contacts.deepest, body.pos[0], body.pos[1],
-            body.pos[2], std::sqrt(body.vel[0] * body.vel[0] + body.vel[1] * body.vel[1] + body.vel[2] * body.vel[2]));
+        log("Car contact: %d with objects and the ground (%d pairs, %d ground), deepest %.4f, at (%.2f %.2f %.2f), "
+            "speed %.2f", touched, carPairs, carGround, carDeepest, body.pos[0], body.pos[1], body.pos[2],
+            std::sqrt(body.vel[0] * body.vel[0] + body.vel[1] * body.vel[1] + body.vel[2] * body.vel[2]));
     }
-    // the loose parts (free bodies: the game's debris): their pairs
-    // with the world and the ground, and with the car (whose damage
-    // listener hears those too)
-    for (size_t t = 0; t < group.torn.size(); ++t) {  // (a hit can tear off another part)
-        const int i = group.torn[t];
-        RigidBody& b = group.bodies[i];
-        const int rec = group.records[i];
-        const std::vector<VehicleData::Shape>& partShapes = vehicle->parts[damage.recordPart[rec]].collision;
-        if (b.state != 0x78) debrisContacts.Step(b, partShapes, *collision, ground);
-        const int hit = contacts.Pair(body, shapes, b, partShapes);
-        if ((hit || debrisContacts.contacts) && debrisLog < 30 && log) {
-            ++debrisLog;
-            log("Loose part (record %d): %d world / %d ground contacts, %d with the car; at (%.2f %.2f %.2f), "
-                "speed %.2f", rec, debrisContacts.contacts, debrisContacts.ground, hit, b.pos[0], b.pos[1], b.pos[2],
-                std::sqrt(b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1] + b.vel[2] * b.vel[2]));
+    if (group.Active()) {
+        // 0x5a9880: the group's solver moves the car and its parts
+        if (onGroupStep) onGroupStep(false);
+        group.Step(1.0f / 120.0f);
+        if (onGroupStep) onGroupStep(true);
+        if (panelLog < 20 && (++panelTicks % 30) == 0 && log) {
+            ++panelLog;
+            std::string qs;
+            for (size_t k = 1; k < group.group.q.size(); ++k) {
+                char t[32];
+                snprintf(t, sizeof(t), " %.3f/%.3f", group.group.q[k], group.group.qd[k]);
+                qs += t;
+            }
+            log("Car group: %zu members, joints (q/qd):%s; car at (%.2f %.2f %.2f)", group.group.members.size(),
+                qs.c_str(), body.pos[0], body.pos[1], body.pos[2]);
         }
+    } else if (body.state != 0x78) {
+        body.Integrate(1.0f / 120.0f);
+        body.UpdateMatrix();
     }
-    // the loose wheels (0x506cd0): as the loose parts
-    for (LooseWheel& lw : looseWheels) {
-        if (lw.body.state != 0x78) debrisContacts.Step(lw.body, lw.shapes, *collision, ground);
-        contacts.Pair(body, shapes, lw.body, lw.shapes);
-    }
+    // then the free bodies (0x5a9880: the groups first, then body by body)
+    if (onLooseStep) onLooseStep();
     for (int i : group.torn) {
         RigidBody& b = group.bodies[i];
         if (b.state == 0x78) continue;
@@ -202,24 +242,6 @@ int CarWorld::Step(const float controls[5], bool handbrake)
             log("Loose wheel %d: at (%.3f %.3f %.3f), axle y %.3f, speed %.2f", lw.wheel, b.pos[0], b.pos[1], b.pos[2],
                 b.matrix[0][1], std::sqrt(b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1] + b.vel[2] * b.vel[2]));
         }
-    }
-    if (group.Active()) {
-        // 0x5a9880: the group's solver moves the car and its parts
-        group.Step(1.0f / 120.0f);
-        if (panelLog < 20 && (++panelTicks % 30) == 0 && log) {
-            ++panelLog;
-            std::string qs;
-            for (size_t k = 1; k < group.group.q.size(); ++k) {
-                char t[32];
-                snprintf(t, sizeof(t), " %.3f/%.3f", group.group.q[k], group.group.qd[k]);
-                qs += t;
-            }
-            log("Car group: %zu members, joints (q/qd):%s; car at (%.2f %.2f %.2f)", group.group.members.size(),
-                qs.c_str(), body.pos[0], body.pos[1], body.pos[2]);
-        }
-    } else if (body.state != 0x78) {
-        body.Integrate(1.0f / 120.0f);
-        body.UpdateMatrix();
     }
     return touched;
 }
@@ -297,9 +319,27 @@ void CarWorld::SpawnLooseWheel(int slot)
     LooseWheel lw;
     lw.wheel = wheel;
     RigidBody& b = lw.body;
-    for (int k = 0; k < 3; ++k) b.pos[k] = ((local[0] * M[k] + local[1] * M[4 + k]) + local[2] * M[8 + k]) + M[12 + k];
+    // 0x506cd0 (BOOT_TO_MENU.md section 98): the body's matrix = (the
+    // hardpoint as a translation) x the wheel's matrix x the car's (D3DX
+    // 0x6053a5; the wheel's adds no turn here), so the position is
+    // D3DXVec4Transform((h, 1), M): (x m0 + y m1) + (z m2 + m3), and the
+    // rotation comes from the rows through 0x43e1a0 (its sign may differ
+    // from the car's q)
+    {
+        const float h4[4] = { local[0], local[1], local[2], 1.0f };
+        float p4[4];
+        Vec4Transform(h4, M, p4);
+        for (int k = 0; k < 3; ++k) b.pos[k] = p4[k];
+    }
     b.pos[3] = 1.0f;
-    memcpy(b.q, body.q, sizeof(b.q));
+    {
+        float rows[3][4];
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) rows[r][c] = M[4 * r + c];
+            rows[r][3] = 0;
+        }
+        Articulated::QuatFromRows(rows, b.q, 1e-10, 1e-5);
+    }
     b.mass = 10.0f;
     b.inertia[0] = b.inertia[1] = b.inertia[2] = 1.0f;
     b.accel[1] = -10.0f;  // the world's gravity (+0xe0, as the loose panels)
@@ -307,22 +347,37 @@ void CarWorld::SpawnLooseWheel(int slot)
     b.UpdateDerived();
     float v[3], W[3];
     const float* w = body.w;
-    float d[3] = { b.pos[0] - body.pos[0], b.pos[1] - body.pos[1], b.pos[2] - body.pos[2] };
+    // the offset: the hardpoint through the car's matrix with its
+    // translation cleared (0x605119; local_d0's +0x30 = (0, 0, 0, 1))
+    float d[3];
+    {
+        float R[16];
+        memcpy(R, M, sizeof(R));
+        R[12] = R[13] = R[14] = 0.0f;
+        R[15] = 1.0f;
+        const float h4[4] = { local[0], local[1], local[2], 1.0f };
+        float d4[4];
+        Vec4Transform(h4, R, d4);
+        for (int k = 0; k < 3; ++k) d[k] = d4[k];
+    }
     float cross[3] = {};
-    if (!((w[0] * w[0] + w[1] * w[1]) + w[2] * w[2] < 9.99999944e-11f)) {
-        const float inv = 1.0f / std::sqrt((w[0] * w[0] + w[1] * w[1]) + w[2] * w[2]);
+    // 0x43e890: (z z + y y) + x x below 1e-10 is no spin; 0x41e990: n = w
+    // times 1 / sqrt of the same sum; the part along n, (x + z) + y, off
+    // (0x41e460); w x d as 0x407640 (eax = d, ecx = w)
+    if (!((w[2] * w[2] + w[1] * w[1]) + w[0] * w[0] < 9.99999944e-11f)) {
+        const float inv = 1.0f / std::sqrt((w[2] * w[2] + w[1] * w[1]) + w[0] * w[0]);
         const float n[3] = { inv * w[0], inv * w[1], inv * w[2] };
-        const float along = (d[0] * n[0] + d[1] * n[1]) + d[2] * n[2];
-        for (int k = 0; k < 3; ++k) d[k] = d[k] - n[k] * along;
-        cross[0] = w[1] * d[2] - w[2] * d[1];
-        cross[1] = w[2] * d[0] - w[0] * d[2];
-        cross[2] = w[0] * d[1] - w[1] * d[0];
+        const float along = (d[0] * n[0] + d[2] * n[2]) + d[1] * n[1];
+        for (int k = 0; k < 3; ++k) d[k] = d[k] - along * n[k];
+        cross[0] = d[2] * w[1] - d[1] * w[2];
+        cross[1] = d[0] * w[2] - d[2] * w[0];
+        cross[2] = d[1] * w[0] - d[0] * w[1];
     }
     const float push = plus ? 2.5f : -2.5f;
     const float spin = (slot == 0 || slot == 2) ? car.FrontWheelSpeed() : car.RearWheelSpeed();
     for (int k = 0; k < 3; ++k) {
-        v[k] = (body.vel[k] + cross[k]) + M[k] * push;
-        W[k] = w[k] + M[k] * spin;
+        v[k] = push * M[k] + (cross[k] + body.vel[k]);  // 0x41e4b0: added + to
+        W[k] = spin * M[k] + w[k];
     }
     b.SetVelocity(v);
     b.SetSpin(W);

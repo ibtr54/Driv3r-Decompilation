@@ -136,9 +136,15 @@ public:
     // the hit breaks, is dropped. Null: props are solid.
     Props* props = nullptr;
 
+    // What Step does: 0 the pairs and the ground, 1 the pairs only (0x5a31f0),
+    // 2 the ground only (0x5a0020); the physics step runs every body's
+    // pairs before any ground contact (BOOT_TO_MENU.md section 98).
+    int mode = 0;
+
     // Diagnostics of the last step.
     int pairs = 0, contacts = 0, ground = 0;
     float deepest = 0;
+    BodyContact lastGround;  // the last ground contact answered
 
     // Called after each impulse against a static object with the contact
     // and the impulse on the body: the game's contact callback reaches the

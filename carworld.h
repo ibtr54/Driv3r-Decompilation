@@ -59,6 +59,10 @@ public:
     // the tick's effects block ran (or not): the smoke, spray and skid
     // decision (CarSim::Effects) at its place in the car's tick.
     std::function<void(bool ran, const CarSmokeState& smoke)> onEffects;
+    // Around the group's solver call (tests: before = false, after = true).
+    std::function<void(bool after)> onGroupStep;
+    // Before the loose parts and wheels are integrated (tests).
+    std::function<void()> onLooseStep;
 
     // The wheels that came off (0x506cd0): free bodies, their shapes about
     // their centre; drawRel is the caller's (the wheel's draw matrix

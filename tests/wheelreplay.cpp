@@ -157,6 +157,7 @@ int main(int argc, char** argv)
             b.Integrate(1.0f / 120.0f);
             b.UpdateMatrix();
         }
+        RigidBody pre = b;  // after the integration, before the contacts
         const int touched = b.state != 0x78 ? contacts.Step(b, shapes, world, &city.ground) : 0;
         RigidBody t;
         Load(wi[size_t(n)], t);
@@ -167,6 +168,39 @@ int main(int argc, char** argv)
         }
         float dw = 0;
         for (int k = 0; k < 3; ++k) dw = std::fmax(dw, std::fabs(b.w[k] - t.w[k]));
+        // WHEEL_BITS=1: pos, vel, L and w bit for bit (with WHEEL_RELOAD:
+        // one step's error alone; BOOT_TO_MENU.md section 98)
+        if (getenv("WHEEL_BITS")) {
+            static int bad = 0, badPair = 0, shownBits = 0;
+            int nb = 0;
+            const float* pa[4] = { b.pos, b.vel, b.L, b.w };
+            const float* pb[4] = { t.pos, t.vel, t.L, t.w };
+            for (int f = 0; f < 4; ++f) nb += std::memcmp(pa[f], pb[f], 12) != 0;
+            if (nb) {
+                if (hits[size_t(n)]) ++badPair;
+                else ++bad;
+                if (!hits[size_t(n)] && shownBits++ < 12) {
+                    auto u = [](float x) { unsigned v; std::memcpy(&v, &x, 4); return v; };
+                    printf("bits %d: pos %08x %08x %08x / %08x %08x %08x vel %08x %08x %08x / %08x %08x %08x L %08x %08x %08x / %08x %08x %08x%s\n",
+                           n, u(b.pos[0]), u(b.pos[1]), u(b.pos[2]), u(t.pos[0]), u(t.pos[1]), u(t.pos[2]), u(b.vel[0]),
+                           u(b.vel[1]), u(b.vel[2]), u(t.vel[0]), u(t.vel[1]), u(t.vel[2]), u(b.L[0]), u(b.L[1]), u(b.L[2]),
+                           u(t.L[0]), u(t.L[1]), u(t.L[2]), touched ? " contact" : "");
+                    printf("      contact moved pos by port %.9g %.9g %.9g / game %.9g %.9g %.9g; vel port %.9g %.9g %.9g / game %.9g %.9g %.9g; deepest %.9g\n",
+                           b.pos[0] - pre.pos[0], b.pos[1] - pre.pos[1], b.pos[2] - pre.pos[2], t.pos[0] - pre.pos[0],
+                           t.pos[1] - pre.pos[1], t.pos[2] - pre.pos[2], b.vel[0] - pre.vel[0], b.vel[1] - pre.vel[1],
+                           b.vel[2] - pre.vel[2], t.vel[0] - pre.vel[0], t.vel[1] - pre.vel[1], t.vel[2] - pre.vel[2],
+                           contacts.deepest);
+                    {
+                        const BodyContact& g = contacts.lastGround;
+                        printf("      ground: n %.9g %.9g %.9g depth %.9g A (%.9g %.9g %.9g) B y %.9g surface %d\n",
+                               g.normal[0], g.normal[1], g.normal[2], g.depth, g.pointA[0], g.pointA[1], g.pointA[2],
+                               g.pointB[1], g.surfaceB);
+                    }
+                }
+            }
+            if (n == int(wi.size()) - 1 || n == steps)
+                printf("bits: %d steps differ without a car pair, %d with one\n", bad, badPair);
+        }
         const bool off = dp > 1e-4f || dv > 1e-3f || dw > 1e-3f;
         if (off && !firstOff) firstOff = n;
         if (all || n <= 5 || n % 20 == 0 || (reload && off))
