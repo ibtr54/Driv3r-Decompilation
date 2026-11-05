@@ -1546,6 +1546,15 @@ void CylinderGroundPoints(float r, float h, const float* m, float probe[8][3], f
         for (int i = 0; i < 8; ++i) low[i] = probe[i][1] - twoH;
         return;
     }
+    CylinderRimPoints(r, h, m, probe, low);
+}
+
+void CylinderRimPoints(float r, float h, const float* m, float probe[8][3], float low[8])
+{
+    const float* r0 = m;
+    const float* a = m + 4;
+    const float* r2 = m + 8;
+    const float* pos = m + 12;
     // 0x5b1f00: L the lower end's centre, U the upper one's
     float A[3], L[3], U[3];
     for (int k = 0; k < 3; ++k) A[k] = h * a[k];
@@ -1671,7 +1680,50 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
     // CylinderGroundPoints), the deepest one below. The contact takes the
     // surface of the last shape tested once one was found (0x5b3570 stamps
     // the best record with every shape that returns 5).
-    if (groundData && mode != 1) {
+    // 0x5b36f0's two pre-tests (BOOT_TO_MENU.md section 102): 0x5b3620,
+    // the ground under the bounding box's four top corners (probed from its
+    // top, in the order (hi.x, hi.z), (lo.x, hi.z), (lo.x, lo.z), (hi.x,
+    // lo.z)) must rise above the box's bottom somewhere; then, with more
+    // than one shape, 0x5b28e0: a point of the bounding shape (a box's
+    // corners 0x5b2800, a cylinder's rim points 0x5b2870 / 0x5b1f00) must
+    // lie below the ground. Either failing: no ground contact (run 36 tick
+    // 1872: a contact 0.002 deep that the game never made).
+    auto groundPreTests = [&]() {
+        const float top[4][2] = { { hi[0], hi[2] }, { lo[0], hi[2] }, { lo[0], lo[2] }, { hi[0], lo[2] } };
+        bool under = false;
+        for (const auto& c : top) {
+            float h, n[3];
+            if (groundData->Probe(c[0], hi[1], c[1], h, n) && lo[1] < h) {
+                under = true;
+                break;
+            }
+        }
+        if (!under) return false;
+        if (shapes.size() < 2) return true;
+        float sw[16];
+        shapeWorld(0, sw);
+        float pts[8][3], low[8];
+        if (shapes[0].type == 1) {
+            CylinderRimPoints(shapes[0].size[0], shapes[0].size[1], sw, pts, low);
+        } else if (shapes[0].type == 0) {
+            float sh[3];
+            BoundingHalf(shapes[0], sh);
+            Box b;
+            MakeBox(sh, sw, b);
+            for (int k = 0; k < 8; ++k)
+                for (int m = 0; m < 3; ++m)
+                    pts[k][m] = b.c[m] + ((k & 1) ? b.sa[0][m] : -b.sa[0][m]) +
+                                ((k & 2) ? b.sa[1][m] : -b.sa[1][m]) + ((k & 4) ? b.sa[2][m] : -b.sa[2][m]);
+        } else {
+            return false;
+        }
+        for (const auto& q : pts) {
+            float h, n[3];
+            if (groundData->Probe(q[0], q[1], q[2], h, n) && q[1] < h) return true;
+        }
+        return false;
+    };
+    if (groundData && mode != 1 && groundPreTests()) {
         BodyContact g;
         bool found = false;
         for (size_t s = first; s < shapes.size(); ++s) {

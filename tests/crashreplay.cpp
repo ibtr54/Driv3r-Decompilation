@@ -413,14 +413,22 @@ int main(int argc, char** argv)
             contacts = 0;
             if (reload && haveK && g_recs["K"].count(unsigned(call))) {
                 // the window from the traced state: the object (its body
-                // pointer kept) and the body (its group membership kept)
-                const std::vector<unsigned>& K = g_recs["K"][unsigned(call)].w;
-                memcpy(cw.car.obj, K.data(), std::min<size_t>(K.size() * 4, CarSim::kTracedSize));
-                void* g = cw.body.group;
-                const int member = cw.body.member;
-                LoadBody(it->second.w, cw.body);
-                cw.body.group = g;
-                cw.body.member = member;
+                // pointer kept) and the body (its group membership kept),
+                // loaded where the game takes it: after the slot's pre-tick
+                // (a tear-off there ends the group and recomputes the car's
+                // spin before the K dump; run 21 call 109), before the car's
+                // tick (CarWorld::onBeforeCarTick)
+                const std::vector<unsigned>* K = &g_recs["K"][unsigned(call)].w;
+                const std::vector<unsigned>* Kb = &it->second.w;
+                cw.onBeforeCarTick = [K, Kb]() {
+                    memcpy(cw.car.obj, K->data(), std::min<size_t>(K->size() * 4, CarSim::kTracedSize));
+                    void* g = cw.body.group;
+                    const int member = cw.body.member;
+                    LoadBody(*Kb, cw.body);
+                    cw.body.group = g;
+                    cw.body.member = member;
+                    cw.onBeforeCarTick = nullptr;
+                };
             }
             ++call;
         }

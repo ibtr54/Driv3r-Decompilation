@@ -63,6 +63,9 @@ public:
     std::function<void(bool after)> onGroupStep;
     // Before the loose parts and wheels are integrated (tests).
     std::function<void()> onLooseStep;
+    // After the slot's pre-tick (damage, tear-off, hinging) and before the
+    // car's tick: where the game's 25 Hz car state is taken (tests).
+    std::function<void()> onBeforeCarTick;
 
     // The wheels that came off (0x506cd0): free bodies, their shapes about
     // their centre; drawRel is the caller's (the wheel's draw matrix

@@ -85,6 +85,8 @@ bool CylinderSphereContact(const float sizeA[3], const float* worldA, float radi
 // eight points; else both rims at +-P and +-Q (P = a x (0, 1, 0), Q = a x
 // P, times r).
 void CylinderGroundPoints(float r, float h, const float* m, float probe[8][3], float low[8]);
+// 0x5b1f00 alone: the steep (lower rim) or lying (both rims) points, low = y.
+void CylinderRimPoints(float r, float h, const float* m, float probe[8][3], float low[8]);
 
 // The vehicle's surface rename (0x4e9160, the world's contact callback
 // +0x204 before the impulse; BOOT_TO_MENU.md section 77): a side of the

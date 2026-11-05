@@ -110,6 +110,7 @@ int CarWorld::Step(const float controls[5], bool handbrake)
         damage.Tick(*vehicle, &body.matrix[0][0], due);
         for (const DamageRequest& q : due) DamageState(q, true);
     }
+    if (onBeforeCarTick) onBeforeCarTick();
     wheelPrev = wheelVis;  // 0x503e00, in the slot's pre-tick before the car's tick
     wheelVis.Update(car);
     // 0x503e00 also keeps the car's velocity and spin (slot +0x1f80 /

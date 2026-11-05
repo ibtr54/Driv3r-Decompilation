@@ -36,7 +36,7 @@ void Read(const char* path)
     if (!f) { fprintf(stderr, "cannot open %s\n", path); exit(1); }
     static char line[1 << 16];
     while (fgets(line, sizeof(line), f)) {
-        if (line[0] != 'G' && line[0] != 'H' && strncmp(line, "DEb", 3) != 0) continue;
+        if (line[0] != 'G' && line[0] != 'H' && line[0] != 'T' && strncmp(line, "DEb", 3) != 0) continue;
         char tag[8];
         unsigned n = 0, addr = 0;
         int used = 0;
@@ -522,6 +522,41 @@ int main(int argc, char** argv)
         return RunHinges();
     }
     if (mode == "panels") return RunPanels(argc > 4 ? argv[4] : "D:/l/gta-vc/DRIV3R/Vehicles/miami.vvs");
+    if (mode == "integ") {
+        // a free body's integration: the game's 0x5af710 (ecx = body +0x80,
+        // h) against RigidBody::Integrate, from a traced body dump (tag
+        // and index), for count steps of 1/120 s; the first word that
+        // differs per step
+        //   groupreplay integ <phys.txt> <exe> tag index count
+        const Dump& d = g_dumps[argv[4]][static_cast<unsigned>(atoi(argv[5]))];
+        const int count = atoi(argv[6]);
+        if (d.words.size() < 0x1e0 / 4) { printf("no dump\n"); return 1; }
+        static uint32_t w[0x200 / 4];
+        memcpy(w, d.words.data(), 0x1e0);
+        RigidBody b;
+        LoadBody(w, b);
+        const float h = 1.0f / 120.0f;
+        uint32_t hb;
+        memcpy(&hb, &h, 4);
+        for (int i = 0; i < count; ++i) {
+            GameRegs r;
+            r.ecx = reinterpret_cast<uint32_t>(w) + 0x80;
+            if (!GameCode::Call(0x5af710, r, { hb })) {
+                printf("fault at %08x\n", GameCode::Game(GameCode::g_faultAddr));
+                return 1;
+            }
+            b.Integrate(h);
+            static uint32_t pw[0x200 / 4];
+            memcpy(pw, w, 0x1e0);
+            StoreBody(b, pw);
+            int bad = 0;
+            for (int o = 0x80; o < 0x1c0; o += 4)
+                if (pw[o / 4] != w[o / 4] && bad++ < 4)
+                    printf("  step %d +0x%03x game %08x port %08x\n", i + 1, o, w[o / 4], pw[o / 4]);
+            if (!bad) printf("  step %d equal\n", i + 1);
+        }
+        return 0;
+    }
     if (mode == "gimp") {
         // the game's 0x5b11c0 (an impulse J, angular A on member k) on the
         // group after call n (GA dumps), the 0x5b14b3 bookkeeping cut off
