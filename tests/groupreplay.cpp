@@ -522,58 +522,47 @@ int main(int argc, char** argv)
         return RunHinges();
     }
     if (mode == "panels") return RunPanels(argc > 4 ? argv[4] : "D:/l/gta-vc/DRIV3R/Vehicles/miami.vvs");
-    if (mode == "gresp") {
-        // the game's contact response 0x5c3110 on a member against the
-        // ground: the group after call n (GA), the contact record the port
-        // built (crashreplay RESP_DEBUG "RREC" line in a file), the ground
-        // pseudo-body from a traced DEb2 dump; the joint rates after it
-        //   groupreplay gresp <phys.txt> <exe> n rrec.txt
+    if (mode == "gimp") {
+        // the game's 0x5b11c0 (an impulse J, angular A on member k) on the
+        // group after call n (GA dumps), the 0x5b14b3 bookkeeping cut off
+        //   groupreplay gimp <phys.txt> <exe> n k Jx Jy Jz Ax Ay Az (hex bits)
         const unsigned n = static_cast<unsigned>(atoi(argv[4]));
-        FILE* f = fopen(argv[5], "r");
-        if (!f) return 1;
-        int member = 0;
-        unsigned head[8], rec[64];
-        if (fscanf(f, " RREC %d", &member) != 1) return 1;
-        for (unsigned& x : head) fscanf(f, "%x", &x);
-        for (unsigned& x : rec) fscanf(f, "%x", &x);
-        fclose(f);
-        State s;
-        Build(n, s, "GA");
-        uint32_t* list = reinterpret_cast<uint32_t*>(s.list);
-        const uint32_t body = reinterpret_cast<uint32_t*>(list[0x28 / 4])[member];
-        const Dump* ground = nullptr;
-        for (auto& d : g_dumps["DEb2"])
-            if (d.second.addr == 0x25072050) { ground = &d.second; break; }
-        if (!ground) { printf("no ground dump\n"); return 1; }
-        const uint32_t B = s.Add("ground", ground->addr, ground->words.data(), ground->words.size());
-        alignas(16) static uint32_t R[80], out[32];
-        memcpy(R, rec, sizeof(rec));
-        static bool patched = false;
-        if (!patched) {  // the wake 0x5a9230: a plain return
-            uint8_t* at = reinterpret_cast<uint8_t*>(GameCode::At(0x5a9230));
-            DWORD old;
-            VirtualProtect(at, 1, PAGE_EXECUTE_READWRITE, &old);
-            *at = 0xc3;
-            patched = true;
+        const int k = atoi(argv[5]);
+        alignas(16) static uint32_t J[4], A[4];
+        for (int i = 0; i < 3; ++i) {
+            J[i] = static_cast<uint32_t>(strtoul(argv[6 + i], nullptr, 16));
+            A[i] = static_cast<uint32_t>(strtoul(argv[9 + i], nullptr, 16));
         }
+        static const uint8_t ret[] = { 0x5f, 0x5e, 0x5d, 0x5b, 0x81, 0xc4, 0x80, 0x00, 0x00, 0x00, 0xc3 };
+        uint8_t* at = reinterpret_cast<uint8_t*>(GameCode::At(0x5b14b3));
+        DWORD old;
+        VirtualProtect(at, sizeof(ret), PAGE_EXECUTE_READWRITE, &old);
+        memcpy(at, ret, sizeof(ret));
+        State g;
+        Build(n, g, "GA");
+        uint32_t* glist = reinterpret_cast<uint32_t*>(g.list);
         GameRegs r;
-        if (!GameCode::Call(0x5c3110, r, { reinterpret_cast<uint32_t>(R), body, B, head[0], head[1], head[2],
-                                           reinterpret_cast<uint32_t>(out) })) {
+        r.eax = reinterpret_cast<uint32_t*>(glist[0x28 / 4])[k];
+        if (!GameCode::Call(0x5b11c0, r, { reinterpret_cast<uint32_t>(J), reinterpret_cast<uint32_t>(A) })) {
             printf("fault at %08x\n", GameCode::Game(GameCode::g_faultAddr));
             return 1;
         }
-        const uint32_t* qd = reinterpret_cast<const uint32_t*>(list[0x24 / 4]);
+        const uint32_t* qd = reinterpret_cast<const uint32_t*>(glist[0x24 / 4]);
         printf("game qd:");
-        for (unsigned k = 0; k < list[0]; ++k) printf(" %08x", qd[k]);
-        printf("\ntraced next GB24:");
-        for (unsigned x : g_dumps["GB24"][n + 1].words) printf(" %08x", x);
-        printf("\ngame J %08x %08x %08x", out[16], out[17], out[18]);
-        printf("\nport P %08x %08x %08x K22 %08x det %08x\n", head[3], head[4], head[5], head[6], head[7]);
-        for (unsigned k = 0; k < list[0]; ++k) {
-            const uint32_t* b = reinterpret_cast<const uint32_t*>(reinterpret_cast<uint32_t*>(list[0x28 / 4])[k]);
-            printf("m%u vel %08x %08x %08x w %08x %08x %08x\n", k, b[0x90 / 4], b[0x94 / 4], b[0x98 / 4], b[0x150 / 4],
-                   b[0x154 / 4], b[0x158 / 4]);
-        }
+        for (unsigned i = 0; i < glist[0]; ++i) printf(" %08x", qd[i]);
+        printf("\n");
+        // the port on the same state
+        State s;
+        Build(n, s, "GA");
+        PortGroup port;
+        MakeGroup(s, port);
+        float Jf[3], Af[3];
+        memcpy(Jf, J, 12);
+        memcpy(Af, A, 12);
+        port.group.Impulse(k, Jf, Af);
+        printf("port qd:");
+        for (float x : port.group.qd) printf(" %08x", GameCode::Bits(x));
+        printf("\n");
         return 0;
     }
     if (mode == "kcheck") {

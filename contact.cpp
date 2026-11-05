@@ -1699,11 +1699,17 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
                 if (!groundData->Probe(p[0], p[1], p[2], h, n, &surf)) continue;
                 const float depth = h - low[k];
                 if (depth > (found ? g.depth : 0.0f)) {
-                    const float l = std::sqrt(Dot(n, n));
-                    if (!(l > 0)) continue;
+                    // a zero normal is skipped (a guard of the port; the
+                    // game has none)
+                    if (!(Dot(n, n) > 0)) continue;
                     found = true;
                     g.depth = depth;
-                    for (int m = 0; m < 3; ++m) g.normal[m] = n[m] / l;
+                    // 0x5b36f0 copies the probe's normal as it is: not
+                    // divided by its length (run 36 tick 934: a kerb's
+                    // normal of length 1.00000012; the bumper's contact
+                    // matrix is nearly singular there and the division
+                    // put its joint rate 0.15% off)
+                    for (int m = 0; m < 3; ++m) g.normal[m] = n[m];
                     g.pointA[0] = p[0]; g.pointA[1] = low[k]; g.pointA[2] = p[2];
                     g.pointB[0] = p[0]; g.pointB[1] = h; g.pointB[2] = p[2];
                     g.surfaceB = surf;
