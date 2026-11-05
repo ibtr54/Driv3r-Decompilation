@@ -159,6 +159,12 @@ public:
     {
         if (cityInstance >= 0 && size_t(cityInstance) < instanceOf_.size()) instanceOf_[size_t(cityInstance)] = -1;
     }
+    // A city instance drawn at another place from now on: a broken prop's
+    // debris (carworld.h PropDebris; the debris draw 0x4e2860 puts the
+    // model at the part's inverse times the body's matrix). The instance
+    // gets its own copy of the placement, so every path that reads it (the
+    // submeshes, the culling, the shadow volumes) sees the new one.
+    void MoveCityInstance(int cityInstance, const float world[16]);
     // The level's light, fog and sky matrix (used from the next Draw).
     void SetMood(const Mood& mood) { mood_ = mood; }
     // The profile's Shadows setting (+0xc8c).
@@ -458,6 +464,7 @@ private:
     std::vector<Instance> instances_;
     const CityPlacement* city_ = nullptr;
     std::vector<int> instanceOf_;  // per city instance: index into instances_, -1: not drawn
+    std::map<int, CityInstance> moved_;  // MoveCityInstance's placements (by city instance)
     std::vector<int> waterTiles_;  // the sea's tiles: indices into instances_
     // Shore waves: the material's group (GWTR reference 0, render id 1), a
     // managed vertex buffer of 2 x slots strips of maxVerts vertices

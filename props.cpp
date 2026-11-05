@@ -7,6 +7,7 @@ void Props::Init(const CityPlacement& city)
     city_ = &city;
     broken_.assign(city.instances.size(), 0);
     fresh_.clear();
+    debris_.clear();
 }
 
 float Props::Momentum(const float vel[3], float mass)
@@ -36,6 +37,20 @@ bool Props::Breaks(int instance, float momentum, bool forced) const
     return true;  // 0x4e0980 (range 4) / 0x4e0470 (range 3)
 }
 
+const CityPlacement::PropType* Props::TypeOfInstance(int instance) const
+{
+    if (!city_ || instance < 0 || size_t(instance) >= city_->instances.size()) return nullptr;
+    return TypeOf(city_->instances[size_t(instance)].model);
+}
+
+Props::Path Props::PathOf(int instance, float momentum) const
+{
+    const CityInstance& in = city_->instances[size_t(instance)];
+    const CityPlacement::PropType* t = TypeOf(in.model);
+    if (t && t->parts > 1 && t->shatter < momentum) return kShatter;
+    return in.range == 4 ? kBody : kDebris;
+}
+
 bool Props::Hit(int instance, float momentum)
 {
     if (!city_ || instance < 0 || size_t(instance) >= broken_.size()) return false;
@@ -45,6 +60,11 @@ bool Props::Hit(int instance, float momentum)
     if (!Breaks(instance, momentum, false)) return false;
     broken_[instance] = 1;
     fresh_.push_back(instance);
+    // 0x4e0470: the first part becomes debris when its model has physics
+    if (PathOf(instance, momentum) == kDebris) {
+        const CityPlacement::PropType* t = TypeOf(in.model);
+        if (t && t->physics) debris_.push_back(instance);
+    }
     // 0x4e00f0: the ring of linked pieces (GEBI +0x0e, indices in the same
     // GEBI), each through 0x4e0230 forced with no momentum
     int next = in.extra == 0xffff ? -1 : in.gebiFirst + int(in.extra);
@@ -53,6 +73,8 @@ bool Props::Hit(int instance, float momentum)
         if (!broken_[next] && Breaks(next, 0.0f, true)) {
             broken_[next] = 1;
             fresh_.push_back(next);
+            const CityPlacement::PropType* t = TypeOf(piece.model);
+            if (PathOf(next, 0.0f) == kDebris && t && t->physics) debris_.push_back(next);
         }
         next = piece.extra == 0xffff ? -1 : piece.gebiFirst + int(piece.extra);
     }
@@ -63,5 +85,12 @@ std::vector<int> Props::TakeBroken()
 {
     std::vector<int> out;
     out.swap(fresh_);
+    return out;
+}
+
+std::vector<int> Props::TakeDebris()
+{
+    std::vector<int> out;
+    out.swap(debris_);
     return out;
 }

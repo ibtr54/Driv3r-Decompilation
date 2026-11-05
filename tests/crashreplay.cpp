@@ -463,6 +463,22 @@ int main(int argc, char** argv)
         }
         contacts += cw.Step(c, hb);
         props.TakeBroken();
+        // CRASH_DEBRIS=1: every prop debris body after the tick (bits: pos,
+        // vel, q, L, w, the matrix's rows 0..2), against the traced "NPb" /
+        // "RSb" of the body the car meets in the next tick (section 104)
+        if (getenv("CRASH_DEBRIS"))
+            for (int k = 0; k < CarWorld::kDebrisSlots; ++k) {
+                const CarWorld::PropDebris& d = cw.propDebris[k];
+                if (!d.active) continue;
+                auto b = [](float v) { unsigned u; memcpy(&u, &v, 4); return u; };
+                const RigidBody& r = d.body;
+                printf("      DB tick %d slot %d pos %08x %08x %08x vel %08x %08x %08x q %08x %08x %08x %08x L %08x %08x %08x w "
+                       "%08x %08x %08x m %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                       tick, k, b(r.pos[0]), b(r.pos[1]), b(r.pos[2]), b(r.vel[0]), b(r.vel[1]), b(r.vel[2]), b(r.q[0]),
+                       b(r.q[1]), b(r.q[2]), b(r.q[3]), b(r.L[0]), b(r.L[1]), b(r.L[2]), b(r.w[0]), b(r.w[1]), b(r.w[2]),
+                       b(r.matrix[0][0]), b(r.matrix[0][1]), b(r.matrix[0][2]), b(r.matrix[1][0]), b(r.matrix[1][1]),
+                       b(r.matrix[1][2]), b(r.matrix[2][0]), b(r.matrix[2][1]), b(r.matrix[2][2]));
+            }
     }
     printf("%d calls compared; first departure (pos 1e-4, vel 1e-3, q 1e-4): %d; worst position difference %.4f at "
            "call %d; program: %zu hinged / torn bodies, %zu loose wheels, group %s\n",

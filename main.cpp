@@ -3479,6 +3479,11 @@ private:
         world_.Init(*v, id, carTable_, WheelOffset(carTable_, HandlingClass(id)), pos, pose[3]);
         world_.onPartBody = [this](const DamageRequest& q) { PartBodyDrawn(q); };
         world_.onWheelOff = [this](CarWorld::LooseWheel& lw) { WheelOffDrawn(lw); };
+        // a prop's debris slot freed (the ring of 20 reused): the prop is gone
+        world_.onPropDebris = [this](int k) {
+            const CarWorld::PropDebris& d = world_.propDebris[k];
+            if (!d.active && d.instance >= 0) city_.HideCityInstance(d.instance);
+        };
         world_.onEffects = [this](bool ran, const CarSmokeState& smoke) { CarEffects(ran, smoke); };
         smokeLog_ = 0;
         tyreSmoke_[0] = tyreSmoke_[1] = false;
@@ -3696,10 +3701,13 @@ private:
             // tick and controls, the contacts (and the damage they cause),
             // the free bodies, the integration or the group's solver
             world_.Step(controls_, handbrake_);
-            // props broken by this step's contacts disappear (stage 1: no
-            // debris yet, BOOT_TO_MENU.md section 81)
+            // props broken by this step's contacts disappear, unless they
+            // became debris (BOOT_TO_MENU.md sections 81 and 104: drawn with
+            // their bodies below)
             for (int inst : props_.TakeBroken()) {
-                city_.HideCityInstance(inst);
+                bool debris = false;
+                for (const CarWorld::PropDebris& d : world_.propDebris) debris = debris || (d.active && d.instance == inst);
+                if (!debris) city_.HideCityInstance(inst);
                 const CityInstance& in = loader_.City().instances[size_t(inst)];
                 if (propLog_ < 40) {
                     ++propLog_;
@@ -3758,6 +3766,14 @@ private:
                 MatMul4(&panelDraw_[k * 17], &b->matrix[0][0], &carWorld_[dp * 16]);
             }
         city_.SetVehiclePose(carWorld_, &carHidden_);
+        // the props' debris: the model at the part's inverse times the
+        // body's matrix (0x4e2860; the body's latest matrix, not blended)
+        for (const CarWorld::PropDebris& d : world_.propDebris) {
+            if (!d.active) continue;
+            float w[16];
+            MatMul4(d.drawRel, &d.body.matrix[0][0], w);
+            city_.MoveCityInstance(d.instance, w);
+        }
         // The dents (0x4fd7f0 per drawn part with a record: VehicleDent):
         // the car shader moves the part's vertices by their damaged offset
         // times its record's first half.

@@ -218,6 +218,14 @@ public:
     // Their 'AWHF' records as the smashable props' types (the game uses
     // them in place: [0x8ac378] vtbl+0x14 finds one by the GEBI model;
     // BOOT_TO_MENU.md section 81).
+    // A shape of a prop's physics entry (PDL as stored: the size, the
+    // shape's matrix in the body, +0x50 type, +0x51 surface).
+    struct PropShape
+    {
+        int type = 0, surface = 0;
+        float size[3] = {};
+        float local[16] = {};
+    };
     struct PropType
     {
         uint32_t model = 0;          // +0x14
@@ -225,6 +233,20 @@ public:
         float shatter = 0;           // +0x1c: above it a type of several parts breaks apart
         float threshold = 0;         // +0x20: the hit's momentum that breaks it
         uint16_t firstPartModel = 0; // +0x42 (0xffff: none)
+        // The first part's matrix in the prop (+0x50, row-major) and its
+        // physics (BOOT_TO_MENU.md section 104): the record's own PDL block
+        // follows the parts (+0x40 + parts x 0x50, relocated by 0x5a5a50 in
+        // the loader 0x44f823); the physics models (0x50 bytes) start at
+        // block + [record +0x18]: +0x40 inertia diagonal, +0x4c mass; the
+        // part's model index (+0x42) picks one and the PDL entry (block +
+        // [block +8] + index x 0x10) with its shapes. physics false: the
+        // index is not below the block's entry count (0x4e0470 makes no
+        // debris).
+        float part0[16] = {};
+        bool physics = false;
+        float inertia[3] = {};
+        float mass = 0;
+        std::vector<PropShape> shapes;
     };
     std::vector<PropType> propTypes;
     // GEIR cells per side (12 in Miami, 15 in Nice and Istanbul); a cell

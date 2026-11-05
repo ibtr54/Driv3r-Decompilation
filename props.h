@@ -16,10 +16,14 @@
 //     debris); each marks the prop broken;
 //   - a broken prop's linked pieces (GEBI +0x0e, a ring of indices in the
 //     same GEBI) are broken with it (0x4e0230 forced, momentum 0).
-// Not ported (stage 1): the debris and physics bodies the break makes
-// (debris manager [0x8ac450] vtbl+0x1c / +0x28, [0x8ac454] vtbl+0x48), its
-// collision event (0x4a94f0), the hit memory of bullets and explosions
-// (0x4e0230 with +0x115: ten recent props whose damage adds up and decays).
+// Stage 2 (BOOT_TO_MENU.md section 104): a prop that breaks through
+// 0x4e0470 (range 3, its type's first part with a physics model) is queued
+// as debris (TakeDebris): the caller makes the free body (CarWorld,
+// 0x4e5150). Not ported: the physics bodies of range 4 (0x4e0980 through
+// [0x8ac454]'s slots, 0x4db140's hinged props), the break apart 0x4e0fd0,
+// the collision event (0x4a94f0), the hit memory of bullets and
+// explosions (0x4e0230 with +0x115: ten recent props whose damage adds up
+// and decays); those props simply vanish.
 #pragma once
 
 #include <cstdint>
@@ -40,6 +44,16 @@ public:
     bool Broken(int instance) const { return instance >= 0 && size_t(instance) < broken_.size() && broken_[instance]; }
     // Instances broken since the last call (for the log and the drawing).
     std::vector<int> TakeBroken();
+    // Instances broken through 0x4e0470 with a physics model since the last
+    // call (their debris bodies are due; also in TakeBroken).
+    std::vector<int> TakeDebris();
+    // 0x4e0230's path for a prop that breaks: 0x4e0fd0 (several parts,
+    // above the type's +0x1c), 0x4e0980 (range 4 = GEBI [+0x18, +0x1c),
+    // 0x4738e0), else 0x4e0470.
+    enum Path { kShatter, kBody, kDebris };
+    Path PathOf(int instance, float momentum) const;
+    const CityPlacement::PropType* TypeOfInstance(int instance) const;
+    const CityPlacement* City() const { return city_; }
 
     // The momentum 0x4e8f70 measures for one body (its velocity x mass x
     // [0x78f1c8], the game's order).
@@ -52,4 +66,5 @@ private:
     const CityPlacement* city_ = nullptr;
     std::vector<uint8_t> broken_;
     std::vector<int> fresh_;
+    std::vector<int> debris_;
 };

@@ -130,6 +130,31 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
                                     t.shatter = F32(d, rec + 0x1c);
                                     t.threshold = F32(d, rec + 0x20);
                                     memcpy(&t.firstPartModel, &d[rec + 0x42], 2);
+                                    // part 0's matrix and its physics (0x4e0470)
+                                    if (t.parts > 0 && rec + 0x90 <= d.size())
+                                        for (int q = 0; q < 16; ++q) t.part0[q] = F32(d, rec + 0x50 + 4 * size_t(q));
+                                    const size_t blk = rec + 0x40 + size_t(t.parts) * 0x50;
+                                    if (t.parts > 0 && blk + 0x20 <= d.size() &&
+                                        memcmp(&d[blk + 0x10], "PDL001", 6) == 0 && t.firstPartModel < U32(d, blk)) {
+                                        const size_t phys = blk + U32(d, rec + 0x18) + size_t(t.firstPartModel) * 0x50;
+                                        const size_t pe = blk + U32(d, blk + 8) + size_t(t.firstPartModel) * 0x10;
+                                        if (phys + 0x50 <= d.size() && pe + 0x10 <= d.size()) {
+                                            t.physics = true;
+                                            for (int q = 0; q < 3; ++q) t.inertia[q] = F32(d, phys + 0x40 + 4 * size_t(q));
+                                            t.mass = F32(d, phys + 0x4c);
+                                            const size_t shapes0 = pe + U32(d, pe + 4);  // relocated from the entry
+                                            for (uint32_t s = 0; s < U32(d, pe) && s < 64; ++s) {
+                                                const size_t sh = shapes0 + size_t(s) * 0x60;
+                                                if (sh + 0x60 > d.size()) break;
+                                                PropShape ps;
+                                                ps.type = d[sh + 0x50];
+                                                ps.surface = d[sh + 0x51];
+                                                for (int q = 0; q < 3; ++q) ps.size[q] = F32(d, sh + 4 * size_t(q));
+                                                for (int q = 0; q < 16; ++q) ps.local[q] = F32(d, sh + 0x10 + 4 * size_t(q));
+                                                t.shapes.push_back(ps);
+                                            }
+                                        }
+                                    }
                                     propTypes.push_back(t);
                                 }
                             }

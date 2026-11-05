@@ -2324,6 +2324,27 @@ void CityRenderer::SetVehicleDamage(const std::vector<float>& damage)
         if (vehicleWorldPart_[i] < damage.size()) vehicleDamage_[i] = damage[vehicleWorldPart_[i]];
 }
 
+void CityRenderer::MoveCityInstance(int cityInstance, const float world[16])
+{
+    if (!city_ || cityInstance < 0 || size_t(cityInstance) >= instanceOf_.size()) return;
+    const int idx = instanceOf_[size_t(cityInstance)];
+    if (idx < 0) return;
+    auto it = moved_.find(cityInstance);
+    if (it == moved_.end()) it = moved_.emplace(cityInstance, city_->instances[size_t(cityInstance)]).first;
+    CityInstance& in = it->second;
+    memcpy(in.world, world, sizeof(in.world));
+    for (int k = 0; k < 3; ++k) in.position[k] = world[12 + k];
+    Instance& inst = instances_[size_t(idx)];
+    inst.in = &in;
+    // the model's box centre, as at the load
+    const MdpcModel& m = packages_[size_t(inst.package)].data->models[inst.model];
+    float c[3] = {};
+    if (m.box[0][0] < 1e30f && m.box[0][0] > -1e30f)
+        for (int k = 0; k < 8; ++k)
+            for (int j = 0; j < 3; ++j) c[j] += m.box[k][j] / 8.0f;
+    in.Transform(c, inst.centre);
+}
+
 void CityRenderer::SetVehiclePose(const std::vector<float>& worlds, const std::vector<uint8_t>* hidden)
 {
     vehicleHidden_.assign(vehicleParts_.size(), 0);

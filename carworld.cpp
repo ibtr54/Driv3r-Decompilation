@@ -95,6 +95,8 @@ void CarWorld::Init(const VehicleData& v, int id, const float* T, float wheelOff
     tyres = WheelTyres();
     for (float& x : wheelDamageSeen) x = 0;
     looseWheels.clear();
+    for (PropDebris& d : propDebris) d = PropDebris();
+    debrisNext = 0;
 }
 
 // The world tick's order (0x4a7410): the vehicles' controls and car tick
@@ -207,6 +209,18 @@ int CarWorld::Step(const float controls[5], bool handbrake)
             if (lw.body.state != 0x78) debrisContacts.Step(lw.body, lw.shapes, *collision, ground);
             if (phase == 1) contacts.Pair(body, shapes, lw.body, lw.shapes);
         }
+        // the props' debris (section 104): free bodies, as the loose parts
+        for (PropDebris& d : propDebris) {
+            if (!d.active) continue;
+            if (d.body.state != 0x78) debrisContacts.Step(d.body, d.shapes, *collision, ground);
+            if (phase == 1) contacts.Pair(body, shapes, d.body, d.shapes);
+        }
+        // A prop broken by this step's pairs gets its debris body now
+        // (0x4e8f70 -> 0x4e0470 -> 0x4e5150 in the contact callback): it
+        // takes no pair in the step that made it (run 24: the car meets it
+        // from the next tick), then its ground and the integration.
+        if (phase == 1 && props)
+            for (int inst : props->TakeDebris()) SpawnPropDebris(inst);
     }
     debrisContacts.mode = contacts.mode = 0;
     (void)panelHits;
@@ -255,6 +269,17 @@ int CarWorld::Step(const float controls[5], bool handbrake)
             // the axle: the cylinder's axis, the body's x row
             log("Loose wheel %d: at (%.3f %.3f %.3f), axle y %.3f, speed %.2f", lw.wheel, b.pos[0], b.pos[1], b.pos[2],
                 b.matrix[0][1], std::sqrt(b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1] + b.vel[2] * b.vel[2]));
+        }
+    }
+    for (PropDebris& d : propDebris) {
+        if (!d.active || d.body.state == 0x78) continue;
+        d.body.Integrate(1.0f / 120.0f);
+        d.body.UpdateMatrix();
+        if (debrisLog < 40 && (++d.ticks % 120) == 0 && log) {
+            ++debrisLog;
+            const RigidBody& b = d.body;
+            log("Prop debris (instance %d): at (%.3f %.3f %.3f), speed %.2f", d.instance, b.pos[0], b.pos[1], b.pos[2],
+                std::sqrt(b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1] + b.vel[2] * b.vel[2]));
         }
     }
     return touched;
@@ -410,6 +435,80 @@ void CarWorld::SpawnLooseWheel(int slot)
 
 // The hinged parts' matrices and joint values for the damage's tests
 // (the record's body +0x10, the group list's +0x20).
+// 0x4e0470 (record) + 0x4e5150 (body) for a prop broken through 0x4e0470
+// (BOOT_TO_MENU.md section 104; run 24 call 415: a range-3 prop of model
+// 0x2d, mass 58.464).
+void CarWorld::SpawnPropDebris(int instance)
+{
+    if (!props || !props->City()) return;
+    const CityPlacement& city = *props->City();
+    const CityPlacement::PropType* t = props->TypeOfInstance(instance);
+    if (!t || !t->physics || instance < 0 || size_t(instance) >= city.instances.size()) return;
+    const CityInstance& in = city.instances[size_t(instance)];
+    // the record: W = the first part's matrix x the instance's (0x473830,
+    // D3DX 0x6053a5); the rotation from W's rows (0x43e1a0), the position
+    // its row 3 (0x417e40)
+    float W[16];
+    Articulated::MatMul(t->part0, in.world, W);
+    // the slot (0x4e5150): the one there is freed (0x4e6820)
+    const int k = debrisNext;
+    PropDebris& d = propDebris[k];
+    if (d.active) {
+        d.active = false;
+        if (onPropDebris) onPropDebris(k);
+    }
+    d = PropDebris();
+    RigidBody& b = d.body;
+    for (int c = 0; c < 3; ++c) b.pos[c] = W[12 + c];
+    b.pos[3] = 1.0f;
+    {
+        float rows[3][4];
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) rows[r][c] = W[4 * r + c];
+            rows[r][3] = 0;
+        }
+        Articulated::QuatFromRows(rows, b.q, 1e-10, 1e-5);
+    }
+    b.mass = t->mass;  // record +0x90 = the physics model's +0x4c
+    for (int c = 0; c < 3; ++c) b.inertia[c] = t->inertia[c];  // record +0x60 through 0x5a1440
+    b.accel[1] = -10.0f;  // the world's gravity (+0xe0)
+    b.state = 0x65;
+    b.pairClass = 6;      // record +0x94 = 1 (0x4e5150: +0x70 = 6)
+    b.UpdateDerived();
+    const float zero[3] = { 0, 0, 0 };
+    b.SetVelocity(zero);  // 0x5a0f40 (record +0x70)
+    b.SetSpin(zero);      // 0x5a1000 (record +0x80)
+    b.UpdateMatrix();
+    // the shapes: the type's PDL entry (record +0x98) as stored
+    for (const CityPlacement::PropShape& s : t->shapes) {
+        VehicleData::Shape v;
+        v.type = s.type;
+        v.surface = s.surface;
+        memcpy(v.size, s.size, sizeof(v.size));
+        memcpy(v.local, s.local, sizeof(v.local));
+        d.shapes.push_back(v);
+    }
+    // record +0x00: the part's inverse as 0x4e0470 builds it (rotation
+    // transposed, each offset ((a0 t.x + a2 t.z) + a1 t.y) times -1)
+    {
+        const float* m = t->part0;
+        const float tx = m[12], ty = m[13], tz = m[14];
+        const float d0 = (m[0] * tx + m[2] * tz) + m[1] * ty;
+        const float d1 = (m[4] * tx + m[6] * tz) + m[5] * ty;
+        const float d2 = (m[8] * tx + m[10] * tz) + m[9] * ty;
+        const float inv[16] = { m[0], m[4], m[8],  m[3],  m[1],        m[5],        m[9],        m[7],
+                                m[2], m[6], m[10], m[11], -1.0f * d0, -1.0f * d1, -1.0f * d2, 1.0f };
+        memcpy(d.drawRel, inv, sizeof(inv));
+    }
+    d.instance = instance;
+    d.active = true;
+    debrisNext = (debrisNext + 1) % kDebrisSlots;  // [0x7a1a74] = 20
+    if (onPropDebris) onPropDebris(k);
+    if (log)
+        log("Prop debris (instance %d, slot %d): body at (%.4f %.4f %.4f), mass %.3f", instance, k, b.pos[0], b.pos[1],
+            b.pos[2], b.mass);
+}
+
 void CarWorld::SyncPanels()
 {
     for (size_t k = 0; k < damage.records.size(); ++k) {

@@ -80,6 +80,33 @@ public:
     };
     std::function<void(LooseWheel& lw)> onWheelOff;
 
+    // The debris of broken props (BOOT_TO_MENU.md section 104): the debris
+    // manager [0x8ac450]'s ring of 20 slots ([0x7a1a74], 0xa0 bytes; vtbl
+    // 0x787830): 0x4e0470 builds the record (W = the type's first part x
+    // the instance (D3DX), its quaternion (0x43e1a0) and position, the
+    // part's physics model's inertia and mass, the PDL entry, class flag 1)
+    // and 0x4e5150 makes the body in the next slot (freeing the one there):
+    // 0x5a0b60 (the entry's shapes, placed), mass, inertia (0x5a1440), +0x70
+    // 6, velocity and spin 0, +0x7c 0xd. A free body from then on (the
+    // world's step); drawRel (the part's inverse, record +0x00) times the
+    // body's matrix is the prop's model's place (0x4e2860).
+    struct PropDebris
+    {
+        bool active = false;
+        RigidBody body;
+        std::vector<VehicleData::Shape> shapes;
+        float drawRel[16] = {};
+        int instance = -1;  // the city instance (the prop)
+        int ticks = 0;
+    };
+    static const int kDebrisSlots = 20;
+    PropDebris propDebris[kDebrisSlots];
+    int debrisNext = 0;
+    // a prop's debris was made (or freed: active false) in slot k
+    std::function<void(int k)> onPropDebris;
+    // 0x4e0470 + 0x4e5150 for a broken prop (city instance).
+    void SpawnPropDebris(int instance);
+
     // The car's physics set up for vehicle v (id, handling table T, the
     // creation pose pos / heading) as main.cpp InitCar did: the model's
     // wheel data, Create, the automatic gearbox, the rays, the shapes and
