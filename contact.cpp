@@ -1656,7 +1656,8 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
         // 0x4e9160: the vehicle's surface against a static object (its +4
         // is 0 in the traces, not -1: never 0x1c)
         if (vehicle && !(best.surfaceA == 0xb && best.surfaceB == 0xb))
-            best.surfaceA = VehicleSurface(best.surfaceA, 0, best.pointA, &body.matrix[0][0], vehicleBottom,
+            best.surfaceA = VehicleSurface(best.surfaceA, 0, best.pointA,
+                                           vehicleMatrix ? vehicleMatrix : &body.matrix[0][0], vehicleBottom,
                                            best.normal, false);
         best.propInstance = ob.prop ? ob.instance : -1;
         float J[3];
@@ -1717,11 +1718,27 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
         // 2026-11-04: run 36's wheel step 478, depth 7.6e-6)
         if (found) {
             if (g.depth > deepest) deepest = g.depth;
+            // 0x5b36f0: point A relative to the body's matrix translation
+            // (+0x40), not its position (+0x80): a push-out earlier in this
+            // step moved only the position (run 36 tick 873: a hinged part's
+            // ground push-out lifted the car 2.9e-4 before the car's own
+            // ground contact). The pairs (0x5a3730) take +0x80 for a body
+            // whose +0 is 0 (every dynamic body traced), +0x40 otherwise.
+            g.relative = true;
+            for (int k = 0; k < 3; ++k) {
+                g.relA[k] = g.pointA[k] - body.matrix[3][k];
+                g.relB[k] = g.pointB[k];
+            }
             // the ground is a body too (+4 = -1, identity matrix, no shapes):
             // the vehicle's surface is renamed against it (0x1c on its
-            // bottom) and the listener hears the impulse (runs 16..20)
-            if (vehicle && !(g.surfaceA == 0xb && g.surfaceB == 0xb))
-                g.surfaceA = VehicleSurface(g.surfaceA, 0, g.pointA, &body.matrix[0][0], vehicleBottom, g.normal, true);
+            // bottom) and the listener hears the impulse (runs 16..20); the
+            // rename's point is the body's position (+0x80) + the record's
+            // point A (0x4e9160)
+            if (vehicle && vehicleGround && !(g.surfaceA == 0xb && g.surfaceB == 0xb)) {
+                const float pt[3] = { body.pos[0] + g.relA[0], body.pos[1] + g.relA[1], body.pos[2] + g.relA[2] };
+                g.surfaceA = VehicleSurface(g.surfaceA, 0, pt, vehicleMatrix ? vehicleMatrix : &body.matrix[0][0],
+                                            vehicleBottom, g.normal, true);
+            }
             float J[3];
             if (Respond(body, g, J, nullptr, nullptr, &onImpulse)) {
                 ++ground;

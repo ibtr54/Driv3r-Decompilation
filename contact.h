@@ -131,6 +131,15 @@ public:
     // its surface 0xb is renamed in its object and body pairs.
     bool vehicle = false;
     float vehicleBottom = 0;
+    // A hinged part (body +0x78 = the slot's listener) is renamed in the
+    // car's frame (0x4e9160 takes the vehicle's matrix through the
+    // listener), not its own: vehicleMatrix = the car body's matrix (null:
+    // body A's). 0x5c5260 calls 0x4e9160 only when A's or B's +0x74 is set:
+    // a static object's is its GEBI record, the ground's is 0, a hinged
+    // part's is 2 for the bumpers and part 4 (else 0) - vehicleGround says
+    // whether its ground contacts are renamed.
+    const float* vehicleMatrix = nullptr;
+    bool vehicleGround = true;
 
     // The smashable props (0x4e8f70): a contact with a broken prop, or one
     // the hit breaks, is dropped. Null: props are solid.

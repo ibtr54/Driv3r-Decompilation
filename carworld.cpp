@@ -156,8 +156,21 @@ int CarWorld::Step(const float controls[5], bool handbrake)
             // finds the record whose body it is)
             const float massA = b->mass;
             debrisContacts.onImpulse = [this, rec, massA](const BodyContact& c, const float J[3]) { Impact(c, J, rec, massA); };
+            // its surface 0xb renamed in the car's frame (0x4e9160 through
+            // the part's +0x78 = the slot's listener); its ground contacts
+            // only with body +0x74 = 2 (the bumpers and part 4, the joint
+            // record's +0x368); from the code (Ghidra), no traced contact
+            // has shown it yet (the parts' shapes are mostly not 0xb)
+            debrisContacts.vehicle = contacts.vehicle;
+            debrisContacts.vehicleBottom = contacts.vehicleBottom;
+            debrisContacts.vehicleMatrix = &body.matrix[0][0];
+            debrisContacts.vehicleGround =
+                reinterpret_cast<const int*>(group.group.members[b->member].rec)[0x368 / 4] != 0;
             const int hit = debrisContacts.Step(*b, partShapes, *collision, ground);
             debrisContacts.onImpulse = nullptr;
+            debrisContacts.vehicle = false;
+            debrisContacts.vehicleMatrix = nullptr;
+            debrisContacts.vehicleGround = true;
             if (hit && panelHitLog < 30 && log) {
                 ++panelHitLog;
                 log("Hinged part (record %d): %d world / %d ground contacts, deepest %.4f; car at (%.4f %.4f %.4f)", rec,
