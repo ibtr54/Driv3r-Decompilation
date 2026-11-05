@@ -33,6 +33,7 @@ int main(int argc, char** argv)
     if (!f) { perror(argv[2]); return 2; }
     static char line[1 << 17];
     int rays = 0, hitsMatch = 0, close = 0, surfaceMatch = 0, normalMatch = 0, missBoth = 0, shown = 0;
+    int distBits = 0, normalBits = 0;  // bit-equal distances / normals among the hits both see
     double worst = 0;
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "Xr ", 3) != 0) continue;
@@ -59,6 +60,10 @@ int main(int argc, char** argv)
                 const double dd = std::fabs(hit.distance - Fl(h[1]));
                 worst = std::max(worst, dd);
                 if (dd < 1e-3) ++close;
+                if (memcmp(&hit.distance, &h[1], 4) == 0) ++distBits;
+                if (memcmp(&hit.normal[0], &h[4], 4) == 0 && memcmp(&hit.normal[1], &h[5], 4) == 0 &&
+                    memcmp(&hit.normal[2], &h[6], 4) == 0)
+                    ++normalBits;
                 if (hit.surface == int(h[3])) ++surfaceMatch;
                 if (std::fabs(hit.normal[0] - Fl(h[4])) < 1e-3 && std::fabs(hit.normal[1] - Fl(h[5])) < 1e-3 &&
                     std::fabs(hit.normal[2] - Fl(h[6])) < 1e-3)
@@ -87,5 +92,6 @@ int main(int argc, char** argv)
     fclose(f);
     printf("%d rays: both miss %d, both hit %d (distance within 1e-3: %d, worst %.6f; surface equal %d, normal within 1e-3 %d)\n", rays, missBoth,
            hitsMatch, close, worst, surfaceMatch, normalMatch);
+    printf("  bit-equal among the common hits: distance %d, normal %d\n", distBits, normalBits);
     return 0;
 }

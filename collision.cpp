@@ -37,42 +37,67 @@ void Mul(const float* a, const float* b, float* out)
 }
 
 // The ray in the shape's frame (rows 0..2 of m are its axes in the world,
-// row 3 its origin).
+// row 3 its origin), as 0x5a3e40 makes it (BOOT_TO_MENU.md section 103):
+// the start through the rigid inverse [axes as columns; -(axis . origin)]
+// with D3DXVec4Transform ((x, y, z, 1) x inv, 0x605119: (x i0 + y i1) +
+// (z i2 + i3)), the offsets as ((a2 o.z + a1 o.y) + a0 o.x) for rows 0 and
+// 1 and ((a0 o.x + a2 o.z) + a1 o.y) for row 2 (panels.cpp InverseRows
+// with thirdXzy); the direction as ((d.x a0 + d.y a1) + d.z a2). The old
+// (p - origin) . axis was a few ulps off (run 23's wheel rays on a kerb).
 void ToLocal(const float* m, const float p[3], const float d[3], float lp[3], float ld[3])
 {
-    const float q[3] = { p[0] - m[12], p[1] - m[13], p[2] - m[14] };
+    const float* o = m + 12;
+    const float off[3] = { -1.0f * ((m[2] * o[2] + m[1] * o[1]) + m[0] * o[0]),
+                           -1.0f * ((m[6] * o[2] + m[5] * o[1]) + m[4] * o[0]),
+                           -1.0f * ((m[8] * o[0] + m[10] * o[2]) + m[9] * o[1]) };
     for (int j = 0; j < 3; ++j) {
-        lp[j] = q[0] * m[j * 4] + q[1] * m[j * 4 + 1] + q[2] * m[j * 4 + 2];
-        ld[j] = d[0] * m[j * 4] + d[1] * m[j * 4 + 1] + d[2] * m[j * 4 + 2];
+        // inv[0][j] = m[j*4], inv[1][j] = m[j*4+1], inv[2][j] = m[j*4+2]
+        lp[j] = (p[0] * m[j * 4] + p[1] * m[j * 4 + 1]) + (p[2] * m[j * 4 + 2] + 1.0f * off[j]);
+        ld[j] = (d[0] * m[j * 4] + d[1] * m[j * 4 + 1]) + d[2] * m[j * 4 + 2];
     }
 }
 
-// Entry distance (may be < 0: the start is inside) and local normal; false:
-// no hit in front of the start.
+// 0x5b6790 (ray / box, slabs per axis x, y, z): |d| >= 1e-5 ([0x78e9b0]):
+// u = (h - s) (1 / d), v = (-h - s) (1 / d) (1 / d once, [0x78e860] = 1),
+// lo / hi their order (u on a tie); the first such axis gives the entry lo
+// (normal -1 along it for d >= 0, else +1) and the exit hi; a later one
+// misses when exit < lo or hi < entry, takes the entry when entry < lo and
+// the exit when hi < exit. A small |d|: a miss when h < |s|. The caller
+// (0x5a3e40) keeps a hit with entry <= the length and exit >= 0; entry < 0:
+// the start is inside.
 bool RayBox(const float h[3], const float p[3], const float d[3], float& t, float n[3])
 {
-    float tmin = -1e30f, tmax = 1e30f;
-    int axis = -1;
-    float sign = 0;
+    bool first = true;
+    float entry = 0, exit = 0;
+    float nn[3] = { 0, 0, 0 };
     for (int i = 0; i < 3; ++i) {
-        if (std::fabs(d[i]) < 1e-12f) {
-            if (p[i] < -h[i] || p[i] > h[i]) return false;
-            continue;
+        const float s = p[i], hh = h[i], di = d[i];
+        if (std::fabs(di) >= 9.99999975e-06f) {
+            const float inv = 1.0f / di;
+            float lo = (hh - s) * inv, hi = (-hh - s) * inv;
+            if (hi < lo) std::swap(lo, hi);
+            if (first) {
+                nn[0] = nn[1] = nn[2] = 0;
+                nn[i] = di >= 0.0f ? -1.0f : 1.0f;
+                entry = lo;
+                first = false;
+            } else {
+                if (exit < lo || hi < entry) return false;
+                if (entry < lo) {
+                    nn[0] = nn[1] = nn[2] = 0;
+                    nn[i] = di >= 0.0f ? -1.0f : 1.0f;
+                    entry = lo;
+                }
+                if (exit <= hi) continue;
+            }
+            exit = hi;
+        } else if (hh < std::fabs(s)) {
+            return false;
         }
-        float t1 = (-h[i] - p[i]) / d[i], t2 = (h[i] - p[i]) / d[i];
-        if (t1 > t2) std::swap(t1, t2);
-        if (t1 > tmin) {
-            tmin = t1;
-            axis = i;
-            sign = d[i] > 0 ? -1.0f : 1.0f;
-        }
-        if (t2 < tmax) tmax = t2;
-        if (tmin > tmax) return false;
     }
-    if (tmax < 0 || axis < 0) return false;
-    t = tmin;
-    n[0] = n[1] = n[2] = 0;
-    n[axis] = sign;
+    if (exit < 0.0f) return false;
+    t = entry;
+    for (int k = 0; k < 3; ++k) n[k] = nn[k];
     return true;
 }
 
