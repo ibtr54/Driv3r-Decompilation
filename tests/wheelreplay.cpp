@@ -191,7 +191,7 @@ int main(int argc, char** argv)
                            b.vel[2] - pre.vel[2], t.vel[0] - pre.vel[0], t.vel[1] - pre.vel[1], t.vel[2] - pre.vel[2],
                            contacts.deepest);
                     {
-                        const BodyContact& g = contacts.lastGround;
+                        const BodyContact& g = contacts.groundFound;
                         printf("      ground: n %.9g %.9g %.9g depth %.9g A (%.9g %.9g %.9g) B y %.9g surface %d\n",
                                g.normal[0], g.normal[1], g.normal[2], g.depth, g.pointA[0], g.pointA[1], g.pointA[2],
                                g.pointB[1], g.surfaceB);

@@ -1710,7 +1710,12 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
             }
             if (found) g.surfaceA = shapes[s].surface;
         }
-        if (found && g.depth > 9.99999975e-06f) {
+        groundFound = found ? g : BodyContact();
+        // any depth > 0 is answered: 0x5b2960 / 0x5b3010 / 0x5b2a20 return 5
+        // when the deepest point beats [0x6e082c] = 0, and 0x5a99d0 hands
+        // it to 0x5c5260 with no other test (the port had 1e-5 here until
+        // 2026-11-04: run 36's wheel step 478, depth 7.6e-6)
+        if (found) {
             if (g.depth > deepest) deepest = g.depth;
             // the ground is a body too (+4 = -1, identity matrix, no shapes):
             // the vehicle's surface is renamed against it (0x1c on its

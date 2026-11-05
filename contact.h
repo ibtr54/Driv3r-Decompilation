@@ -145,6 +145,8 @@ public:
     int pairs = 0, contacts = 0, ground = 0;
     float deepest = 0;
     BodyContact lastGround;  // the last ground contact answered
+    // the deepest ground point of the last step (0: none), answered or not
+    BodyContact groundFound;
 
     // Called after each impulse against a static object with the contact
     // and the impulse on the body: the game's contact callback reaches the

@@ -239,6 +239,15 @@ int main(int argc, char** argv)
                 auto b = [](float x) { unsigned u; memcpy(&u, &x, 4); return u; };
                 printf("      [program, call %d tick %d] J %08x %08x %08x n %08x %08x %08x d %08x\n", g_call, g_tick, b(J[0]),
                        b(J[1]), b(J[2]), b(c.normal[0]), b(c.normal[1]), b(c.normal[2]), b(c.depth));
+                // the point relative to each group member (the traced DEc
+                // +0x60 / +0x70 are relative points)
+                const Articulated::Group& g = cw.group.group;
+                for (size_t k = 0; k < g.members.size(); ++k) {
+                    const RigidBody& r = *g.members[k].body;
+                    printf("        pA - m%zu (%.7f %.7f %.7f) pB - m%zu (%.7f %.7f %.7f)\n", k, c.pointA[0] - r.pos[0],
+                           c.pointA[1] - r.pos[1], c.pointA[2] - r.pos[2], k, c.pointB[0] - r.pos[0], c.pointB[1] - r.pos[1],
+                           c.pointB[2] - r.pos[2]);
+                }
             }
             cw.Impact(c, J);
         };

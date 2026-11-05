@@ -87,6 +87,18 @@ bool ReadUpvh(const std::vector<uint8_t>& d, size_t up, size_t size, VehicleData
         }
         v.wheels.push_back(w);
     }
+    // The UPVH loader 0x512c50 turns shapes in place (z-up -> y-up): every
+    // shape matrix of part 0's entry, then of each part with a damage
+    // record (+0x1a != 0xffff), becomes shape x T (D3DXMatrixMultiply
+    // 0x605392) with T's rows (1 0 0 0), (0 0 -1 0), (0 1 0 0), (0 0 0 1);
+    // an entry met twice is turned twice. Other entries (the wheels: no
+    // record) stay as stored (run 36's live wheel shape = the PDL bits,
+    // BOOT_TO_MENU.md section 99).
+    std::vector<int> turns(nentries, 0);
+    if (nparts > 0 && U16(d, parts + 0x14) < nentries) ++turns[U16(d, parts + 0x14)];
+    for (size_t i = 0; i < nparts; ++i)
+        if (U16(d, parts + i * 0x20 + 0x1a) != 0xffff && U16(d, parts + i * 0x20 + 0x14) < nentries)
+            ++turns[U16(d, parts + i * 0x20 + 0x14)];
     // An entry's shapes as the body gets them.
     auto readShapes = [&](uint32_t entry, std::vector<VehicleData::Shape>& out) {
         if (entry >= nentries) return;
@@ -100,19 +112,23 @@ bool ReadUpvh(const std::vector<uint8_t>& d, size_t up, size_t size, VehicleData
             shape.surface = d[sh + 0x51];
             for (int k = 0; k < 3; ++k) shape.size[k] = F32(d, sh + 4 * k);
             // The PDL is z-up (vehicle 6: the bounding box 0.88 x 2.29 x
-            // 0.49 about (0, 0.02, 0.33)); the body is y-up: each row
-            // (x, y, z) -> (x, z, -y), as the game's live shapes are (run
-            // 16's narrow phase dumps, BOOT_TO_MENU.md section 75; run 20's
-            // head-on contact sits on box 1's +z face, the body's front, as
-            // the damage parts' entries and hardpoints expect). Until
-            // 2026-10-23 the program turned them (-x, z, y), half a turn
-            // about y more: the car's boxes stood back to front.
-            for (int r = 0; r < 4; ++r) {
-                const float x = F32(d, sh + 0x10 + 16 * r), y = F32(d, sh + 0x14 + 16 * r), z = F32(d, sh + 0x18 + 16 * r);
-                shape.local[4 * r] = x;
-                shape.local[4 * r + 1] = z;
-                shape.local[4 * r + 2] = -y;
-                shape.local[4 * r + 3] = F32(d, sh + 0x1c + 16 * r);
+            // 0.49 about (0, 0.02, 0.33)); the turned shapes are y-up: each
+            // row (x, y, z) -> (x, z, -y) through the D3DX product (its
+            // zeros' signs as the game's: 0x605392 rows 0 / 3 as (p0 + p1) +
+            // (p2 + p3), rows 1 / 2 as ((p0 + p1) + p2) + p3). Until
+            // 2026-10-23 the program turned them (-x, z, y); until
+            // 2026-11-04 it turned every entry, the wheels' too.
+            for (int k = 0; k < 16; ++k) shape.local[k] = F32(d, sh + 0x10 + 4 * k);
+            for (int t = 0; t < turns[entry]; ++t) {
+                static const float T[16] = { 1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1 };
+                float o[16];
+                for (int r = 0; r < 4; ++r)
+                    for (int k = 0; k < 4; ++k) {
+                        const float* a = shape.local + 4 * r;
+                        const float p0 = a[0] * T[k], p1 = a[1] * T[4 + k], p2 = a[2] * T[8 + k], p3 = a[3] * T[12 + k];
+                        o[4 * r + k] = (r == 0 || r == 3) ? (p0 + p1) + (p2 + p3) : ((p0 + p1) + p2) + p3;
+                    }
+                memcpy(shape.local, o, sizeof(o));
             }
             out.push_back(shape);
         }
