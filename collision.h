@@ -80,12 +80,26 @@ public:
     // The objects whose bounding box overlaps [lo, hi] (each once; the
     // game's broad phase gives the body these pairs, contact.h).
     void Overlapping(const float lo[3], const float hi[3], std::vector<uint32_t>& out) const;
+    // The same objects in the game's pair order (BOOT_TO_MENU.md section
+    // 105): the broad phase 0x5a82d0 walks each cell's JNR! quadtree level
+    // by level (0x5bd7c0 / 0x5bd580: a node joins its level's list when its
+    // box, half a node wider on each side, overlaps [lo, hi] on x / z, and
+    // brings its keys; a child deeper than the next level re-queues its
+    // parent until then, 0x5bb510), and the pairs come level by level in
+    // the order they were found (0x5a68f0 / 0x5a5e70); objects of no key
+    // (the PMLD fallback) after them in index order.
+    void Ordered(const float lo[3], const float hi[3], std::vector<uint32_t>& out) const;
     const Object& ObjectAt(uint32_t i) const { return objects_[i]; }
     const Shape& ShapeAt(size_t i) const { return shapes_[i]; }
 
 private:
     std::vector<Shape> shapes_;
     std::vector<Object> objects_;
+    // the city's JNR! trees and, per collision key, its object (-1: none)
+    const CityPlacement* city_ = nullptr;
+    std::vector<int> keyObject_;
+    std::vector<uint8_t> keyed_;  // per object: made from a key
+    mutable std::vector<uint32_t> pending_;  // Ordered's scratch
     // Grid of kCell-unit squares on x / z.
     static constexpr float kCell = 32.0f;
     int x0_ = 0, z0_ = 0, nx_ = 0, nz_ = 0;

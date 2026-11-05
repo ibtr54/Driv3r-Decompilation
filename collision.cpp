@@ -205,6 +205,8 @@ void CollisionWorld::Build(const CityPlacement& city)
     shapes_.clear();
     objects_.clear();
     cells_.clear();
+    city_ = &city;
+    keyObject_.assign(city.collisionKeys.size(), -1);
     auto regionOf = [&](uint32_t region) -> const CityCollisionRegion* {
         for (const CityCollisionRegion& r : city.collision)
             if (uint32_t(r.region) == region && !r.pdl.empty()) return &r;
@@ -266,10 +268,14 @@ void CollisionWorld::Build(const CityPlacement& city)
     // id & 0xfff); the instances of no cell with keys (the region GEBI)
     // by their model's PMLD record.
     std::vector<bool> keyed(city.instances.size(), false);
-    for (const CityPlacement::CollisionKey& k : city.collisionKeys) {
+    for (size_t ki = 0; ki < city.collisionKeys.size(); ++ki) {
+        const CityPlacement::CollisionKey& k = city.collisionKeys[ki];
         keyed[k.instance] = true;
+        const size_t before = objects_.size();
         if (const CityCollisionRegion* reg = regionOf(uint32_t(k.id) >> 12)) addEntry(k.instance, *reg, k.id & 0xfffu);
+        if (objects_.size() > before) keyObject_[ki] = int(before);
     }
+    keyed_.assign(objects_.size(), 1);
     std::vector<bool> cellKeys(city.instances.size(), false);
     for (const CityCell& c : city.cells)
         if (c.instanceCount && keyed.size() >= c.firstInstance + c.instanceCount)
@@ -288,6 +294,7 @@ void CollisionWorld::Build(const CityPlacement& city)
             if (m.id == in.model)
                 for (uint32_t e = m.first; e < m.first + m.count; ++e) addEntry(ii, *reg, e);
     }
+    keyed_.resize(objects_.size(), 0);  // the PMLD fallback's
     // The grid.
     if (objects_.empty()) return;
     float lo[2] = { 1e30f, 1e30f }, hi[2] = { -1e30f, -1e30f };
@@ -445,6 +452,92 @@ void CollisionWorld::Overlapping(const float lo[3], const float hi[3], std::vect
                     continue;
                 out.push_back(i);
             }
+}
+
+void CollisionWorld::Ordered(const float lo[3], const float hi[3], std::vector<uint32_t>& out) const
+{
+    out.clear();
+    if (!city_) return;
+    // the objects the box overlaps at all (the pair stage's AABB test)
+    Overlapping(lo, hi, pending_);
+    if (pending_.empty()) return;
+    std::vector<uint8_t> want(objects_.size(), 0);  // (small worlds: fine)
+    for (uint32_t o : pending_) want[o] = 1;
+    // 0x5a82d0's walk over every cell's tree (the cells in file order; the
+    // game's list of loaded cells may order two cells differently)
+    struct Ref { int tree; int node; };
+    std::vector<std::vector<Ref>> levels(1);
+    std::vector<std::vector<int>> items(1);  // per level: collision keys
+    struct Queued { int key; Ref r; };
+    std::vector<Queued> ring;  // 0x5bb510: sorted by key, stable
+    auto requeue = [&](int key, Ref r) {
+        size_t at = 0;
+        for (; at < ring.size(); ++at) {
+            if (key < ring[at].key) break;
+            if (ring[at].key == key && ring[at].r.tree == r.tree && ring[at].r.node == r.node) return;
+        }
+        ring.insert(ring.begin() + std::ptrdiff_t(at), Queued{ key, r });
+    };
+    const std::vector<CityPlacement::PhysTree>& trees = city_->physTrees;
+    // 0x5bd580: the node's loose box against [lo, hi] (x / z); joins its
+    // level with its keys
+    auto visit = [&](Ref r) {
+        const CityPlacement::PhysTree& t = trees[size_t(r.tree)];
+        const CityNode& n = t.nodes[size_t(r.node)];
+        const float w = t.size / float(1 << (n.level & 0x1f));
+        if (!((float(n.x) - 0.5f) * w + t.origin[0] <= hi[0] && (float(n.z) - 0.5f) * w + t.origin[1] <= hi[2] &&
+              lo[0] <= (float(n.x + 1) + 0.5f) * w + t.origin[0] && lo[2] <= (float(n.z + 1) + 0.5f) * w + t.origin[1]))
+            return 0;
+        if (levels.size() <= n.level) levels.resize(size_t(n.level) + 1), items.resize(size_t(n.level) + 1);
+        levels[n.level].push_back(r);
+        for (int k = 0; k < n.count; ++k) {
+            const int key = t.keyRef[size_t(n.first) + size_t(k)];
+            if (key >= 0) items[n.level].push_back(key);
+        }
+        return 1;
+    };
+    int found = 0;
+    for (size_t ti = 0; ti < trees.size(); ++ti) {
+        if (trees[ti].nodes.empty()) continue;
+        const Ref root{ int(ti), 0 };
+        if (trees[ti].nodes[0].level == 0) found += visit(root);
+        else requeue(trees[ti].nodes[0].level, root);  // (never in Miami)
+    }
+    if (found || !ring.empty())
+        for (int level = 1; level < 32; ++level) {
+            if (levels.size() <= size_t(level)) levels.resize(size_t(level) + 1), items.resize(size_t(level) + 1);
+            int added = 0;
+            // 0x5bd7c0 on the previous level's nodes (those it found and the
+            // parents queued there): children of this level, deeper ones
+            // queue their parent under their own level
+            const std::vector<Ref> prev = levels[size_t(level) - 1];
+            for (const Ref& r : prev) {
+                const CityNode& n = trees[size_t(r.tree)].nodes[size_t(r.node)];
+                for (int c = 0; c < 4; ++c) {
+                    const int ch = n.child[c];
+                    if (!ch) continue;
+                    const int cl = trees[size_t(r.tree)].nodes[size_t(ch)].level;
+                    if (cl == level) added += visit(Ref{ r.tree, ch });
+                    else if (cl > level) requeue(cl, r);
+                }
+            }
+            // the queued parents join this level's list; those due at the
+            // next level leave the queue
+            added += int(ring.size());
+            for (const Queued& q : ring) levels[size_t(level)].push_back(q.r);
+            while (!ring.empty() && ring.front().key == level + 1) ring.erase(ring.begin());
+            if (added == 0 && ring.empty()) break;
+        }
+    for (const std::vector<int>& lv : items)
+        for (int key : lv) {
+            const int o = keyObject_[size_t(key)];
+            if (o >= 0 && want[size_t(o)]) {
+                out.push_back(uint32_t(o));
+                want[size_t(o)] = 0;
+            }
+        }
+    for (uint32_t o : pending_)
+        if (!keyed_[o] && want[o]) out.push_back(o);
 }
 
 std::vector<std::vector<float>> CollisionWorld::InstanceShapes(int instance) const

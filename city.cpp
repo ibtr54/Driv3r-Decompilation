@@ -57,6 +57,7 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
     dynamicModels.clear();
     propTypes.clear();
     collisionKeys.clear();
+    physTrees.clear();
     error_.clear();
     if (d.size() < 16 || memcmp(d.data(), "CHNK", 4) != 0) { error_ = "not a CHNK file"; return false; }
     // Top level: GESR regions, GEIR cells, IRCT, PINF, GEGL, PCSL. The GEBI
@@ -175,16 +176,44 @@ bool CityPlacement::Load(const std::vector<uint8_t>& d)
             gebi = true;
         }
         // the cell's collision keys (record indexes into this cell's GEBI)
-        if (gebi && jnr && jnrSize >= 0x20 && jnr + jnrSize <= d.size()) {
-            const size_t keys = jnr + U32(d, jnr + 0x18), n = U32(d, jnr + 0x1c);
-            if (keys + n * 4 > jnr + jnrSize) { error_ = "JNR! keys"; return false; }
+        // and its quadtree; the offsets count from the chunk's +0x10 (until
+        // 2026-11-05 the keys were read 16 bytes early: four keys made of
+        // the last node's bytes, the last four keys missing)
+        if (gebi && jnr && jnrSize >= 0x2c && jnr + jnrSize <= d.size()) {
+            const size_t base = jnr + 0x10;
+            const size_t keys = base + U32(d, jnr + 0x18), n = U32(d, jnr + 0x1c);
+            const size_t nodes = base + U32(d, jnr + 0x10), nn = U32(d, jnr + 0x14);
+            if (keys + n * 4 > jnr + jnrSize || nodes + nn * 16 > jnr + jnrSize) { error_ = "JNR!"; return false; }
+            PhysTree tree;
+            tree.size = F32(d, jnr + 0x20);
+            tree.origin[0] = F32(d, jnr + 0x24);
+            tree.origin[1] = F32(d, jnr + 0x28);
+            for (size_t i = 0; i < nn; ++i) {
+                uint16_t w[8];
+                memcpy(w, &d[nodes + i * 16], sizeof(w));
+                CityNode node;
+                node.first = w[0] & 0xfff;
+                node.count = w[0] >> 12;
+                node.level = w[1];
+                node.x = w[2];
+                node.z = w[3];
+                for (int c = 0; c < 4; ++c) node.child[c] = w[4 + c] < nn ? w[4 + c] : 0;
+                if (size_t(node.first) + node.count > n) node.count = 0;
+                tree.nodes.push_back(node);
+            }
             const size_t records = instances.size() - first;
             for (size_t i = 0; i < n; ++i) {
                 uint16_t id, rec;
                 memcpy(&id, &d[keys + 4 * i], 2);
                 memcpy(&rec, &d[keys + 4 * i + 2], 2);
-                if (rec < records) collisionKeys.push_back({ uint32_t(first + rec), id });
+                if (rec < records) {
+                    tree.keyRef.push_back(int(collisionKeys.size()));
+                    collisionKeys.push_back({ uint32_t(first + rec), id });
+                } else {
+                    tree.keyRef.push_back(-1);
+                }
             }
+            physTrees.push_back(std::move(tree));
         }
         if (gebi && scnd) {
             CityCell cell;

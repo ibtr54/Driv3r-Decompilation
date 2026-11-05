@@ -1627,7 +1627,9 @@ int BodyContacts::Step(RigidBody& body, const std::vector<VehicleData::Shape>& s
         hi[k] = bw[12 + k] + e;
     }
     const size_t first = shapes.size() > 1 ? 1 : 0;
-    if (mode != 2) world.Overlapping(lo, hi, near_);
+    // the static objects in the game's pair order (the JNR! quadtrees'
+    // walk, collision.h Ordered; BOOT_TO_MENU.md section 105)
+    if (mode != 2) world.Ordered(lo, hi, near_);
     else near_.clear();
     for (uint32_t o : near_) {
         ++pairs;

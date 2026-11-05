@@ -209,6 +209,21 @@ public:
         uint16_t id;
     };
     std::vector<CollisionKey> collisionKeys;
+    // A cell's JNR! as the physics' static quadtree (BOOT_TO_MENU.md section
+    // 105): the chunk's second half (+0x10) is the tree's header: +0x00
+    // nodes (offset from +0x10), +0x04 node count, +0x08 keys (offset from
+    // +0x10), +0x0c key count, +0x10 the cell's size, +0x14 / +0x18 its
+    // origin x / z. Nodes as SCND's (16 bytes: first key (12 bits) and
+    // count (4), level, x, z, four children; node 0 the root); a key {u16
+    // id, u16 GEBI record}. keyRef: per key its index in collisionKeys
+    // (-1: none).
+    struct PhysTree
+    {
+        float size = 0, origin[2] = {};
+        std::vector<CityNode> nodes;
+        std::vector<int> keyRef;
+    };
+    std::vector<PhysTree> physTrees;
     // The smashable props: the model ids of the GEPD / HRDT groups ('AWHF'
     // records like the vehicles' UPVH, model id at +0x14; 0x44f823 loads
     // them). Their instances (GEBI ranges 3 / 4) are static objects of group
